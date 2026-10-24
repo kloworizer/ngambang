@@ -15,35 +15,42 @@ Mockup: https://claude.ai/artifact/S2ADpcUg2EJqHLpewaD7uZ
 
 ### 1.1 What ships in v0.1
 
-| # | Feature | Persona | Why it is in v0.1 |
-|---|---------|---------|-------------------|
-| 1 | Island shell: Seam / Orb / Tag / Slips, any-edge docking, springs | all | The product's identity; everything else hangs off it |
-| 2 | **Media: every source** (all SMTC sessions, switchable) | all | Most-used feature of any island |
-| 3 | **Per-app mixer** (volume/mute for every process making sound) | all, gamer | Makes "control all apps" true even for apps without media controls |
-| 4 | Orb gestures: wheel = volume, middle-click = play/pause | all | Zero-UI control, unique to an edge orb |
-| 5 | **`ngambang` CLI + named pipe** (notify / progress / done / run) | coder | One integration point for every tool, script, hook and agent |
-| 6 | Long-command tags via PowerShell / bash / zsh hooks | coder | "Tell me when the build finishes" without opening anything |
-| 7 | **Ports slip** (listening localhost ports → open / stop) | coder | Answers "what's on :3000?" in one glance |
-| 8 | **Dev clipboard** (JWT, JSON, base64, Unix time, UUID, hex colour, tracking URLs) | coder | High daily value, pure local logic |
-| 9 | **Game detection + Seam mode** (fullscreen → 3 px line) | gamer | The island must never get in the way of a game |
-| 10 | **Game peek + Game slip** (session time, GPU %, VRAM, NVIDIA temp, ping) | gamer | Glanceable stats without an overlay injector |
-| 11 | Captures watcher (new screenshot / clip → tag, copy) | gamer | Closes the "where did my clip go?" loop |
-| 12 | Break reminder + per-game daily time | gamer | Healthy, cheap, distinctive |
-| 13 | Performance power plan switch during games (opt-in) | gamer | One-click benefit, restored on exit |
-| 14 | Privacy beacon (mic / camera in use → alert, mute mic) | all | Must interrupt even in game mode; cheap to build |
-| 15 | Focus timer | coder | Reuses the tide ring; break reminder shares its code |
+There are no fixed personas or profiles. Everything beyond the shell is a
+**module** the user turns on or off on its own — from the tray menu
+(Modules ▸) or `[modules]` in `config.toml`. A module that is off starts no
+thread, registers no callback and allocates nothing.
+
+| # | Feature | Module key | Why it is in v0.1 |
+|---|---------|------------|-------------------|
+| 1 | Island shell: Seam / Orb / Tag / Slips, any-edge docking, eased morph transitions | *(always on)* | The product's identity; everything else hangs off it |
+| 2 | Game/fullscreen detection → Seam | *(always on)* | The island must never get in the way of a fullscreen app |
+| 3 | **Media: every source** (all SMTC sessions, switchable) | `media` | Most-used feature of any island |
+| 4 | **Per-app mixer** (volume/mute for every process making sound) | `mixer` | Makes "control all apps" true even for apps without media controls |
+| 5 | Orb gestures: wheel = volume, Shift+wheel = skip, middle-click = play/pause | `media` / `mixer` | Zero-UI control, unique to an edge orb |
+| 6 | **`ngambang` CLI + named pipe** (notify / progress / done / run) | `commands` | One integration point for every tool, script, hook and agent |
+| 7 | Long-command tags via PowerShell / bash / zsh hooks | `commands` | "Tell me when the build finishes" without opening anything |
+| 8 | **Ports slip** (listening localhost ports → open / stop) | `ports` | Answers "what's on :3000?" in one glance |
+| 9 | **Dev clipboard** (JWT, JSON, base64, Unix time, UUID, hex colour, tracking URLs) | `clipboard` | High daily value, pure local logic |
+| 10 | **Game peek + Game slip** (session time, GPU %, VRAM, NVIDIA temp, ping) | `game` | Glanceable stats without an overlay injector |
+| 11 | Break reminder, per-game daily time, optional power-plan switch | `game` | Healthy, cheap, distinctive |
+| 12 | Captures watcher (new screenshot / clip → tag, copy) | `captures` | Closes the "where did my clip go?" loop |
+| 13 | Privacy beacon (mic / camera in use → alert, mute mic) | `privacy` | Must interrupt even during games; cheap to build |
+| 14 | Focus timer | `timer` | Reuses the tide ring |
 
 ### 1.2 Deliberately *not* in v0.1
 
 | Feature | Reason | Target |
 |---------|--------|--------|
+| Album art in the media slip | WIC decode on demand; v0.1 shows a tinted placeholder tile | v0.2 |
+| Embedded Instrument Sans / IBM Plex Mono | In-memory DirectWrite font loader; v0.1 uses Segoe UI Variable and Cascadia Mono/Consolas | v0.2 |
+| Physical spring animations | `Spring*NaturalMotionAnimation.FinalValue` needs an `IReference<T>` windows-rs cannot build without a custom COM object; v0.1 uses overshooting cubic-bezier key frames | v0.2 |
 | Chat / notification stack | `UserNotificationListener` needs package identity (MSIX or sparse package) and user consent | v0.3 |
 | FPS / frame-time | PresentMon ETW needs admin or *Performance Log Users* membership | v0.2 (opt-in) |
 | AMD / Intel GPU temperature | Needs ADLX / vendor SDKs; CPU temp needs a kernel driver (never ship WinRing0) | v0.2 (AMD) |
 | Harbor (file shelf), colour picker, Docker slip, CI status | Valuable but not core to coder/gamer launch | v0.2–v0.3 |
 | Output-device switching | Only possible via undocumented `IPolicyConfig` | v0.2 behind a flag |
 | Toggling Windows Do Not Disturb | No public API exists; Ngambang suppresses only its own tags | — |
-| Waktu Sholat, social screen-time, light theme, plugin API | Later personas | v0.3+ |
+| Waktu Sholat, social screen-time, light theme, plugin API | Later modules | v0.3+ |
 
 ### 1.3 "Control all apps" — the exact promise
 
@@ -116,9 +123,10 @@ High contrast mode (`SPI_GETHIGHCONTRAST`): switch to system colours
 
 ### 3.2 Typography
 
-- Sans: **Instrument Sans** (OFL), embedded Latin subset, loaded with
-  `IDWriteInMemoryFontFileLoader`. Fallback: Segoe UI Variable.
-- Mono: **IBM Plex Mono** (OFL), embedded subset. Fallback: Cascadia Mono → Consolas.
+- Sans: **Segoe UI Variable Text** (Windows 11), falling back to Segoe UI.
+- Mono: **Cascadia Mono**, falling back to Consolas.
+- v0.2: embed Instrument Sans and IBM Plex Mono (both OFL) with
+  `IDWriteInMemoryFontFileLoader` to match the mockup exactly.
 - Sizes: label 11 (mono, +8 % tracking, uppercase), body 13–14, title 17 semibold,
   big numerals 40–44 mono.
 - Ship OFL licence texts in `assets/fonts/`.
@@ -152,11 +160,15 @@ animations stay on the compositor.
 
 ### 3.5 Motion
 
-| Transition | Animation | Params (starting point, tune on device) |
-|------------|-----------|-------------------------------------------|
-| Orb → Tag | `SpringVector3NaturalMotionAnimation` on Size/Offset | damping 0.80, period 45 ms |
-| Tag → Slips | spring on Size + Offset | damping 0.72, period 50 ms |
-| Slips → Orb | spring | damping 0.95, period 40 ms |
+Every state change morphs: the new scene's rounded clip starts as the old
+shape and grows (or shrinks) to the new one while the two scenes crossfade.
+All of it runs as compositor key-frame animations inside DWM.
+
+| Transition | Animation (v0.1) | Params |
+|------------|------------------|--------|
+| Growing (Orb → Tag → Slips) | clip Size + Offset key frames | cubic-bezier (0.34, 1.56, 0.64, 1) — slight overshoot, 340 ms |
+| Shrinking (Slips → Orb) | clip Size + Offset key frames | cubic-bezier (0.22, 1, 0.36, 1), 240 ms |
+| Crossfade | Opacity | in 110 ms, out 130 ms |
 | Tab flip | content crossfade 120 ms + 8 DIP slide | cubic ease-out |
 | Seam ↔ Orb | opacity 150 ms | linear |
 | Pause wave | `Scale.Y` 250 ms | ease-out |
@@ -244,8 +256,9 @@ Hotkey via `RegisterHotKey`; it grants foreground rights, so the window may
 
 ### 4.6 Tray, startup, single instance
 
-- Tray icon (`Shell_NotifyIconW`): Dock edge ▸, Profile ▸ (Coder / Gamer / Minimal),
-  Pause island, Open config, Start with Windows ✓, Quit.
+- Tray icon (`Shell_NotifyIconW`): Modules ▸ (one check item per module),
+  Dock edge ▸, Pause island, Start with Windows ✓, Open config file, Open log
+  folder, Quit. Left-click the tray icon opens the slips.
 - Autostart: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 - Single instance: mutex `Local\Ngambang-<user SID>`. A second launch with no
   arguments flashes the orb and exits; with arguments it runs as the CLI (§6.1).
@@ -266,9 +279,9 @@ Hotkey via `RegisterHotKey`; it grants foreground rights, so the window may
   `PlaybackInfo.Controls.Is…Enabled`.
 - App name: packaged AUMID → `AppInfo.DisplayInfo.DisplayName`; unpackaged
   (e.g. `Foo.exe`) → the exe's `FileDescription`, else the base name.
-- Album art: `MediaProperties.Thumbnail` → `OpenReadAsync` → WIC decode to
-  120 × 120 premultiplied BGRA → drawing surface. Decode only when the slip is
-  open; release the WIC factory and bitmap on collapse.
+- Album art (v0.2): `MediaProperties.Thumbnail` → `OpenReadAsync` → WIC decode to
+  120 × 120 premultiplied BGRA → drawing surface, only while the slip is
+  open. v0.1 draws a tinted placeholder tile.
 - Time label redraws once per second **only while the slip or tag is visible**.
 
 ### 5.2 Mixer (WASAPI)
@@ -304,8 +317,11 @@ Hotkey via `RegisterHotKey`; it grants foreground rights, so the window may
 
 ### 6.1 CLI
 
-Same binary; any argument switches to CLI mode, which connects to the pipe,
-sends one line, prints nothing on success, and exits.
+Two executables ship side by side:
+
+- `ngambangw.exe` — the island (GUI subsystem, no console window). Autostart points here.
+- `ngambang.exe` — the console CLI. With no arguments it starts `ngambangw.exe`;
+  otherwise it connects to the pipe, sends one line, prints nothing on success, and exits.
 
 ```
 ngambang notify <title> [--id <id>] [--progress <0..1>] [--level info|ok|warn|fail]
@@ -503,47 +519,43 @@ Opens on hotkey, or when the user Alt-Tabs to the desktop.
 `%APPDATA%\Ngambang\config.toml`, hot-reloaded (`ReadDirectoryChangesW` on the folder).
 Invalid values are ignored with a one-time tag `config: <key> invalid`.
 
-```toml
-profile = "coder"            # coder | gamer | minimal — which slips are enabled
+The file written on first run is `DEFAULT_TOML` in `crates/core/src/config.rs`
+(a test keeps it identical to `Config::default()`). Abridged:
 
+```toml
 [dock]
-edge = "left"                # left | right | top | bottom
+edge = "left"              # left | right | top | bottom
 offset = 0.45
 monitor = "primary"
 hotkey = "Win+Alt+Space"
+hide_in_fullscreen = true
 
-[media]
-enabled = true
-show_system_sounds = false
-volume_step = 2
+[modules]                  # turn any of these off; the tray menu does the same
+media = true
+mixer = true
+commands = true
+ports = true
+clipboard = true
+timer = true
+game = true
+captures = true
+privacy = true
 
-[coder]
-enabled = true
+[commands]
 long_command_s = 30
-ignore_commands = ["vim", "nvim", "less", "ssh", "top", "htop", "man"]
-clipboard_tags = true
-ports_min = 1024
+ignore = ["vim", "nvim", "less", "more", "ssh", "top", "htop", "man", "watch"]
 
-[gamer]
-enabled = true
-games = []                   # exe names forced to count as games
-not_games = []               # exe names that never count
+[game]
+games = []
+not_games = []
 break_after_min = 90
-ping_host = "gateway"        # "gateway" or a host/IP
-capture_dirs = []
-power_plan = ""              # GUID; empty = don't switch
-
-[privacy]
-beacon = true
-hide_from_capture = false
-
-[experimental]
-power_overlay = false
+ping_host = "gateway"
+power_plan = ""
 ```
 
-Profiles: `coder` = media, coder, privacy, timer; `gamer` = media, gamer,
-privacy; `minimal` = media, privacy. Game detection + Seam is always on.
-Disabled modules allocate nothing and register no callbacks.
+Tray toggles and orb drags rewrite only the affected `key = value` lines, so
+comments survive. Unknown keys are ignored; a bad value resets only its table
+and shows a one-time tag.
 
 ---
 
@@ -553,25 +565,26 @@ Disabled modules allocate nothing and register no callbacks.
 
 ```
 ngambang/
-├─ Cargo.toml                 # workspace, shared release profile
+├─ Cargo.toml                 # workspace, version, shared release profile
 ├─ crates/
 │  ├─ core/                   # NO Windows deps — builds and tests on any OS
-│  │  ├─ model.rs             # Model, Event, Effect, update()
-│  │  ├─ priority.rs          # §4.4 ordering, tag queue
-│  │  ├─ layout.rs            # geometry per edge/DPI, hit regions
-│  │  ├─ protocol.rs          # pipe messages (serde)
+│  │  ├─ model.rs             # Model, Event, Effect, update() — the state machine
+│  │  ├─ view.rs              # Model → Scene (primitives + hit regions)
+│  │  ├─ icons.rs             # line icons from primitives
+│  │  ├─ layout.rs            # window box and placement per edge
+│  │  ├─ protocol.rs          # pipe messages, limits, rate limiter
 │  │  ├─ clipboard.rs         # §6.5 detectors and transforms
-│  │  ├─ games.rs             # classification rules
-│  │  └─ config.rs            # TOML schema + defaults + validation
-│  ├─ platform/               # windows-rs; everything that touches the OS
-│  │  ├─ window.rs  composition.rs  draw.rs (D2D/DWrite)  tray.rs  hotkey.rs
-│  │  ├─ media.rs (SMTC)  audio.rs (WASAPI)
-│  │  ├─ pipe.rs  ports.rs  clipboard.rs
-│  │  ├─ gaming.rs (appbar, foreground, PDH, NVML, ICMP, power)
-│  │  ├─ captures.rs  privacy.rs  watcher.rs
-│  └─ app/                    # binary: arg parsing (lexopt), wiring, CLI mode
-├─ assets/fonts/              # subsets + OFL licences
-├─ assets/hooks/              # powershell.ps1, bash.sh, zsh.zsh
+│  │  ├─ config.rs            # TOML schema, defaults, validation, in-place edits
+│  │  ├─ games.rs  hotkey.rs  format.rs  geometry.rs  theme.rs
+│  ├─ platform/src/win/       # windows-rs; everything that touches the OS
+│  │  ├─ app.rs               # window, message loop, effect execution
+│  │  ├─ comp.rs  gfx.rs      # compositor + Direct2D/DirectWrite
+│  │  ├─ media.rs  audio.rs   # SMTC, WASAPI
+│  │  ├─ pipe.rs  cli.rs  ports.rs  clipboard.rs  system.rs  watch.rs  tray.rs
+│  │  └─ selftest.rs  log.rs  util.rs
+│  └─ app/                    # binaries: ngambang (CLI), ngambangw (island); hook templates
+├─ scripts/version.py         # release versioning
+├─ site/                      # GitHub Pages
 └─ docs/                      # SPEC.md, integrations.md
 ```
 
@@ -663,14 +676,19 @@ strip = true
 
 ## 13. Milestones
 
-| M | Scope | Done when |
-|---|-------|-----------|
-| M0 | Workspace, window, compositor, D2D, orb drawn on left edge, tray Quit, config load | `--self-test` passes in CI |
-| M1 | All states, springs, hover/click/keyboard/hotkey, 4-edge docking + drag, multi-monitor, DPI, reduced motion | §4 behaviours verified manually |
-| M2 | Media: SMTC sources, slip, mixer, orb gestures, tide ring | §5.3 passes |
-| M3 | Coder: pipe, CLI, hooks, ports, dev clipboard, focus timer | §6.7 passes |
-| M4 | Gamer: detection, Seam/peek, game slip, captures, break, power plan | §7.7 passes |
-| M5 | Privacy beacon, error isolation, logging, perf gate, signing, zip + winget | §2.1 budgets met, v0.1 tagged |
+Status as of v0.1.0: code for M0–M4 is written and type-checked/linted for
+Windows; logic is unit-tested on every OS; CI builds both architectures and
+runs `--self-test`. Behaviour on real hardware still needs the manual matrix
+in §12.
+
+| M | Scope | Done when | v0.1.0 |
+|---|-------|-----------|--------|
+| M0 | Workspace, window, compositor, D2D, orb on the edge, tray, config | `--self-test` passes in CI | done |
+| M1 | All states, morph transitions, hover/click/keyboard/hotkey, 4-edge docking + drag, multi-monitor, DPI, reduced motion | §4 behaviours verified manually | built, needs manual check |
+| M2 | Media: SMTC sources, slip, mixer, orb gestures, tide ring | §5.3 passes | built, needs manual check |
+| M3 | Commands: pipe, CLI, hooks; ports; dev clipboard; focus timer | §6.7 passes | built, needs manual check |
+| M4 | Game: detection, Seam/peek, game slip, captures, break, power plan | §7.7 passes | built, needs manual check |
+| M5 | Privacy beacon, error isolation, logging, perf gate, signing, zip + winget | §2.1 budgets met | beacon, logging, zip done; perf gate, signing, winget open |
 
 ## 14. Roadmap after v0.1
 

@@ -1,0 +1,22 @@
+[package]
+name = "ngambang"
+description = "An edge-docked floating island for Windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+default-run = "ngambang"
+
+[[bin]]
+name = "ngambang"
+path = "src/main.rs"
+
+[[bin]]
+name = "ngambangw"
+path = "src/bin/ngambangw.rs"
+
+[dependencies]
+ngambang-core.workspace = true
+ngambang-platform.workspace = true
+lexopt.workspace = true

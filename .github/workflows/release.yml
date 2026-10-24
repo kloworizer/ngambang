@@ -1,0 +1,129 @@
+name: Release
+
+# Two ways to release:
+#  - push a tag `vX.Y.Z` that matches the version in Cargo.toml, or
+#  - run this workflow by hand, optionally bumping the version first
+#    (it commits the bump, tags it and releases in one go).
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Bump the version before releasing ("none" releases the version already in Cargo.toml)
+        type: choice
+        options: [none, patch, minor, major]
+        default: none
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Version & tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Work out the version
+        id: v
+        env:
+          BUMP: ${{ inputs.bump || 'none' }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version=$(python3 scripts/version.py check "${GITHUB_REF_NAME}")
+          else
+            if [ "${BUMP}" != "none" ]; then
+              version=$(python3 scripts/version.py bump "${BUMP}")
+              cargo update --workspace --offline || cargo update --workspace
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git commit -am "Release v${version}"
+              git push origin "HEAD:${GITHUB_REF_NAME}"
+            else
+              version=$(python3 scripts/version.py current)
+            fi
+            if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+              echo "::error::Tag v${version} already exists. Bump the version (patch/minor/major) to release again."
+              exit 1
+            fi
+            git tag -a "v${version}" -m "Ngambang v${version}"
+            git push origin "v${version}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: prepare
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x64
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Self-test
+        if: matrix.arch == 'x64'
+        run: target/${{ matrix.target }}/release/ngambang.exe self-test
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "ngambang-${{ needs.prepare.outputs.version }}-windows-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/ngambang.exe, target/${{ matrix.target }}/release/ngambangw.exe, README.md, LICENSE, CHANGELOG.md -Destination $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: ngambang-*.zip*
+
+  publish:
+    name: Publish GitHub release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python3 scripts/version.py notes "${VERSION}" > notes.md
+          gh release create "${TAG}" dist/* --title "Ngambang ${VERSION}" --notes-file notes.md --verify-tag

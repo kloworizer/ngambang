@@ -1,0 +1,1350 @@
+//! Turn the model into a [`Scene`]: drawing primitives plus hit regions, in
+//! DIPs local to the scene. The platform renders primitives with Direct2D and
+//! animates between scenes with the compositor.
+
+use crate::clipboard::{self, ClipKind};
+use crate::config::ModuleId;
+use crate::format;
+use crate::geometry::{Color, Edge, Point, Rect, Size};
+use crate::icons::{arc_points, icon_prims, wave_points};
+use crate::model::*;
+use crate::theme::*;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Weight {
+    Regular,
+    Medium,
+    Semibold,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextStyle {
+    pub size: f32,
+    pub weight: Weight,
+    pub mono: bool,
+}
+
+impl TextStyle {
+    pub const LABEL: TextStyle = TextStyle { size: 11.0, weight: Weight::Medium, mono: true };
+    pub const BODY: TextStyle = TextStyle { size: 14.0, weight: Weight::Regular, mono: false };
+    pub const BODY_MEDIUM: TextStyle = TextStyle { size: 14.0, weight: Weight::Medium, mono: false };
+    pub const SMALL: TextStyle = TextStyle { size: 13.0, weight: Weight::Regular, mono: false };
+    pub const TITLE: TextStyle = TextStyle { size: 17.0, weight: Weight::Semibold, mono: false };
+    pub const MONO: TextStyle = TextStyle { size: 13.0, weight: Weight::Regular, mono: true };
+    pub const MONO_SMALL: TextStyle = TextStyle { size: 12.0, weight: Weight::Regular, mono: true };
+    pub const BIG: TextStyle = TextStyle { size: 40.0, weight: Weight::Medium, mono: true };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Align {
+    Start,
+    Center,
+    End,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Prim {
+    RoundRect {
+        rect: Rect,
+        radius: f32,
+        fill: Option<Color>,
+        stroke: Option<(Color, f32)>,
+    },
+    Circle {
+        cx: f32,
+        cy: f32,
+        r: f32,
+        fill: Option<Color>,
+        stroke: Option<(Color, f32)>,
+    },
+    Polyline {
+        points: Vec<Point>,
+        width: f32,
+        color: Color,
+        closed: bool,
+    },
+    Polygon {
+        points: Vec<Point>,
+        fill: Color,
+    },
+    /// Single line unless `wrap`; overflow is trimmed with an ellipsis and clipped to `rect`.
+    Text {
+        rect: Rect,
+        text: String,
+        style: TextStyle,
+        color: Color,
+        align: Align,
+        wrap: bool,
+    },
+}
+
+impl Prim {
+    pub fn bounds(&self) -> Rect {
+        match self {
+            Prim::RoundRect { rect, .. } | Prim::Text { rect, .. } => *rect,
+            Prim::Circle { cx, cy, r, .. } => Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r),
+            Prim::Polyline { points, .. } | Prim::Polygon { points, .. } => {
+                let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                for p in points {
+                    x0 = x0.min(p.x);
+                    y0 = y0.min(p.y);
+                    x1 = x1.max(p.x);
+                    y1 = y1.max(p.y);
+                }
+                Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum HitKind {
+    Click(Action),
+    Slider(SliderTarget),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hit {
+    pub rect: Rect,
+    pub kind: HitKind,
+    /// Accessible name, also used for keyboard focus.
+    pub label: String,
+}
+
+/// The progress ring around the orb, animated by the compositor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RingSpec {
+    pub center: Point,
+    pub radius: f32,
+    pub width: f32,
+    pub color: Color,
+    /// Fraction drawn now, 0..=1.
+    pub value: f32,
+    /// Growth per millisecond; 0 = static.
+    pub rate_per_ms: f32,
+}
+
+impl RingSpec {
+    /// True when `self` is what `prev` would show after `elapsed_ms` — the
+    /// running animation can keep going instead of restarting.
+    pub fn continues(&self, prev: &RingSpec, elapsed_ms: u64) -> bool {
+        let predicted = (prev.value + prev.rate_per_ms * elapsed_ms as f32).min(1.0);
+        self.color == prev.color
+            && self.center == prev.center
+            && (self.rate_per_ms - prev.rate_per_ms).abs() < 1e-9
+            && (self.value - predicted).abs() < 0.01
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SceneKind {
+    Hidden,
+    Seam,
+    Orb,
+    Tag,
+    Slip(ModuleId),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Scene {
+    pub kind: SceneKind,
+    pub size: Size,
+    /// Sits directly on the screen edge (the Seam).
+    pub flush: bool,
+    /// Corner radius for the compositor's morph clip.
+    pub clip_radius: f32,
+    pub prims: Vec<Prim>,
+    pub hits: Vec<Hit>,
+    pub ring: Option<RingSpec>,
+}
+
+impl Scene {
+    pub fn hit_at(&self, x: f32, y: f32) -> Option<&Hit> {
+        // Last added wins: buttons are added after the surfaces under them.
+        self.hits.iter().rev().find(|h| h.rect.contains(x, y))
+    }
+}
+
+pub trait TextMeasure {
+    fn width(&self, text: &str, style: TextStyle) -> f32;
+}
+
+/// Rough measure for tests and as a fallback.
+pub struct ApproxMeasure;
+
+impl TextMeasure for ApproxMeasure {
+    fn width(&self, text: &str, style: TextStyle) -> f32 {
+        let per = if style.mono { 0.6 } else { 0.52 };
+        text.chars().count() as f32 * style.size * per
+    }
+}
+
+/// What a hover tag or Seam peek says.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Summary {
+    pub icon: Icon,
+    pub color: Color,
+    pub text: String,
+    pub detail: Option<String>,
+    pub wave: bool,
+}
+
+pub fn summary(m: &Model) -> Option<Summary> {
+    let now = m.now_ms;
+    let game_line = || {
+        m.game.as_ref().map(|g| {
+            let mut parts = vec![format::clock(now.saturating_sub(g.started_ms) / 1000)];
+            if let Some(v) = m.stats.gpu_pct {
+                parts.push(format!("GPU {v:.0}%"));
+            }
+            if let Some(t) = m.stats.temp_c {
+                parts.push(format!("{t}°C"));
+            }
+            if let Some(p) = m.stats.ping_ms {
+                parts.push(format!("ping {p}ms"));
+            }
+            Summary { icon: Icon::Game, color: GAME, text: parts.join("  "), detail: None, wave: false }
+        })
+    };
+    if m.fullscreen == Fullscreen::Game {
+        if let Some(s) = game_line() {
+            return Some(s);
+        }
+    }
+    if let Some(p) = m.privacy.first() {
+        let (icon, what) = match p.device {
+            Device::Microphone => (Icon::Mic, "Microphone"),
+            Device::Camera => (Icon::Camera, "Camera"),
+        };
+        return Some(Summary {
+            icon,
+            color: PRIVACY,
+            text: format!("{what} · {}", p.app),
+            detail: Some(format::clock(now.saturating_sub(p.since_ms) / 1000)),
+            wave: false,
+        });
+    }
+    if let Some(rem) = m.timer.remaining(now) {
+        let paused = !m.timer.is_running();
+        return Some(Summary {
+            icon: Icon::Clock,
+            color: GAME,
+            text: if paused { "Focus paused".into() } else { "Focus".into() },
+            detail: Some(format::clock(rem / 1000)),
+            wave: false,
+        });
+    }
+    if let Some(j) = m.jobs.iter().find(|j| matches!(j.status, JobStatus::Running { .. })) {
+        let detail = match j.status {
+            JobStatus::Running { progress: Some(p) } => format!("{:.0}%", p * 100.0),
+            _ => format::duration_short(now.saturating_sub(j.started_ms) / 1000),
+        };
+        return Some(Summary { icon: Icon::Terminal, color: CODER, text: j.title.clone(), detail: Some(detail), wave: false });
+    }
+    if let Some(s) = m.front_media().filter(|s| !s.title.is_empty()) {
+        return Some(Summary {
+            icon: Icon::Note,
+            color: MEDIA,
+            text: s.title.clone(),
+            detail: Some(format::clock(s.position_at(now) / 1000)),
+            wave: s.playing,
+        });
+    }
+    if let Some(s) = game_line() {
+        return Some(s);
+    }
+    m.jobs.first().map(|j| {
+        let (icon, color, detail) = match &j.status {
+            JobStatus::Done { ok: true, duration_s, .. } => (Icon::Check, OK, duration_s.map(|d| format::duration_short(d.round() as u64))),
+            JobStatus::Done { ok: false, code, .. } => {
+                (Icon::Cross, PRIVACY, Some(code.map(|c| format!("exit {c}")).unwrap_or_else(|| "failed".into())))
+            }
+            _ => (Icon::Terminal, CODER, None),
+        };
+        Summary { icon, color, text: j.title.clone(), detail, wave: false }
+    })
+}
+
+/// The ring shown on the orb and tag, if any.
+pub fn ring(m: &Model) -> Option<(Color, f32, f32)> {
+    let now = m.now_ms;
+    if now < m.volume_flash_until {
+        return Some((TEXT, m.mixer.master.level, 0.0));
+    }
+    if !m.privacy.is_empty() {
+        return Some((PRIVACY, 1.0, 0.0));
+    }
+    match m.timer {
+        FocusTimer::Running { total_ms, .. } => return Some((GAME, m.timer.progress(now)?, 1.0 / total_ms.max(1) as f32)),
+        FocusTimer::Paused { .. } => return Some((GAME, m.timer.progress(now)?, 0.0)),
+        FocusTimer::Idle => {}
+    }
+    if let Some(j) = m.jobs.iter().find(|j| matches!(j.status, JobStatus::Running { .. })) {
+        let JobStatus::Running { progress } = j.status else { unreachable!() };
+        return Some((CODER, progress.unwrap_or(0.25), 0.0));
+    }
+    if let Some(s) = m.front_media() {
+        if let Some(p) = s.progress_at(now) {
+            let rate = if s.playing { 1.0 / s.duration_ms as f32 } else { 0.0 };
+            return Some((MEDIA, p, rate));
+        }
+    }
+    None
+}
+
+fn seam_colors(m: &Model) -> Vec<Color> {
+    let mut v = Vec::new();
+    if !m.privacy.is_empty() {
+        v.push(PRIVACY);
+    }
+    if m.timer != FocusTimer::Idle || m.game.is_some() {
+        v.push(GAME);
+    }
+    if m.jobs.iter().any(|j| matches!(j.status, JobStatus::Running { .. })) {
+        v.push(CODER);
+    }
+    if m.front_media().is_some_and(|s| s.playing) {
+        v.push(MEDIA);
+    }
+    v.truncate(3);
+    v
+}
+
+pub fn build(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
+    match m.state {
+        IslandState::Hidden => Scene {
+            kind: SceneKind::Hidden,
+            size: Size::new(0.0, 0.0),
+            flush: true,
+            clip_radius: 0.0,
+            prims: vec![],
+            hits: vec![],
+            ring: None,
+        },
+        IslandState::Seam => seam(m, edge),
+        IslandState::Orb => orb(m),
+        IslandState::Tag => tag(m, edge, tm),
+        IslandState::Slips => match m.front {
+            Some(front) => slips(m, edge, front, tm),
+            None => orb(m),
+        },
+    }
+}
+
+fn seam(m: &Model, edge: Edge) -> Scene {
+    let size = if edge.is_vertical() { Size::new(SEAM_T, SEAM_L) } else { Size::new(SEAM_L, SEAM_T) };
+    let mut colors = seam_colors(m);
+    if colors.is_empty() {
+        colors.push(TEXT.with_alpha(0x66));
+    }
+    let n = colors.len() as f32;
+    let gap = 3.0;
+    let len = (SEAM_L - gap * (n - 1.0)) / n;
+    let prims = colors
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let o = i as f32 * (len + gap);
+            let rect = if edge.is_vertical() { Rect::new(0.0, o, SEAM_T, len) } else { Rect::new(o, 0.0, len, SEAM_T) };
+            Prim::RoundRect { rect, radius: 1.5, fill: Some(*c), stroke: None }
+        })
+        .collect();
+    Scene { kind: SceneKind::Seam, size, flush: true, clip_radius: 1.5, prims, hits: vec![], ring: None }
+}
+
+fn ring_spec(m: &Model, center: Point) -> Option<RingSpec> {
+    ring(m).map(|(color, value, rate)| RingSpec {
+        center,
+        radius: RING_R,
+        width: RING_W,
+        color,
+        value: value.clamp(0.0, 1.0),
+        rate_per_ms: rate,
+    })
+}
+
+fn orb(m: &Model) -> Scene {
+    let c = ORB_BOX / 2.0;
+    let ring = ring_spec(m, Point::new(c, c));
+    let dot = ring.map(|r| r.color).unwrap_or(TRACK);
+    let prims = vec![
+        Prim::Circle { cx: c, cy: c, r: ORB_R, fill: Some(SURFACE), stroke: Some((HAIRLINE, 1.0)) },
+        Prim::Circle { cx: c, cy: c, r: RING_R, fill: None, stroke: Some((TRACK, RING_W)) },
+        Prim::Circle { cx: c, cy: c, r: 3.5, fill: Some(dot), stroke: None },
+    ];
+    let hits =
+        vec![Hit { rect: Rect::new(0.0, 0.0, ORB_BOX, ORB_BOX), kind: HitKind::Click(Action::ToggleSlips), label: "Ngambang".into() }];
+    Scene { kind: SceneKind::Orb, size: Size::new(ORB_BOX, ORB_BOX), flush: false, clip_radius: ORB_BOX / 2.0, prims, hits, ring }
+}
+
+fn tag(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
+    let (icon, color, text, detail, wave, action) = match (m.hover_tag, m.current_tag()) {
+        (false, Some(t)) => (t.icon, t.color, t.text.clone(), t.detail.clone(), false, t.action.clone()),
+        _ => match summary(m) {
+            Some(s) => (s.icon, s.color, s.text, s.detail, s.wave, None),
+            None => return orb(m),
+        },
+    };
+    let h = TAG_H;
+    let lead = 28.0;
+    let mut x = 6.0 + lead + 10.0;
+    let mut prims = Vec::new();
+    let mut hits = Vec::new();
+    let ring = if m.hover_tag { ring_spec(m, Point::new(6.0 + lead / 2.0, h / 2.0)) } else { None };
+
+    let wave_w = if wave { 36.0 } else { 0.0 };
+    let text_w = tm.width(&text, TextStyle::BODY_MEDIUM).ceil();
+    let detail_w = detail.as_ref().map(|d| tm.width(d, TextStyle::MONO_SMALL).ceil() + 10.0).unwrap_or(0.0);
+    let action_w = action.as_ref().map(|(l, _)| tm.width(l, TextStyle::MONO_SMALL).ceil() + 24.0 + 10.0).unwrap_or(0.0);
+    let fixed = x + wave_w + if wave { 10.0 } else { 0.0 } + detail_w + action_w + if action.is_some() { 6.0 } else { 16.0 };
+    let w = (fixed + text_w).min(TAG_MAX_W);
+    let text_room = (w - fixed).max(40.0);
+
+    // Body: the large radius on the free end, a tighter one where it is tied to the edge.
+    let (inner_r, outer_r) = (12.0, 20.0);
+    prims.push(Prim::RoundRect { rect: Rect::new(0.0, 0.0, w, h), radius: outer_r, fill: Some(SURFACE), stroke: Some((HAIRLINE, 1.0)) });
+    let patch = if edge == Edge::Right { Rect::new(w / 2.0, 0.0, w / 2.0, h) } else { Rect::new(0.0, 0.0, w / 2.0, h) };
+    prims.push(Prim::RoundRect { rect: patch, radius: inner_r, fill: Some(SURFACE), stroke: None });
+
+    // Lead: the ring (hover) or a ringed icon (event).
+    let lc = Point::new(6.0 + lead / 2.0, h / 2.0);
+    if ring.is_some() {
+        prims.push(Prim::Circle { cx: lc.x, cy: lc.y, r: RING_R, fill: None, stroke: Some((TRACK, RING_W)) });
+        prims.extend(icon_prims(icon, Rect::new(lc.x - 6.0, lc.y - 6.0, 12.0, 12.0), color));
+    } else {
+        prims.push(Prim::Circle { cx: lc.x, cy: lc.y, r: RING_R, fill: None, stroke: Some((color, RING_W)) });
+        prims.extend(icon_prims(icon, Rect::new(lc.x - 7.0, lc.y - 7.0, 14.0, 14.0), color));
+    }
+    if wave {
+        prims.push(Prim::Polyline { points: wave_points(x, h / 2.0, wave_w, 3.0), width: 2.0, color: MEDIA, closed: false });
+        x += wave_w + 10.0;
+    }
+    prims.push(Prim::Text {
+        rect: Rect::new(x, 0.0, text_room, h),
+        text,
+        style: TextStyle::BODY_MEDIUM,
+        color: TEXT,
+        align: Align::Start,
+        wrap: false,
+    });
+    x += text_room;
+    if let Some(d) = detail {
+        prims.push(Prim::Text {
+            rect: Rect::new(x + 10.0, 0.0, detail_w - 10.0, h),
+            text: d,
+            style: TextStyle::MONO_SMALL,
+            color: if color == PRIVACY { PRIVACY_TEXT } else { TEXT_2 },
+            align: Align::Start,
+            wrap: false,
+        });
+        x += detail_w;
+    }
+    hits.push(Hit { rect: Rect::new(0.0, 0.0, w, h), kind: HitKind::Click(Action::ToggleSlips), label: "Open Ngambang".into() });
+    if let Some((label, act)) = action {
+        let r = Rect::new(x + 10.0, 5.0, action_w - 10.0, 30.0);
+        prims.push(Prim::RoundRect { rect: r, radius: 15.0, fill: Some(SURFACE_3), stroke: None });
+        prims.push(Prim::Text {
+            rect: r,
+            text: label.clone(),
+            style: TextStyle::MONO_SMALL,
+            color: TEXT,
+            align: Align::Center,
+            wrap: false,
+        });
+        hits.push(Hit { rect: r, kind: HitKind::Click(act), label });
+    }
+    Scene { kind: SceneKind::Tag, size: Size::new(w, h), flush: false, clip_radius: inner_r, prims, hits, ring }
+}
+
+/// Small drawing helper for slips.
+struct B<'a> {
+    prims: Vec<Prim>,
+    hits: Vec<Hit>,
+    tm: &'a dyn TextMeasure,
+    x: f32,
+    w: f32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Btn {
+    Primary(Color),
+    Secondary,
+    Danger,
+    Ghost,
+}
+
+impl B<'_> {
+    fn text(&mut self, r: Rect, t: impl Into<String>, style: TextStyle, color: Color) {
+        self.prims.push(Prim::Text { rect: r, text: t.into(), style, color, align: Align::Start, wrap: false });
+    }
+
+    fn text_end(&mut self, r: Rect, t: impl Into<String>, style: TextStyle, color: Color) {
+        self.prims.push(Prim::Text { rect: r, text: t.into(), style, color, align: Align::End, wrap: false });
+    }
+
+    fn header(&mut self, y: f32, accent: Color, label: &str, right: Option<(String, Color)>) -> f32 {
+        self.prims.push(Prim::Circle { cx: self.x + 4.0, cy: y + 8.0, r: 4.0, fill: Some(accent), stroke: None });
+        self.text(Rect::new(self.x + 16.0, y, self.w - 16.0, 16.0), label.to_uppercase(), TextStyle::LABEL, LABEL);
+        if let Some((r, c)) = right {
+            self.text_end(Rect::new(self.x + self.w / 2.0, y, self.w / 2.0, 16.0), r, TextStyle::SMALL, c);
+        }
+        y + 16.0
+    }
+
+    fn rect(&mut self, r: Rect, radius: f32, fill: Color) {
+        self.prims.push(Prim::RoundRect { rect: r, radius, fill: Some(fill), stroke: None });
+    }
+
+    fn icon(&mut self, icon: Icon, r: Rect, color: Color) {
+        self.prims.extend(icon_prims(icon, r, color));
+    }
+
+    fn button(&mut self, r: Rect, label: &str, kind: Btn, action: Action) {
+        let (bg, fg, border) = match kind {
+            Btn::Primary(c) => (Some(c), SURFACE, None),
+            Btn::Secondary => (Some(SURFACE_3), TEXT, None),
+            Btn::Danger => (Some(PRIVACY), SURFACE, None),
+            Btn::Ghost => (None, TEXT, Some((TRACK, 1.0))),
+        };
+        let radius = if kind == Btn::Ghost { r.h / 2.0 } else { 10.0 };
+        self.prims.push(Prim::RoundRect { rect: r, radius, fill: bg, stroke: border });
+        let style = if matches!(kind, Btn::Primary(_) | Btn::Danger) {
+            TextStyle { weight: Weight::Semibold, ..TextStyle::BODY }
+        } else {
+            TextStyle::BODY
+        };
+        self.prims.push(Prim::Text { rect: r, text: label.into(), style, color: fg, align: Align::Center, wrap: false });
+        self.hits.push(Hit { rect: r, kind: HitKind::Click(action), label: label.into() });
+    }
+
+    fn icon_button(&mut self, r: Rect, icon: Icon, fg: Color, bg: Option<Color>, action: Option<Action>, label: &str) {
+        if let Some(bg) = bg {
+            self.rect(r, 10.0, bg);
+        }
+        let c = Point::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let fg = if action.is_none() { fg.with_alpha(0x55) } else { fg };
+        self.icon(icon, Rect::new(c.x - 8.0, c.y - 8.0, 16.0, 16.0), fg);
+        if let Some(a) = action {
+            self.hits.push(Hit { rect: r, kind: HitKind::Click(a), label: label.into() });
+        }
+    }
+
+    /// A row of buttons that share the width.
+    fn button_row(&mut self, y: f32, buttons: Vec<(String, Btn, Action)>) -> f32 {
+        let n = buttons.len().max(1) as f32;
+        let gap = 8.0;
+        let bw = (self.w - gap * (n - 1.0)) / n;
+        for (i, (label, kind, action)) in buttons.into_iter().enumerate() {
+            self.button(Rect::new(self.x + i as f32 * (bw + gap), y, bw, 44.0), &label, kind, action);
+        }
+        y + 44.0
+    }
+
+    /// Pill chips that wrap to new lines.
+    fn chips(&mut self, y: f32, chips: Vec<(String, Color, Action)>) -> f32 {
+        let (mut cx, mut cy) = (self.x, y);
+        for (label, color, action) in chips {
+            let w = self.tm.width(&label, TextStyle::BODY).ceil() + 28.0;
+            if cx + w > self.x + self.w && cx > self.x {
+                cx = self.x;
+                cy += 52.0;
+            }
+            let r = Rect::new(cx, cy, w.min(self.w), 44.0);
+            self.prims.push(Prim::RoundRect { rect: r, radius: 22.0, fill: None, stroke: Some((TRACK, 1.0)) });
+            self.prims.push(Prim::Text { rect: r, text: label.clone(), style: TextStyle::BODY, color, align: Align::Center, wrap: false });
+            self.hits.push(Hit { rect: r, kind: HitKind::Click(action), label });
+            cx += w + 8.0;
+        }
+        cy + 44.0
+    }
+
+    fn slider(&mut self, r: Rect, value: f32, color: Color, target: SliderTarget, label: &str) {
+        let cy = r.y + r.h / 2.0;
+        let v = value.clamp(0.0, 1.0);
+        self.rect(Rect::new(r.x, cy - 2.0, r.w, 4.0), 2.0, TRACK);
+        self.rect(Rect::new(r.x, cy - 2.0, r.w * v, 4.0), 2.0, color);
+        self.prims.push(Prim::Circle { cx: r.x + r.w * v, cy, r: 7.0, fill: Some(TEXT), stroke: None });
+        self.hits.push(Hit { rect: r, kind: HitKind::Slider(target), label: label.into() });
+    }
+
+    fn meter(&mut self, r: Rect, value: f32, color: Color) {
+        self.rect(r, r.h / 2.0, SURFACE_3);
+        if value > 0.005 {
+            self.rect(Rect::new(r.x, r.y, r.w * value.clamp(0.0, 1.0), r.h), r.h / 2.0, color);
+        }
+    }
+
+    fn empty(&mut self, y: f32, text: &str) -> f32 {
+        self.text(Rect::new(self.x, y, self.w, 22.0), text, TextStyle::BODY, TEXT_2);
+        y + 22.0
+    }
+}
+
+fn module_icon(m: ModuleId) -> (Icon, Color) {
+    match m {
+        ModuleId::Media => (Icon::Note, MEDIA),
+        ModuleId::Mixer => (Icon::Speaker, TEXT),
+        ModuleId::Commands => (Icon::Terminal, CODER),
+        ModuleId::Ports => (Icon::Plug, PORTS),
+        ModuleId::Clipboard => (Icon::Clipboard, CODER),
+        ModuleId::Timer => (Icon::Clock, GAME),
+        ModuleId::Game => (Icon::Game, GAME),
+        ModuleId::Captures => (Icon::Image, PORTS),
+        ModuleId::Privacy => (Icon::Mic, PRIVACY),
+    }
+}
+
+fn slips(m: &Model, edge: Edge, front: ModuleId, tm: &dyn TextMeasure) -> Scene {
+    let tabs = m.available_slips();
+    let tabs_on_left = edge == Edge::Right;
+    let slip_x = if tabs_on_left { TAB_W } else { 0.0 };
+    let pad = 18.0;
+    let mut b = B { prims: Vec::new(), hits: Vec::new(), tm, x: slip_x + pad, w: SLIP_W - 2.0 * pad };
+
+    // Content first (into a separate list) so we know the height.
+    let body_start = b.prims.len();
+    let bottom = match front {
+        ModuleId::Media => media_slip(m, &mut b, pad),
+        ModuleId::Mixer => mixer_slip(m, &mut b, pad),
+        ModuleId::Commands => commands_slip(m, &mut b, pad),
+        ModuleId::Ports => ports_slip(m, &mut b, pad),
+        ModuleId::Clipboard => clipboard_slip(m, &mut b, pad),
+        ModuleId::Timer => timer_slip(m, &mut b, pad),
+        ModuleId::Game => game_slip(m, &mut b, pad),
+        ModuleId::Captures => captures_slip(m, &mut b, pad),
+        ModuleId::Privacy => privacy_slip(m, &mut b, pad),
+    };
+    let content: Vec<Prim> = b.prims.drain(body_start..).collect();
+    let slip_h = (bottom + pad).ceil();
+    let tabs_h = 10.0 + tabs.len() as f32 * (TAB_H + 6.0);
+    let h = slip_h.max(tabs_h);
+
+    // Slip body. The corner where tabs attach is tighter.
+    b.prims.push(Prim::RoundRect {
+        rect: Rect::new(slip_x, 0.0, SLIP_W, slip_h),
+        radius: 14.0,
+        fill: Some(SURFACE),
+        stroke: Some((HAIRLINE, 1.0)),
+    });
+    let corner = if tabs_on_left { Rect::new(slip_x, 0.0, 24.0, 24.0) } else { Rect::new(slip_x + SLIP_W - 24.0, 0.0, 24.0, 24.0) };
+    b.prims.push(Prim::RoundRect { rect: corner, radius: 6.0, fill: Some(SURFACE), stroke: None });
+
+    // Index tabs on the outer side.
+    let tab_x = if tabs_on_left { 0.0 } else { SLIP_W - 1.0 };
+    for (i, t) in tabs.iter().enumerate() {
+        let r = Rect::new(tab_x, 10.0 + i as f32 * (TAB_H + 6.0), TAB_W + 1.0, TAB_H);
+        let active = *t == front;
+        let (icon, color) = module_icon(*t);
+        b.prims.push(Prim::RoundRect {
+            rect: r,
+            radius: 10.0,
+            fill: Some(if active { SURFACE } else { SURFACE_2 }),
+            stroke: if active { Some((HAIRLINE, 1.0)) } else { None },
+        });
+        // Square off the side that joins the slip.
+        let join = if tabs_on_left { Rect::new(r.right() - 12.0, r.y, 12.0, r.h) } else { Rect::new(r.x, r.y, 12.0, r.h) };
+        b.prims.push(Prim::RoundRect { rect: join, radius: 0.0, fill: Some(if active { SURFACE } else { SURFACE_2 }), stroke: None });
+        let ix = r.x + if tabs_on_left { 14.0 } else { 15.0 };
+        b.icon(icon, Rect::new(ix, r.y + 16.0, 16.0, 16.0), if active { color } else { color.with_alpha(0xB0) });
+        b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::SelectSlip(*t)), label: t.label().into() });
+    }
+    // Content above the body.
+    b.prims.extend(content);
+    Scene {
+        kind: SceneKind::Slip(front),
+        size: Size::new(SLIP_W + TAB_W, h),
+        flush: false,
+        clip_radius: 14.0,
+        prims: b.prims,
+        hits: b.hits,
+        ring: None,
+    }
+}
+
+fn media_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let now = m.now_ms;
+    let Some(s) = m.front_media() else {
+        let y = b.header(top, MEDIA, "Media", None);
+        return b.empty(y + 14.0, "Nothing is playing");
+    };
+    let label = if m.media.len() > 1 { format!("Media · {} sources", m.media.len()) } else { format!("Media · {}", s.app) };
+    let mut y = b.header(top, MEDIA, &label, None) + 12.0;
+    if m.media.len() > 1 {
+        let chips: Vec<_> = m
+            .media
+            .iter()
+            .take(4)
+            .enumerate()
+            .map(|(i, x)| {
+                let name = if x.playing { x.app.clone() } else { format!("{} · paused", x.app) };
+                (format::ellipsize(&name, 18), if x.id == s.id { MEDIA } else { TEXT_2 }, Action::MediaSource(i))
+            })
+            .collect();
+        y = b.chips(y, chips) + 14.0;
+    }
+    b.rect(Rect::new(b.x, y, 60.0, 60.0), 8.0, Color::rgb(0x3A2E1C));
+    b.icon(Icon::Note, Rect::new(b.x + 19.0, y + 19.0, 22.0, 22.0), MEDIA);
+    let tx = b.x + 74.0;
+    let tw = b.w - 74.0;
+    b.text(Rect::new(tx, y + 8.0, tw, 24.0), if s.title.is_empty() { s.app.clone() } else { s.title.clone() }, TextStyle::TITLE, TEXT);
+    b.text(Rect::new(tx, y + 32.0, tw, 20.0), s.artist.clone(), TextStyle::SMALL, TEXT_2);
+    y += 74.0;
+
+    let pos = s.position_at(now);
+    if s.duration_ms > 0 {
+        let frac = s.progress_at(now).unwrap_or(0.0);
+        let played = (b.w * frac).max(0.0);
+        let cy = y + 8.0;
+        if played > 2.0 {
+            let pts = if s.playing { wave_points(b.x, cy, played, 3.5) } else { vec![Point::new(b.x, cy), Point::new(b.x + played, cy)] };
+            b.prims.push(Prim::Polyline { points: pts, width: 2.0, color: MEDIA, closed: false });
+        }
+        b.prims.push(Prim::Circle { cx: b.x + played + 3.0, cy, r: 3.0, fill: Some(TEXT), stroke: None });
+        if played + 8.0 < b.w {
+            b.rect(Rect::new(b.x + played + 8.0, cy - 1.0, b.w - played - 8.0, 2.0), 1.0, TRACK);
+        }
+        if s.can_seek {
+            b.hits.push(Hit {
+                rect: Rect::new(b.x, y - 6.0, b.w, 28.0),
+                kind: HitKind::Slider(SliderTarget::MediaSeek),
+                label: "Seek".into(),
+            });
+        }
+        y += 20.0;
+        b.text(Rect::new(b.x, y, 80.0, 16.0), format::clock(pos / 1000), TextStyle::LABEL, LABEL);
+        b.text_end(Rect::new(b.x + b.w - 80.0, y, 80.0, 16.0), format::clock(s.duration_ms / 1000), TextStyle::LABEL, LABEL);
+        y += 24.0;
+    } else {
+        y += 4.0;
+    }
+    let cx = b.x + b.w / 2.0;
+    let prev = s.can_prev.then_some(Action::MediaPrev);
+    let next = s.can_next.then_some(Action::MediaNext);
+    b.icon_button(Rect::new(cx - 28.0 - 52.0, y, 44.0, 44.0), Icon::Prev, TEXT, None, prev, "Previous track");
+    let (icon, label) = if s.playing { (Icon::Pause, "Pause") } else { (Icon::Play, "Play") };
+    b.rect(Rect::new(cx - 28.0, y, 56.0, 44.0), 12.0, MEDIA);
+    b.icon(icon, Rect::new(cx - 9.0, y + 13.0, 18.0, 18.0), SURFACE);
+    if s.can_play_pause {
+        b.hits.push(Hit { rect: Rect::new(cx - 28.0, y, 56.0, 44.0), kind: HitKind::Click(Action::MediaPlayPause), label: label.into() });
+    }
+    b.icon_button(Rect::new(cx + 28.0 + 8.0, y, 44.0, 44.0), Icon::Next, TEXT, None, next, "Next track");
+    y + 44.0
+}
+
+fn mixer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let device = if m.mixer.device.is_empty() { "Default output".to_string() } else { format::ellipsize(&m.mixer.device, 28) };
+    let mut y = b.header(top, TEXT, "Mixer", Some((device, TEXT_2))) + 14.0;
+    let slider_w = 132.0;
+    let name_w = b.w - 32.0 - 10.0 - slider_w - 10.0 - 44.0 - 10.0;
+    let row = |b: &mut B,
+               y: f32,
+               initial: &str,
+               name: &str,
+               sub: Option<(&str, Color)>,
+               vol: Volume,
+               peak: Option<f32>,
+               target: SliderTarget,
+               mute: Action,
+               accent: Color| {
+        b.rect(Rect::new(b.x, y + 6.0, 32.0, 32.0), 8.0, SURFACE_3);
+        if initial.is_empty() {
+            b.icon(Icon::Speaker, Rect::new(b.x + 8.0, y + 14.0, 16.0, 16.0), TEXT);
+        } else {
+            b.prims.push(Prim::Text {
+                rect: Rect::new(b.x, y + 6.0, 32.0, 32.0),
+                text: initial.into(),
+                style: TextStyle { size: 13.0, weight: Weight::Semibold, mono: false },
+                color: accent,
+                align: Align::Center,
+                wrap: false,
+            });
+        }
+        let nx = b.x + 42.0;
+        b.text(Rect::new(nx, y + 4.0, name_w, 20.0), name, TextStyle::BODY, TEXT);
+        if let Some((s, c)) = sub {
+            b.text(Rect::new(nx, y + 24.0, name_w, 14.0), s, TextStyle { size: 10.0, weight: Weight::Regular, mono: true }, c);
+        }
+        if let Some(p) = peak {
+            b.meter(Rect::new(nx, y + 40.0, name_w, 3.0), p, accent);
+        }
+        let sx = nx + name_w + 10.0;
+        b.slider(
+            Rect::new(sx, y + 8.0, slider_w, 28.0),
+            vol.level,
+            if vol.muted { TRACK } else { accent },
+            target,
+            &format!("{name} volume"),
+        );
+        let (icon, bg) = if vol.muted { (Icon::SpeakerMuted, Some(PRIVACY)) } else { (Icon::Speaker, Some(SURFACE_3)) };
+        let fg = if vol.muted { SURFACE } else { TEXT };
+        b.icon_button(Rect::new(sx + slider_w + 10.0, y, 44.0, 44.0), icon, fg, bg, Some(mute), &format!("Mute {name}"));
+    };
+    row(b, y, "", "System", None, m.mixer.master, None, SliderTarget::Master, Action::MasterMute, MEDIA);
+    y += 52.0;
+    b.rect(Rect::new(b.x, y, b.w, 1.0), 0.0, SURFACE_3);
+    y += 9.0;
+    if m.mixer.apps.is_empty() {
+        return b.empty(y + 4.0, "No app is playing sound");
+    }
+    for app in m.mixer.apps.iter().take(6) {
+        let initial: String = app.name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "?".into());
+        let sub = if app.has_controls { ("controls", MEDIA) } else { ("volume only", LABEL) };
+        let accent = if app.has_controls { MEDIA } else { TEXT };
+        row(
+            b,
+            y,
+            &initial,
+            &format::ellipsize(&app.name, 22),
+            Some(sub),
+            app.volume,
+            Some(app.peak),
+            SliderTarget::App(app.pid),
+            Action::AppMute(app.pid),
+            accent,
+        );
+        y += 52.0;
+    }
+    y - 8.0
+}
+
+fn commands_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let now = m.now_ms;
+    let mut y = b.header(top, CODER, &format!("Commands · {}", m.jobs.len()), None) + 12.0;
+    if m.jobs.is_empty() {
+        y = b.empty(y, "Nothing reported yet");
+        b.text(Rect::new(b.x, y + 8.0, b.w, 16.0), "ngambang run -- <command>", TextStyle::MONO_SMALL, LABEL);
+        return y + 24.0;
+    }
+    for j in m.jobs.iter().take(6) {
+        let (icon, color, detail) = match &j.status {
+            JobStatus::Running { progress: Some(p) } => (Icon::Terminal, CODER, format!("{:.0}%", p * 100.0)),
+            JobStatus::Running { progress: None } => {
+                (Icon::Terminal, CODER, format::duration_short(now.saturating_sub(j.started_ms) / 1000))
+            }
+            JobStatus::Done { ok: true, duration_s, .. } => {
+                (Icon::Check, OK, duration_s.map(|d| format::duration_short(d.round() as u64)).unwrap_or_default())
+            }
+            JobStatus::Done { ok: false, code, .. } => {
+                (Icon::Cross, PRIVACY, code.map(|c| format!("exit {c}")).unwrap_or_else(|| "failed".into()))
+            }
+            JobStatus::Note { level } => match level {
+                crate::protocol::Level::Fail => (Icon::Cross, PRIVACY, String::new()),
+                crate::protocol::Level::Ok => (Icon::Check, OK, String::new()),
+                _ => (Icon::Terminal, CODER, String::new()),
+            },
+        };
+        b.icon(icon, Rect::new(b.x, y + 12.0, 18.0, 18.0), color);
+        let failed_open = matches!(j.status, JobStatus::Done { ok: false, .. }) && j.hwnd.is_some();
+        let right_w = if failed_open { 120.0 } else { 70.0 };
+        b.text(Rect::new(b.x + 28.0, y, b.w - 28.0 - right_w, 42.0), j.title.clone(), TextStyle::MONO, TEXT);
+        let dc = if color == PRIVACY { PRIVACY_TEXT } else { TEXT_2 };
+        if failed_open {
+            b.text_end(Rect::new(b.x + b.w - right_w, y, 50.0, 42.0), detail, TextStyle::MONO_SMALL, dc);
+            let r = Rect::new(b.x + b.w - 62.0, y + 6.0, 62.0, 30.0);
+            b.rect(r, 15.0, SURFACE_3);
+            b.prims.push(Prim::Text {
+                rect: r,
+                text: "Open".into(),
+                style: TextStyle::MONO_SMALL,
+                color: TEXT,
+                align: Align::Center,
+                wrap: false,
+            });
+            b.hits.push(Hit {
+                rect: r.inset(-7.0),
+                kind: HitKind::Click(Action::JobOpenTerminal(j.id.clone())),
+                label: format!("Open terminal for {}", j.title),
+            });
+        } else {
+            b.text_end(Rect::new(b.x + b.w - right_w, y, right_w, 42.0), detail, TextStyle::MONO_SMALL, dc);
+        }
+        y += 42.0;
+    }
+    if m.jobs.iter().any(|j| !matches!(j.status, JobStatus::Running { .. })) {
+        y += 8.0;
+        y = b.button_row(y, vec![("Clear finished".into(), Btn::Secondary, Action::JobsClear)]);
+    }
+    y
+}
+
+fn ports_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let now = m.now_ms;
+    let mut y = b.header(top, PORTS, "Listening · local", Some((m.ports.len().to_string(), LABEL))) + 10.0;
+    if m.ports.is_empty() {
+        return b.empty(y + 4.0, "No local servers listening");
+    }
+    for p in m.ports.iter().take(7) {
+        b.text(Rect::new(b.x, y, 70.0, 48.0), format!(":{}", p.port), TextStyle { size: 15.0, weight: Weight::Regular, mono: true }, PORTS);
+        let name_w = b.w - 70.0 - 44.0 - 6.0 - 64.0;
+        b.text(Rect::new(b.x + 70.0, y, name_w, 48.0), format!("{} · {}", p.process, p.pid), TextStyle::BODY, TEXT);
+        let ox = b.x + b.w - 64.0 - 6.0 - 44.0;
+        b.icon_button(
+            Rect::new(ox, y + 2.0, 44.0, 44.0),
+            Icon::Open,
+            TEXT,
+            Some(SURFACE_3),
+            Some(Action::PortOpen(p.port)),
+            &format!("Open localhost:{}", p.port),
+        );
+        let sr = Rect::new(b.x + b.w - 64.0, y + 2.0, 64.0, 44.0);
+        let confirming = m.port_confirm.get(&p.port).is_some_and(|u| *u > now);
+        if !p.can_stop {
+            b.rect(sr, 10.0, SURFACE_2);
+            b.prims.push(Prim::Text {
+                rect: sr,
+                text: "elevated".into(),
+                style: TextStyle { size: 11.0, weight: Weight::Regular, mono: true },
+                color: LABEL,
+                align: Align::Center,
+                wrap: false,
+            });
+        } else if confirming {
+            b.button(sr, "Confirm", Btn::Danger, Action::PortStop(p.port));
+        } else {
+            b.rect(sr, 10.0, SURFACE_3);
+            b.icon(Icon::Stop, Rect::new(sr.x + 24.0, sr.y + 14.0, 16.0, 16.0), PRIVACY_TEXT);
+            b.hits.push(Hit {
+                rect: sr,
+                kind: HitKind::Click(Action::PortStop(p.port)),
+                label: format!("Stop {} on port {}", p.process, p.port),
+            });
+        }
+        y += 50.0;
+    }
+    y
+}
+
+fn clipboard_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let Some(c) = &m.clip else {
+        let y = b.header(top, CODER, "Clipboard", None);
+        return b.empty(y + 12.0, "Copy a JWT, JSON, UUID, timestamp, colour or link");
+    };
+    let status = clipboard::status(&c.kind, c.unix_at).map(|s| {
+        let col = if s.starts_with("expired") { PRIVACY_TEXT } else { TEXT_2 };
+        (s, col)
+    });
+    let mut y = b.header(top, CODER, &format!("Detected · {}", c.kind.label()), status) + 12.0;
+    let preview = clipboard::preview(&c.text, &c.kind, c.unix_at);
+    let lines: Vec<&str> = preview.lines().take(7).collect();
+    let shown = format::ellipsize(&lines.join("\n"), 360);
+    let n = shown.lines().count().max(1) as f32;
+    let box_h = (n * 18.0 + 24.0).min(150.0);
+    b.rect(Rect::new(b.x, y, b.w, box_h), 8.0, SURFACE_2);
+    let mut text_x = b.x + 12.0;
+    if let ClipKind::HexColor { r, g, b: bl, a } = c.kind {
+        let col = Color(((r as u32) << 24) | ((g as u32) << 16) | ((bl as u32) << 8) | a as u32);
+        b.prims.push(Prim::RoundRect {
+            rect: Rect::new(b.x + 12.0, y + 12.0, 24.0, 24.0),
+            radius: 6.0,
+            fill: Some(col),
+            stroke: Some((HAIRLINE, 1.0)),
+        });
+        text_x += 34.0;
+    }
+    b.prims.push(Prim::Text {
+        rect: Rect::new(text_x, y + 12.0, b.x + b.w - 12.0 - text_x, box_h - 24.0),
+        text: shown,
+        style: TextStyle { size: 12.5, weight: Weight::Regular, mono: true },
+        color: TEXT,
+        align: Align::Start,
+        wrap: true,
+    });
+    y += box_h + 14.0;
+    let chips = c.kind.actions().iter().map(|a| (a.label().to_string(), CODER, Action::Clip(*a))).collect();
+    b.chips(y, chips)
+}
+
+fn timer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let now = m.now_ms;
+    let state = match m.timer {
+        FocusTimer::Idle => "ready",
+        FocusTimer::Running { .. } => "running",
+        FocusTimer::Paused { .. } => "paused",
+    };
+    let mut y = b.header(top, GAME, &format!("Focus · {state}"), None) + 12.0;
+    match m.timer {
+        FocusTimer::Idle => {
+            b.text(Rect::new(b.x, y, b.w, 52.0), "Start a round", TextStyle { size: 22.0, weight: Weight::Semibold, mono: false }, TEXT);
+            y += 60.0;
+            let buttons =
+                m.config.timer.presets_min.iter().map(|p| (format!("{p} min"), Btn::Primary(GAME), Action::TimerStart(*p))).collect();
+            b.button_row(y, buttons)
+        }
+        _ => {
+            let rem = m.timer.remaining(now).unwrap_or(0);
+            b.text(
+                Rect::new(b.x, y, b.w, 52.0),
+                format::clock(rem.div_ceil(1000)),
+                TextStyle { size: 44.0, weight: Weight::Medium, mono: true },
+                GAME,
+            );
+            y += 60.0;
+            let frac = m.timer.progress(now).unwrap_or(0.0);
+            b.meter(Rect::new(b.x, y, b.w, 4.0), frac, GAME);
+            y += 16.0;
+            let main = if m.timer.is_running() {
+                ("Pause".to_string(), Btn::Primary(GAME), Action::TimerPause)
+            } else {
+                ("Resume".to_string(), Btn::Primary(GAME), Action::TimerResume)
+            };
+            b.button_row(
+                y,
+                vec![main, ("+5 min".into(), Btn::Secondary, Action::TimerAdd(5)), ("Stop".into(), Btn::Secondary, Action::TimerStop)],
+            )
+        }
+    }
+}
+
+fn game_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let now = m.now_ms;
+    let today = format!(
+        "today {}",
+        format::hours_minutes(m.playlog.total() + m.game.as_ref().map(|g| now.saturating_sub(g.started_ms) / 60_000).unwrap_or(0))
+    );
+    let label = match &m.game {
+        Some(g) => format!("Game · {}", g.exe),
+        None => "Games".into(),
+    };
+    let mut y = b.header(top, GAME, &label, Some((today, TEXT_2))) + 12.0;
+    match &m.game {
+        Some(g) => {
+            b.text(Rect::new(b.x, y, 200.0, 50.0), format::clock(now.saturating_sub(g.started_ms) / 1000), TextStyle::BIG, GAME);
+            b.text(Rect::new(b.x + 200.0, y + 14.0, b.w - 200.0, 30.0), "this session", TextStyle::BODY, TEXT_2);
+            y += 60.0;
+            let tiles = [
+                ("GPU", m.stats.gpu_pct.map(|v| format!("{v:.0}%"))),
+                ("VRAM", m.stats.vram_mb.map(|v| if v >= 1024 { format!("{:.1}G", v as f32 / 1024.0) } else { format!("{v}M") })),
+                ("TEMP", m.stats.temp_c.map(|v| format!("{v}°"))),
+                ("PING", m.stats.ping_ms.map(|v| format!("{v}ms"))),
+            ];
+            let tw = (b.w - 3.0 * 8.0) / 4.0;
+            for (i, (k, v)) in tiles.iter().enumerate() {
+                let r = Rect::new(b.x + i as f32 * (tw + 8.0), y, tw, 56.0);
+                b.rect(r, 8.0, SURFACE_2);
+                b.text(
+                    Rect::new(r.x + 10.0, r.y + 8.0, r.w - 12.0, 14.0),
+                    *k,
+                    TextStyle { size: 10.0, weight: Weight::Regular, mono: true },
+                    LABEL,
+                );
+                b.text(
+                    Rect::new(r.x + 10.0, r.y + 24.0, r.w - 12.0, 24.0),
+                    v.clone().unwrap_or_else(|| "—".into()),
+                    TextStyle { size: 17.0, weight: Weight::Regular, mono: true },
+                    TEXT,
+                );
+            }
+            y += 70.0;
+            if let Some(c) = m.captures.first() {
+                b.rect(Rect::new(b.x, y, b.w, 56.0), 10.0, SURFACE_2);
+                b.icon(
+                    if c.kind == CaptureKind::Clip { Icon::Play } else { Icon::Image },
+                    Rect::new(b.x + 14.0, y + 18.0, 20.0, 20.0),
+                    TEXT,
+                );
+                let what = if c.kind == CaptureKind::Clip { "Clip saved" } else { "Screenshot saved" };
+                b.text(Rect::new(b.x + 46.0, y + 8.0, b.w - 46.0 - 80.0, 20.0), what, TextStyle::BODY, TEXT);
+                b.text(
+                    Rect::new(b.x + 46.0, y + 28.0, b.w - 46.0 - 80.0, 18.0),
+                    format::relative(-((now.saturating_sub(c.at_ms) / 1000) as i64)),
+                    TextStyle::MONO_SMALL,
+                    LABEL,
+                );
+                b.button(Rect::new(b.x + b.w - 74.0, y + 6.0, 66.0, 44.0), "Copy", Btn::Secondary, Action::CaptureCopy(0));
+                y += 68.0;
+            }
+            if m.config.game.break_after_min > 0 {
+                y = b.button_row(y, vec![("Snooze break 15 min".into(), Btn::Primary(GAME), Action::BreakSnooze)]);
+            } else {
+                y -= 12.0;
+            }
+            y
+        }
+        None => {
+            let mut games: Vec<(&String, &u64)> = m.playlog.minutes.iter().collect();
+            games.sort_by(|a, b| b.1.cmp(a.1));
+            for (exe, mins) in games.into_iter().take(4) {
+                b.text(Rect::new(b.x, y, b.w - 90.0, 32.0), exe.clone(), TextStyle::MONO, TEXT);
+                b.text_end(Rect::new(b.x + b.w - 90.0, y, 90.0, 32.0), format::hours_minutes(*mins), TextStyle::MONO_SMALL, TEXT_2);
+                y += 32.0;
+            }
+            y
+        }
+    }
+}
+
+fn captures_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let now = m.now_ms;
+    let mut y = b.header(top, PORTS, "Captures", None) + 12.0;
+    for (i, c) in m.captures.iter().take(4).enumerate() {
+        let tile = Rect::new(b.x, y, 64.0, 44.0);
+        b.rect(tile, 6.0, SURFACE_2);
+        b.icon(
+            if c.kind == CaptureKind::Clip { Icon::Play } else { Icon::Image },
+            Rect::new(tile.x + 22.0, tile.y + 12.0, 20.0, 20.0),
+            TEXT,
+        );
+        b.hits.push(Hit { rect: tile, kind: HitKind::Click(Action::CaptureOpen(i)), label: format!("Open {}", c.name) });
+        let tw = b.w - 64.0 - 12.0 - 2.0 * 50.0;
+        b.text(Rect::new(b.x + 76.0, y + 2.0, tw, 20.0), c.name.clone(), TextStyle::BODY, TEXT);
+        b.text(
+            Rect::new(b.x + 76.0, y + 24.0, tw, 16.0),
+            format::relative(-((now.saturating_sub(c.at_ms) / 1000) as i64)),
+            TextStyle::MONO_SMALL,
+            LABEL,
+        );
+        b.icon_button(
+            Rect::new(b.x + b.w - 94.0, y, 44.0, 44.0),
+            Icon::Copy,
+            TEXT,
+            Some(SURFACE_3),
+            Some(Action::CaptureCopy(i)),
+            &format!("Copy {}", c.name),
+        );
+        b.icon_button(
+            Rect::new(b.x + b.w - 44.0, y, 44.0, 44.0),
+            Icon::Folder,
+            TEXT,
+            Some(SURFACE_3),
+            Some(Action::CaptureFolder(i)),
+            &format!("Show {} in folder", c.name),
+        );
+        y += 54.0;
+    }
+    y - 10.0
+}
+
+fn privacy_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let now = m.now_ms;
+    let mut y = b.header(top, PRIVACY, "Mic & camera", None) + 12.0;
+    for p in m.privacy.iter().take(5) {
+        let (icon, what) = match p.device {
+            Device::Microphone => (Icon::Mic, "Microphone"),
+            Device::Camera => (Icon::Camera, "Camera"),
+        };
+        b.icon(icon, Rect::new(b.x, y + 7.0, 18.0, 18.0), PRIVACY);
+        b.text(Rect::new(b.x + 28.0, y, b.w - 28.0 - 70.0, 32.0), format!("{what} · {}", p.app), TextStyle::BODY_MEDIUM, TEXT);
+        b.text_end(
+            Rect::new(b.x + b.w - 70.0, y, 70.0, 32.0),
+            format::clock(now.saturating_sub(p.since_ms) / 1000),
+            TextStyle::MONO_SMALL,
+            TEXT_2,
+        );
+        y += 34.0;
+    }
+    y += 8.0;
+    let mut buttons = Vec::new();
+    if m.privacy.iter().any(|p| p.device == Device::Microphone) {
+        buttons.push(("Mute mic".to_string(), Btn::Danger, Action::MicMute));
+    }
+    let dev = m.privacy.first().map(|p| p.device).unwrap_or(Device::Microphone);
+    buttons.push(("Privacy settings".to_string(), Btn::Secondary, Action::PrivacySettings(dev)));
+    b.button_row(y, buttons)
+}
+
+/// Points for a static ring arc (used by tests and fallback renderers).
+pub fn ring_points(r: &RingSpec) -> Vec<Point> {
+    arc_points(r.center.x, r.center.y, r.radius, -90.0, -90.0 + 360.0 * r.value, 48)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::protocol::Request;
+
+    fn all_scenes() -> Vec<(String, Scene)> {
+        let mut out = Vec::new();
+        let mut m = Model::new(Config::default(), 3, 1_000_000);
+        let now = 1_000_000;
+        m.update(
+            now,
+            Event::Media(vec![
+                MediaSession {
+                    id: "Spotify.exe".into(),
+                    app: "Spotify".into(),
+                    title: "A very long track title that will not fit".into(),
+                    artist: "Artist".into(),
+                    playing: true,
+                    position_ms: 40_000,
+                    duration_ms: 200_000,
+                    at_ms: now,
+                    can_play_pause: true,
+                    can_next: true,
+                    can_prev: true,
+                    can_seek: true,
+                },
+                MediaSession { id: "Chrome".into(), app: "Chrome".into(), title: "Video".into(), playing: false, ..Default::default() },
+            ]),
+        );
+        m.update(
+            now,
+            Event::Mixer(MixerSnapshot {
+                device: "Headphones".into(),
+                master: Volume { level: 0.6, muted: false },
+                apps: (0..8)
+                    .map(|i| AudioApp {
+                        pid: i + 10,
+                        name: format!("App {i}"),
+                        exe: format!("app{i}.exe"),
+                        volume: Volume { level: 0.5, muted: i == 2 },
+                        peak: 0.3,
+                        ..Default::default()
+                    })
+                    .collect(),
+            }),
+        );
+        for i in 0..7 {
+            m.update(
+                now,
+                Event::Pipe(Request::Done {
+                    title: None,
+                    id: format!("job {i}"),
+                    ok: i % 2 == 0,
+                    code: Some(1),
+                    duration_s: Some(12.0),
+                    hwnd: Some("0x10".into()),
+                }),
+            );
+        }
+        m.update(
+            now,
+            Event::Pipe(Request::Notify {
+                id: None,
+                title: "deploy".into(),
+                body: None,
+                level: crate::protocol::Level::Info,
+                progress: Some(0.4),
+                sticky: true,
+                ttl_ms: None,
+                hwnd: None,
+            }),
+        );
+        m.update(
+            now,
+            Event::Ports(
+                (0..9).map(|i| PortEntry { port: 3000 + i, pid: 100 + i as u32, process: "node.exe".into(), can_stop: i != 1 }).collect(),
+            ),
+        );
+        m.update(now, Event::Click(Action::PortStop(3002)));
+        m.update(now, Event::Clipboard { text: "#F2A93B".into(), unix_now: 1_700_000_000 });
+        m.update(now, Event::Click(Action::TimerStart(25)));
+        m.update(now, Event::Fullscreen { active: true, exe: "game.exe".into() });
+        m.update(now, Event::Stats(GpuStats { gpu_pct: Some(87.0), vram_mb: Some(6200), temp_c: Some(71), ping_ms: Some(18) }));
+        m.update(now, Event::Capture(Capture { path: "C:\\c.mp4".into(), name: "c.mp4".into(), kind: CaptureKind::Clip, at_ms: now }));
+        m.update(now, Event::Privacy(vec![(Device::Microphone, "Discord".into()), (Device::Camera, "Zoom".into())]));
+        m.update(now, Event::Fullscreen { active: false, exe: String::new() });
+        for edge in Edge::ALL {
+            m.state = IslandState::Orb;
+            out.push((format!("orb {edge:?}"), build(&m, edge, &ApproxMeasure)));
+            m.state = IslandState::Seam;
+            out.push((format!("seam {edge:?}"), build(&m, edge, &ApproxMeasure)));
+            m.state = IslandState::Tag;
+            m.hover_tag = false;
+            out.push((format!("tag {edge:?}"), build(&m, edge, &ApproxMeasure)));
+            m.hover_tag = true;
+            out.push((format!("hover tag {edge:?}"), build(&m, edge, &ApproxMeasure)));
+            m.state = IslandState::Slips;
+            for slip in m.available_slips() {
+                m.front = Some(slip);
+                out.push((format!("{slip:?} {edge:?}"), build(&m, edge, &ApproxMeasure)));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_scene_fits_its_bounds_and_the_window_box() {
+        for (name, s) in all_scenes() {
+            let bounds = Rect::new(0.0, 0.0, s.size.w, s.size.h).inset(-1.5);
+            for p in &s.prims {
+                assert!(bounds.encloses(&p.bounds()), "{name}: {p:?} outside {:?}", s.size);
+            }
+            for h in &s.hits {
+                assert!(bounds.inset(-8.0).encloses(&h.rect), "{name}: hit {:?} outside", h.label);
+                assert!(!h.label.is_empty(), "{name}: unlabeled hit");
+            }
+            assert!(s.size.w <= BOX_DEPTH.max(BOX_SPAN) && s.size.h <= BOX_SPAN, "{name}: {:?} too big", s.size);
+            if s.kind != SceneKind::Seam && s.kind != SceneKind::Hidden && matches!(s.kind, SceneKind::Slip(_)) {
+                assert!(s.size.w + EDGE_GAP <= BOX_DEPTH, "{name}");
+                assert!(s.size.h <= BOX_SPAN, "{name}: {}", s.size.h);
+            }
+        }
+    }
+
+    #[test]
+    fn buttons_meet_touch_target() {
+        for (name, s) in all_scenes() {
+            for h in &s.hits {
+                if let HitKind::Click(Action::SelectSlip(_) | Action::ToggleSlips) = h.kind {
+                    continue;
+                }
+                assert!(h.rect.h >= 28.0 && h.rect.w >= 28.0, "{name}: {} is {:?}", h.label, h.rect);
+            }
+        }
+    }
+
+    #[test]
+    fn ring_reflects_priority() {
+        let mut m = Model::new(Config::default(), 3, 0);
+        assert!(ring(&m).is_none());
+        m.update(
+            0,
+            Event::Media(vec![MediaSession {
+                id: "a".into(),
+                title: "t".into(),
+                playing: true,
+                duration_ms: 100_000,
+                ..Default::default()
+            }]),
+        );
+        assert_eq!(ring(&m).unwrap().0, MEDIA);
+        m.update(0, Event::Click(Action::TimerStart(25)));
+        assert_eq!(ring(&m).unwrap().0, GAME);
+        m.update(0, Event::Privacy(vec![(Device::Camera, "x".into())]));
+        assert_eq!(ring(&m).unwrap().0, PRIVACY);
+        m.update(10, Event::Wheel { notches: 1, shift: false });
+        assert_eq!(ring(&m).unwrap().0, TEXT);
+    }
+
+    #[test]
+    fn ring_animation_continuity() {
+        let a =
+            RingSpec { center: Point::new(22.0, 22.0), radius: 11.0, width: 2.0, color: MEDIA, value: 0.2, rate_per_ms: 1.0 / 200_000.0 };
+        let later = RingSpec { value: 0.2 + 1000.0 / 200_000.0, ..a };
+        assert!(later.continues(&a, 1000));
+        let seeked = RingSpec { value: 0.6, ..a };
+        assert!(!seeked.continues(&a, 1000));
+        assert_eq!(ring_points(&RingSpec { value: 1.0, ..a }).len(), 49);
+    }
+
+    #[test]
+    fn hits_resolve_topmost() {
+        let mut m = Model::new(Config::default(), 3, 0);
+        m.update(
+            0,
+            Event::Pipe(Request::Done {
+                title: None,
+                id: "x".into(),
+                ok: false,
+                code: Some(2),
+                duration_s: None,
+                hwnd: Some("0x5".into()),
+            }),
+        );
+        let s = build(&m, Edge::Left, &ApproxMeasure);
+        assert_eq!(s.kind, SceneKind::Tag);
+        let action_hit = s.hits.iter().find(|h| matches!(h.kind, HitKind::Click(Action::JobOpenTerminal(_)))).unwrap();
+        let c = (action_hit.rect.x + 2.0, action_hit.rect.y + 2.0);
+        assert!(matches!(s.hit_at(c.0, c.1).unwrap().kind, HitKind::Click(Action::JobOpenTerminal(_))));
+        assert!(matches!(s.hit_at(3.0, 3.0).unwrap().kind, HitKind::Click(Action::ToggleSlips)));
+    }
+
+    #[test]
+    fn seam_orientation() {
+        let mut m = Model::new(Config::default(), 3, 0);
+        m.state = IslandState::Seam;
+        assert_eq!(build(&m, Edge::Left, &ApproxMeasure).size, Size::new(SEAM_T, SEAM_L));
+        assert_eq!(build(&m, Edge::Top, &ApproxMeasure).size, Size::new(SEAM_L, SEAM_T));
+    }
+}

@@ -1,0 +1,625 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ngambang</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="An edge-docked floating island for Windows: media for every app, a per-app mixer, command tags, ports, a dev clipboard, game stats and a mic/camera beacon. Native, light, and every module optional.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: one column of bands; the hero pairs copy with a live screen-edge demo. */
+:root {
+  --ground: #1f2930;
+  --ground-2: #26323b;
+  --surface: #15171a;
+  --surface-2: #1e2125;
+  --surface-3: #262a2f;
+  --line: rgba(255, 255, 255, 0.09);
+  --text: #eceded;
+  --text-2: #a7aeb5;
+  --label: #9aa2a9;
+  --accent: #f2a93b;
+  --accent-ink: #15171a;
+  --privacy: #ff7a5c;
+  --game: #b7e04a;
+  --coder: #a99bff;
+  --ports: #4cc3d9;
+  --ok: #7fd1ae;
+  --screen: #33424d;
+  --screen-window: #d9dde1;
+  --font-display: "Instrument Sans", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Instrument Sans", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  --ease-grow: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-shrink: cubic-bezier(0.22, 1, 0.36, 1);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --ground: #eef1f3;
+    --ground-2: #e2e7eb;
+    --surface: #15171a;
+    --surface-2: #1e2125;
+    --surface-3: #262a2f;
+    --line: rgba(20, 30, 40, 0.12);
+    --text: #161b20;
+    --text-2: #4a535c;
+    --label: #5b646d;
+    --accent: #8a5205;
+    --accent-ink: #ffffff;
+    --privacy: #c2401f;
+    --game: #4d7a00;
+    --coder: #5b49d6;
+    --ports: #137f93;
+    --ok: #1f7a55;
+    --screen: #9fb0bc;
+    --screen-window: #f7f8f9;
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --ground: #eef1f3;
+  --ground-2: #e2e7eb;
+  --surface: #15171a;
+  --surface-2: #1e2125;
+  --surface-3: #262a2f;
+  --line: rgba(20, 30, 40, 0.12);
+  --text: #161b20;
+  --text-2: #4a535c;
+  --label: #5b646d;
+  --accent: #8a5205;
+  --accent-ink: #ffffff;
+  --privacy: #c2401f;
+  --game: #4d7a00;
+  --coder: #5b49d6;
+  --ports: #137f93;
+  --ok: #1f7a55;
+  --screen: #9fb0bc;
+  --screen-window: #f7f8f9;
+  color-scheme: light;
+}
+
+/* The island itself always uses its own dark palette, as on Windows. */
+.island, .island * { --i-text: #eceded; --i-text-2: #9ba1a8; --i-label: #8e959c; --i-amber: #f2a93b; --i-track: #3a3f45; }
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--text);
+  font: 400 17px/1.6 var(--font-body);
+}
+a { color: var(--accent); text-underline-offset: 3px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; line-height: 1.12; }
+p { margin: 0; }
+code, pre, kbd { font-family: var(--font-mono); }
+
+.wrap {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding-left: max(20px, env(safe-area-inset-left, 0px));
+  padding-right: max(20px, env(safe-area-inset-right, 0px));
+}
+.band { padding-block: 88px; }
+.band.alt { background: var(--ground-2); }
+.eyebrow {
+  font: 500 12px/1 var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--label);
+}
+.lead { color: var(--text-2); max-width: 60ch; }
+
+/* Header */
+header.top { padding-block: 22px; }
+.top-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.mark { display: inline-flex; align-items: center; gap: 10px; color: var(--text); text-decoration: none; font: 700 20px/1 var(--font-display); letter-spacing: -0.01em; }
+.mark svg { flex: none; }
+nav.links { display: flex; gap: 22px; flex-wrap: wrap; font-size: 15px; }
+nav.links a { color: var(--text-2); text-decoration: none; }
+nav.links a:hover { color: var(--text); }
+
+/* Hero */
+.hero { padding-block: 40px 96px; }
+.hero-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 56px; align-items: center; }
+.hero h1 { font-size: clamp(40px, 6vw, 68px); font-weight: 700; letter-spacing: -0.025em; }
+.hero h1 em { font-style: normal; color: var(--accent); }
+.hero .lead { font-size: 19px; margin-top: 22px; }
+.word { margin-top: 18px; font: 400 14px/1.5 var(--font-mono); color: var(--label); }
+.word b { color: var(--text-2); font-weight: 500; }
+.ctas { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 32px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 10px;
+  min-height: 48px; padding: 0 20px; border-radius: 12px;
+  font: 600 16px/1 var(--font-body); text-decoration: none; cursor: pointer;
+  border: 1px solid transparent;
+}
+.btn.primary { background: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.ghost { color: var(--text); border-color: var(--line); background: transparent; }
+.btn.ghost:hover { background: var(--line); }
+.meta { margin-top: 16px; font: 400 13px/1.5 var(--font-mono); color: var(--label); }
+
+/* Demo screen */
+.demo { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.screen {
+  position: relative; height: 380px; border-radius: 14px; overflow: hidden;
+  background: var(--screen); box-shadow: 0 30px 70px rgba(0, 0, 0, 0.28);
+}
+.screen .win { position: absolute; border-radius: 9px; background: var(--screen-window); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22); }
+.screen .win::before { content: ""; position: absolute; inset: 0 0 auto; height: 28px; border-radius: 9px 9px 0 0; background: rgba(0, 0, 0, 0.07); }
+.screen .w1 { left: 22%; top: 9%; width: 62%; height: 64%; }
+.screen .w2 { left: 64%; top: 38%; width: 30%; height: 50%; }
+.screen .bar { position: absolute; left: 0; right: 0; bottom: 0; height: 34px; background: rgba(15, 18, 21, 0.85); display: flex; justify-content: center; align-items: center; gap: 8px; }
+.screen .bar i { width: 18px; height: 18px; border-radius: 5px; background: #4a535c; }
+.screen.game { background: #1b2a22; }
+.screen.game .win, .screen.game .bar { opacity: 0; }
+.screen .gamefx { position: absolute; inset: 0; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+.screen.game .gamefx { opacity: 1; }
+.gamefx .ground { position: absolute; left: 0; right: 0; bottom: 0; height: 38%; background: #14201a; }
+.gamefx .reticle { position: absolute; left: 50%; top: 46%; width: 70px; height: 70px; margin: -35px 0 0 -35px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, 0.28); }
+.gamefx .hint { position: absolute; right: 14px; top: 12px; font: 400 12px/1 var(--font-mono); color: #9ba1a8; }
+
+.island {
+  position: absolute; left: 10px; top: 50%;
+  width: 30px; height: 30px; border-radius: 15px;
+  transform: translateY(-50%);
+  background: #15171a; border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4);
+  padding: 0; cursor: pointer; overflow: hidden; color: var(--i-text);
+  font: inherit; text-align: left;
+  transition: width 0.34s var(--ease-grow), height 0.34s var(--ease-grow), border-radius 0.3s, left 0.25s, background 0.25s, box-shadow 0.25s;
+}
+.island[data-state="tag"] { width: 236px; height: 40px; border-radius: 12px 20px 20px 12px; }
+.island[data-state="slips"] { width: min(330px, calc(100% - 20px)); height: 214px; border-radius: 14px 6px 14px 14px; }
+.island[data-state="orb"], .island[data-state="seam"] { transition-timing-function: var(--ease-shrink); }
+.island[data-state="seam"] { left: 0; width: 3px; height: 92px; border-radius: 0 2px 2px 0; background: var(--i-amber); border-color: transparent; box-shadow: none; }
+.island .ring { position: absolute; left: -1px; top: -1px; width: 30px; height: 30px; transition: opacity 0.2s, top 0.3s, left 0.3s; }
+.island[data-state="tag"] .ring { top: 5px; left: 5px; }
+.island[data-state="slips"] .ring, .island[data-state="seam"] .ring { opacity: 0; }
+.ring .prog { stroke-dasharray: 69.1; stroke-dashoffset: 41; animation: tide 24s linear infinite; }
+@keyframes tide { from { stroke-dashoffset: 55; } to { stroke-dashoffset: 0; } }
+.island .layer { position: absolute; inset: 0; opacity: 0; pointer-events: none; transition: opacity 0.18s; }
+.island[data-state="tag"] .tag-layer { opacity: 1; transition-delay: 0.12s; }
+.island[data-state="slips"] .slip-layer { opacity: 1; transition-delay: 0.14s; }
+.tag-layer { display: flex; align-items: center; gap: 10px; padding-left: 44px; white-space: nowrap; }
+.tag-layer .t { font: 500 14px/1 var(--font-body); }
+.tag-layer .d { font: 400 12px/1 var(--font-mono); color: var(--i-text-2); }
+.slip-layer { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.slip-layer .lbl { font: 500 11px/1 var(--font-mono); letter-spacing: 0.08em; color: var(--i-label); }
+.slip-layer .row { display: flex; gap: 12px; align-items: center; }
+.slip-layer .art { width: 52px; height: 52px; border-radius: 8px; background: #3a2e1c; display: grid; place-items: center; flex: none; }
+.slip-layer .tt { font: 600 16px/1.2 var(--font-body); }
+.slip-layer .ar { font: 400 13px/1.3 var(--font-body); color: var(--i-text-2); }
+.slip-layer .times { display: flex; justify-content: space-between; font: 400 11px/1 var(--font-mono); color: var(--i-label); }
+.slip-layer .ctrls { display: flex; justify-content: center; gap: 10px; }
+.slip-layer .ctrls span { width: 44px; height: 36px; border-radius: 10px; display: grid; place-items: center; }
+.slip-layer .ctrls .pp { width: 54px; background: var(--i-amber); }
+.tabs-col { position: absolute; right: 8px; top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.tabs-col i { width: 6px; height: 6px; border-radius: 3px; display: block; }
+
+.controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
+.seg { display: inline-flex; padding: 4px; border-radius: 12px; background: var(--ground-2); border: 1px solid var(--line); }
+.seg button { min-height: 40px; padding: 0 14px; border: 0; border-radius: 9px; background: transparent; color: var(--text-2); font: 500 14px/1 var(--font-body); cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--surface); color: #eceded; }
+.demo-hint { font: 400 13px/1.4 var(--font-mono); color: var(--label); }
+
+/* States strip */
+.states { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; margin-top: 40px; }
+.state { display: flex; flex-direction: column; gap: 12px; }
+.state .stage { height: 150px; border-radius: 12px; background: var(--screen); position: relative; overflow: hidden; }
+.state h3 { font-size: 18px; display: flex; gap: 10px; align-items: baseline; }
+.state h3 span { font: 500 12px/1 var(--font-mono); color: var(--accent); letter-spacing: 0.08em; }
+.state p { color: var(--text-2); font-size: 15px; }
+.mini { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); background: #15171a; border: 1px solid rgba(255, 255, 255, 0.09); }
+.mini.seam { left: 0; width: 3px; height: 70px; border: 0; border-radius: 0 2px 2px 0; background: #f2a93b; }
+.mini.orb { width: 30px; height: 30px; border-radius: 15px; }
+.mini.tag { width: 150px; height: 34px; border-radius: 10px 17px 17px 10px; }
+.mini.slip { width: 150px; height: 100px; border-radius: 12px 5px 12px 12px; }
+.mini.slip::after { content: ""; position: absolute; left: 14px; right: 14px; top: 16px; height: 6px; border-radius: 3px; background: #3a3f45; box-shadow: 0 16px 0 #3a3f45, 0 32px 0 -1px #f2a93b; }
+
+/* Modules */
+.mod-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 40px; }
+.mod {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 14px; align-items: start;
+  padding: 20px; border-radius: 14px; background: var(--ground); border: 1px solid var(--line);
+  transition: opacity 0.2s;
+}
+.band.alt .mod { background: var(--ground); }
+.mod.off { opacity: 0.55; }
+.mod h3 { font-size: 17px; display: flex; align-items: center; gap: 10px; }
+.mod h3 .dot { width: 8px; height: 8px; border-radius: 4px; flex: none; }
+.mod p { grid-column: 1 / -1; color: var(--text-2); font-size: 15px; line-height: 1.5; }
+.mod code.key { grid-column: 1 / -1; font-size: 12.5px; color: var(--label); }
+.switch { position: relative; width: 46px; height: 28px; flex: none; }
+.switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.switch .track { position: absolute; inset: 0; border-radius: 14px; background: var(--surface-3); transition: background 0.2s; pointer-events: none; }
+.switch .knob { position: absolute; top: 4px; left: 4px; width: 20px; height: 20px; border-radius: 10px; background: #eceded; transition: transform 0.2s var(--ease-grow); pointer-events: none; }
+.switch input:checked + .track { background: var(--accent); }
+.switch input:checked + .track + .knob { transform: translateX(18px); }
+.switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 3px; }
+.config { margin-top: 28px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 28px; align-items: start; }
+.config p { color: var(--text-2); }
+.codebox { position: relative; border-radius: 14px; background: var(--surface); color: #d8dbde; border: 1px solid var(--line); min-width: 0; }
+.codebox pre { margin: 0; padding: 20px 22px; overflow-x: auto; font-size: 14px; line-height: 1.65; }
+.codebox .c { color: #8e959c; }
+.codebox .k { color: #f2a93b; }
+.codebox .f { color: #8e959c; }
+.copy { position: absolute; top: 10px; right: 10px; min-height: 36px; padding: 0 12px; border-radius: 9px; border: 1px solid rgba(255, 255, 255, 0.12); background: #23272c; color: #eceded; font: 500 13px/1 var(--font-body); cursor: pointer; }
+.copy:hover { background: #2c3137; }
+
+/* Two layers */
+.layers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin-top: 40px; }
+.layer-card { padding: 26px; border-radius: 14px; border: 1px solid var(--line); background: var(--ground-2); display: flex; flex-direction: column; gap: 10px; }
+.band.alt .layer-card { background: var(--ground); }
+.layer-card h3 { font-size: 20px; }
+.layer-card p { color: var(--text-2); }
+.layer-card .api { font: 400 13px/1.5 var(--font-mono); color: var(--label); }
+
+/* CLI */
+.cli-grid { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 40px; margin-top: 40px; align-items: start; }
+.cli-grid .lead { margin-bottom: 18px; }
+.tablist { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+.tablist button { min-height: 40px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--line); background: transparent; color: var(--text-2); font: 500 14px/1 var(--font-mono); cursor: pointer; }
+.tablist button[aria-selected="true"] { background: var(--surface); color: #eceded; border-color: transparent; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 15px; }
+.tbl th, .tbl td { text-align: left; padding: 12px 10px 12px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl th { font: 500 12px/1 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--label); }
+.tbl td code { font-size: 13.5px; color: var(--text); }
+.scroll-x { overflow-x: auto; }
+.tags-demo { display: flex; flex-direction: column; gap: 10px; margin-top: 22px; }
+.ftag { align-self: flex-start; display: inline-flex; align-items: center; gap: 10px; height: 40px; padding: 0 16px 0 8px; border-radius: 12px 20px 20px 12px; background: #15171a; border: 1px solid rgba(255, 255, 255, 0.09); color: #eceded; font: 400 13px/1 var(--font-mono); white-space: nowrap; max-width: 100%; }
+.ftag .d { color: #9ba1a8; }
+.ftag.fail { border-color: rgba(255, 107, 74, 0.4); }
+.ftag.fail .d { color: #ff8a70; }
+
+/* Footer */
+footer { padding-block: 40px; border-top: 1px solid var(--line); }
+.foot { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; color: var(--label); font: 400 14px/1.6 var(--font-mono); }
+.foot a { color: var(--text-2); }
+
+@media (max-width: 920px) {
+  .hero-grid, .config, .cli-grid { grid-template-columns: minmax(0, 1fr); }
+  .mod-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .states { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 600px) {
+  body { font-size: 16px; }
+  .band { padding-block: 64px; }
+  .mod-grid, .layers, .states { grid-template-columns: minmax(0, 1fr); }
+  .screen { height: 320px; }
+  nav.links { gap: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0.01ms !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap top-row">
+    <a class="mark" href="#top" aria-label="Ngambang home">
+      <svg width="28" height="28" viewBox="0 0 30 30" aria-hidden="true"><circle cx="15" cy="15" r="14" fill="#15171a"/><circle cx="15" cy="15" r="10.5" fill="none" stroke="#3a3f45" stroke-width="2"/><circle cx="15" cy="15" r="10.5" fill="none" stroke="#f2a93b" stroke-width="2" stroke-dasharray="40 66" stroke-linecap="round" transform="rotate(-90 15 15)"/><circle cx="15" cy="15" r="3.5" fill="#f2a93b"/></svg>
+      ngambang
+    </a>
+    <nav class="links" aria-label="Sections">
+      <a href="#modules">Modules</a>
+      <a href="#cli">CLI</a>
+      <a href="https://github.com/kloworizer/ngambang/blob/main/docs/SPEC.md">Spec</a>
+      <a href="https://github.com/kloworizer/ngambang">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <h1>An island that floats on the <em>edge</em> of your screen.</h1>
+        <p class="lead">Ngambang is a small orb for Windows. It rests on any screen edge, shows what is running on its ring, and unfolds into slips for music, volume, builds, ports, your clipboard and games. When a game goes fullscreen it sinks to a 3&nbsp;px line.</p>
+        <p class="word"><b>ngambang</b> · Javanese · <i>floating, drifting on the surface</i></p>
+        <div class="ctas">
+          <a class="btn primary" href="https://github.com/kloworizer/ngambang/releases/latest">
+            <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 20h14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Download for Windows
+          </a>
+          <a class="btn ghost" href="https://github.com/kloworizer/ngambang">Source on GitHub</a>
+        </div>
+        <p class="meta">v0.1.0 · x64 &amp; ARM64 · Windows 10 1903+ · MIT</p>
+      </div>
+
+      <div class="demo">
+        <div class="screen" id="screen">
+          <div class="win w1" aria-hidden="true"></div>
+          <div class="win w2" aria-hidden="true"></div>
+          <div class="bar" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+          <div class="gamefx" aria-hidden="true"><div class="ground"></div><div class="reticle"></div><span class="hint">[a game, fullscreen]</span></div>
+          <button class="island" id="island" data-state="orb" type="button" aria-label="Ngambang demo: now playing. Click to open." aria-expanded="false">
+            <svg class="ring" viewBox="0 0 30 30" aria-hidden="true"><circle cx="15" cy="15" r="11" fill="none" stroke="#3a3f45" stroke-width="2"/><circle class="prog" cx="15" cy="15" r="11" fill="none" stroke="#f2a93b" stroke-width="2" stroke-linecap="round" transform="rotate(-90 15 15)"/><circle cx="15" cy="15" r="3.5" fill="#f2a93b"/></svg>
+            <span class="layer tag-layer" aria-hidden="true">
+              <svg width="38" height="12" viewBox="0 0 44 14"><path d="M0 7 Q 5.5 1 11 7 T 22 7 T 33 7 T 44 7" fill="none" stroke="#f2a93b" stroke-width="2" stroke-linecap="round"/></svg>
+              <span class="t">Track title</span><span class="d">1:42</span>
+            </span>
+            <span class="layer slip-layer" aria-hidden="true">
+              <span class="lbl">MEDIA · 2 SOURCES</span>
+              <span class="row">
+                <span class="art"><svg width="20" height="20" viewBox="0 0 24 24"><path d="M9 18V5l10-2v13" fill="none" stroke="#f2a93b" stroke-width="1.8" stroke-linejoin="round"/><circle cx="6.5" cy="18" r="2.5" fill="none" stroke="#f2a93b" stroke-width="1.8"/><circle cx="16.5" cy="16" r="2.5" fill="none" stroke="#f2a93b" stroke-width="1.8"/></svg></span>
+                <span><span class="tt" style="display:block">Track title</span><span class="ar">Artist name</span></span>
+              </span>
+              <svg width="100%" height="14" viewBox="0 0 290 14" preserveAspectRatio="none"><path d="M0 7 Q 5.5 1 11 7 T 22 7 T 33 7 T 44 7 T 55 7 T 66 7 T 77 7 T 88 7 T 99 7 T 110 7" fill="none" stroke="#f2a93b" stroke-width="2" stroke-linecap="round"/><circle cx="116" cy="7" r="3" fill="#eceded"/><path d="M124 7 H290" stroke="#3a3f45" stroke-width="2"/></svg>
+              <span class="times"><span>1:42</span><span>3:58</span></span>
+              <span class="ctrls">
+                <span><svg width="16" height="16" viewBox="0 0 24 24"><path d="M6 5v14M19 5l-10 7 10 7z" fill="#eceded" stroke="#eceded" stroke-width="1.5" stroke-linejoin="round"/></svg></span>
+                <span class="pp"><svg width="16" height="16" viewBox="0 0 24 24"><path d="M8.5 5v14M15.5 5v14" stroke="#15171a" stroke-width="3" stroke-linecap="round"/></svg></span>
+                <span><svg width="16" height="16" viewBox="0 0 24 24"><path d="M18 5v14M5 5l10 7-10 7z" fill="#eceded" stroke="#eceded" stroke-width="1.5" stroke-linejoin="round"/></svg></span>
+              </span>
+            </span>
+          </button>
+        </div>
+        <div class="controls">
+          <div class="seg" role="group" aria-label="What has focus">
+            <button type="button" id="mode-desktop" aria-pressed="true">Desktop</button>
+            <button type="button" id="mode-game" aria-pressed="false">Fullscreen game</button>
+          </div>
+          <span class="demo-hint" id="demo-hint">Hover the orb, then click it.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band alt" aria-labelledby="states-h">
+    <div class="wrap">
+      <p class="eyebrow">How it behaves</p>
+      <h2 id="states-h" style="font-size: clamp(30px, 4vw, 44px); margin-top: 12px;">Four states, from a line to a card.</h2>
+      <div class="states">
+        <div class="state"><div class="stage"><span class="mini seam"></span></div><h3><span>SEAM</span>Out of the way</h3><p>A 3&nbsp;px line while a fullscreen app has focus. Only mic/camera alerts and your break reminder come through.</p></div>
+        <div class="state"><div class="stage"><span class="mini orb"></span></div><h3><span>ORB</span>Resting</h3><p>The ring is the tide: progress of the track, timer or build that is running. Scroll on it for volume.</p></div>
+        <div class="state"><div class="stage"><span class="mini tag"></span></div><h3><span>TAG</span>A glance</h3><p>Hover, or a new event, and a label slides out: a finished build, a saved clip, the next track.</p></div>
+        <div class="state"><div class="stage"><span class="mini slip"></span></div><h3><span>SLIPS</span>Everything</h3><p>Click and it unfolds. Every active module gets an index tab on the outer side; scroll to flip.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" id="modules" aria-labelledby="modules-h">
+    <div class="wrap">
+      <p class="eyebrow">Modules</p>
+      <h2 id="modules-h" style="font-size: clamp(30px, 4vw, 44px); margin-top: 12px;">Keep what you use. Switch off the rest.</h2>
+      <p class="lead" style="margin-top: 14px;">There are no bundles or profiles. Each module turns on or off on its own, from the tray menu or the config file, and a module that is off starts nothing. Try it below.</p>
+
+      <div class="mod-grid" id="mod-grid"></div>
+
+      <div class="config">
+        <div>
+          <h3 style="font-size: 22px;">Your <code>[modules]</code> block</h3>
+          <p style="margin-top: 10px;">Paste it into <code>%APPDATA%\Ngambang\config.toml</code>. The island picks up the change as soon as you save, no restart.</p>
+        </div>
+        <div class="codebox">
+          <button class="copy" type="button" id="copy-config">Copy</button>
+          <pre id="config-out" aria-live="polite"></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band alt" aria-labelledby="apps-h">
+    <div class="wrap">
+      <p class="eyebrow">Media</p>
+      <h2 id="apps-h" style="font-size: clamp(30px, 4vw, 44px); margin-top: 12px;">Control every app that makes sound.</h2>
+      <p class="lead" style="margin-top: 14px;">Windows has two separate hooks for this, and Ngambang uses both, so nothing playing is out of reach.</p>
+      <div class="layers">
+        <div class="layer-card">
+          <h3>Playback</h3>
+          <p>Title, play, pause, skip and seek for every app that publishes Windows media controls: music apps, every major browser (so web players too) and video players. With several playing, switch between them from source chips.</p>
+          <p class="api">Windows.Media.Control · SMTC</p>
+        </div>
+        <div class="layer-card">
+          <h3>Volume &amp; mute</h3>
+          <p>A mixer row for every process that outputs audio, including games and voice chat that report nothing else. Each row says whether the app also has playback controls.</p>
+          <p class="api">WASAPI · IAudioSessionManager2</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" id="cli" aria-labelledby="cli-h">
+    <div class="wrap">
+      <p class="eyebrow">For your terminal</p>
+      <h2 id="cli-h" style="font-size: clamp(30px, 4vw, 44px); margin-top: 12px;">Know when the build is done.</h2>
+      <div class="cli-grid">
+        <div>
+          <p class="lead">Wrap a command with <code>ngambang run</code>, or add one line to your shell profile and every command that takes longer than 30 seconds reports how it ended. A failed one gets a button that brings its terminal back.</p>
+          <div class="tags-demo" aria-hidden="true">
+            <span class="ftag"><svg width="24" height="24" viewBox="0 0 30 30"><circle cx="15" cy="15" r="11" fill="none" stroke="#7fd1ae" stroke-width="2"/><path d="M10 15l3.5 3.5L20 12" fill="none" stroke="#7fd1ae" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>cargo test <span class="d">2m14s</span></span>
+            <span class="ftag fail"><svg width="24" height="24" viewBox="0 0 30 30"><circle cx="15" cy="15" r="11" fill="none" stroke="#ff6b4a" stroke-width="2"/><path d="M11 11l8 8M19 11l-8 8" fill="none" stroke="#ff6b4a" stroke-width="2" stroke-linecap="round"/></svg>npm run build <span class="d">exit 1</span></span>
+          </div>
+        </div>
+        <div>
+          <div class="tablist" role="tablist" aria-label="Shell">
+            <button type="button" role="tab" id="tab-ps" aria-selected="true" aria-controls="panel-ps">PowerShell</button>
+            <button type="button" role="tab" id="tab-sh" aria-selected="false" aria-controls="panel-sh">bash / zsh</button>
+          </div>
+          <div class="codebox" role="tabpanel" id="panel-ps" aria-labelledby="tab-ps">
+<pre><span class="c"># once, in $PROFILE</span>
+ngambang hook powershell | Out-String | Invoke-Expression
+
+<span class="c"># any time</span>
+ngambang run -- cargo build --release
+ngambang notify <span class="k">"deploy staging"</span> --progress 40
+ngambang done <span class="k">"deploy staging"</span> --ok</pre>
+          </div>
+          <div class="codebox" role="tabpanel" id="panel-sh" aria-labelledby="tab-sh" hidden>
+<pre><span class="c"># once, in ~/.bashrc or ~/.zshrc (Git Bash, WSL)</span>
+eval <span class="k">"$(ngambang.exe hook bash)"</span>   <span class="c"># or: hook zsh</span>
+
+<span class="c"># any time</span>
+ngambang.exe run -- make test
+ngambang.exe notify <span class="k">"backup finished"</span> --level ok</pre>
+          </div>
+          <div class="scroll-x" style="margin-top: 22px;">
+            <table class="tbl">
+              <thead><tr><th scope="col">Input</th><th scope="col">On the island</th></tr></thead>
+              <tbody>
+                <tr><td><code>Win+Alt+Space</code></td><td>Open with the keyboard; <code>Tab</code>, <code>Enter</code>, <code>Esc</code></td></tr>
+                <tr><td>Wheel on the orb</td><td>System volume (<code>Shift</code>: skip track)</td></tr>
+                <tr><td>Middle-click</td><td>Play / pause</td></tr>
+                <tr><td>Drag the orb</td><td>Dock to another edge or monitor</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <span>Ngambang 0.1.0 · MIT · no telemetry</span>
+    <span><a href="https://github.com/kloworizer/ngambang/blob/main/CHANGELOG.md">Changelog</a> · <a href="https://github.com/kloworizer/ngambang/blob/main/docs/integrations.md">Integrations</a> · <a href="https://github.com/kloworizer/ngambang/releases">Releases</a></span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  // ---- Live island demo ----
+  var island = document.getElementById("island");
+  var screen = document.getElementById("screen");
+  var hint = document.getElementById("demo-hint");
+  var btnDesk = document.getElementById("mode-desktop");
+  var btnGame = document.getElementById("mode-game");
+  var game = false;
+
+  function set(state) {
+    island.setAttribute("data-state", state);
+    island.setAttribute("aria-expanded", state === "slips" ? "true" : "false");
+    var hints = {
+      orb: "Hover the orb, then click it.",
+      tag: "Click to open the slips.",
+      slips: "Click again, or move away, to close.",
+      seam: "A game has focus: the island is a 3 px line."
+    };
+    hint.textContent = hints[state];
+  }
+  function rest() { set(game ? "seam" : "orb"); }
+
+  island.addEventListener("mouseenter", function () {
+    if (island.getAttribute("data-state") === "orb") set("tag");
+  });
+  island.addEventListener("mouseleave", function () {
+    if (island.getAttribute("data-state") === "tag") rest();
+  });
+  screen.addEventListener("mouseleave", function () {
+    if (island.getAttribute("data-state") === "slips") rest();
+  });
+  island.addEventListener("click", function () {
+    var s = island.getAttribute("data-state");
+    set(s === "slips" ? (game ? "seam" : "tag") : "slips");
+  });
+  island.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") rest();
+  });
+  function mode(isGame) {
+    game = isGame;
+    screen.classList.toggle("game", isGame);
+    btnDesk.setAttribute("aria-pressed", String(!isGame));
+    btnGame.setAttribute("aria-pressed", String(isGame));
+    rest();
+  }
+  btnDesk.addEventListener("click", function () { mode(false); });
+  btnGame.addEventListener("click", function () { mode(true); });
+
+  // ---- Module picker -> [modules] block ----
+  var modules = [
+    ["media", "Media player", "--accent", "Now playing from every app with Windows media controls. Switch sources; play, pause, skip, seek."],
+    ["mixer", "Volume mixer", "--text", "Volume and mute for every app making sound, games and voice chat included."],
+    ["commands", "Command tags", "--coder", "✓ or ✕ when long commands finish, from ngambang run or your shell hook."],
+    ["ports", "Local ports", "--ports", "What is listening on localhost. Open it in the browser, or stop it."],
+    ["clipboard", "Dev clipboard", "--coder", "JWT, JSON, base64, Unix time, UUID, colours and tracking links, with one-tap fixes."],
+    ["timer", "Focus timer", "--game", "25 or 50-minute rounds on the ring. Minor tags wait until the break."],
+    ["game", "Game stats", "--game", "Session time, GPU load, VRAM, temperature, ping and a break reminder."],
+    ["captures", "Screenshots & clips", "--ports", "New captures get a tag; copy them or show them in their folder."],
+    ["privacy", "Mic & camera", "--privacy", "Tells you when an app uses the microphone or camera, even mid-game."]
+  ];
+  var state = {};
+  var grid = document.getElementById("mod-grid");
+  var out = document.getElementById("config-out");
+
+  function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;"); }
+  function render() {
+    var lines = ['<span class="c"># config.toml</span>', '[modules]'];
+    modules.forEach(function (m) {
+      var on = state[m[0]];
+      lines.push(esc(m[0]) + ' = <span class="' + (on ? "k" : "f") + '">' + on + "</span>");
+    });
+    out.innerHTML = lines.join("\n");
+  }
+  modules.forEach(function (m) {
+    state[m[0]] = true;
+    var card = document.createElement("div");
+    card.className = "mod";
+    var id = "mod-" + m[0];
+    card.innerHTML =
+      '<h3><span class="dot" style="background: var(' + m[2] + ')"></span><label for="' + id + '">' + esc(m[1]) + "</label></h3>" +
+      '<span class="switch"><input type="checkbox" role="switch" id="' + id + '" checked><span class="track"></span><span class="knob"></span></span>' +
+      "<p>" + esc(m[3]) + "</p>" +
+      '<code class="key">' + m[0] + "</code>";
+    grid.appendChild(card);
+    card.querySelector("input").addEventListener("change", function (e) {
+      state[m[0]] = e.target.checked;
+      card.classList.toggle("off", !e.target.checked);
+      render();
+    });
+  });
+  render();
+
+  var copyBtn = document.getElementById("copy-config");
+  copyBtn.addEventListener("click", function () {
+    var text = out.textContent;
+    function done(msg) { copyBtn.textContent = msg; setTimeout(function () { copyBtn.textContent = "Copy"; }, 1600); }
+    function fallback() {
+      var r = document.createRange();
+      r.selectNodeContents(out);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      done("Selected");
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done("Copied"); }, fallback);
+    } else {
+      fallback();
+    }
+  });
+
+  // ---- Shell tabs ----
+  var tabs = [["tab-ps", "panel-ps"], ["tab-sh", "panel-sh"]];
+  tabs.forEach(function (t, i) {
+    var tab = document.getElementById(t[0]);
+    tab.addEventListener("click", function () { select(i); });
+    tab.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+        var next = (i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length;
+        select(next);
+        document.getElementById(tabs[next][0]).focus();
+      }
+    });
+  });
+  function select(i) {
+    tabs.forEach(function (t, j) {
+      document.getElementById(t[0]).setAttribute("aria-selected", String(i === j));
+      document.getElementById(t[0]).tabIndex = i === j ? 0 : -1;
+      document.getElementById(t[1]).hidden = i !== j;
+    });
+  }
+  select(0);
+})();
+</script>
+</body>
+</html>

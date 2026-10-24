@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  core:
+    name: Format, lint & test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-${{ hashFiles('Cargo.lock') }}
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - name: Version script
+        run: python3 scripts/version.py current
+
+  windows:
+    name: Windows (${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked --target ${{ matrix.target }} -- -D warnings
+      - name: Test
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo test --workspace --locked
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Self-test
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: target/${{ matrix.target }}/release/ngambang.exe self-test
+      - name: Size report
+        shell: pwsh
+        run: Get-ChildItem target/${{ matrix.target }}/release/*.exe | Format-Table Name, @{n='KB';e={[math]::Round($_.Length/1KB)}}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ngambang-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/ngambang.exe
+            target/${{ matrix.target }}/release/ngambangw.exe
+          retention-days: 14
