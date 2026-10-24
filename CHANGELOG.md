@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-24
+
 ### Added
 - **Weather & early warnings** module: current weather and the next hours
   from Open-Meteo, early warnings from GDACS (earthquakes, tsunamis,
