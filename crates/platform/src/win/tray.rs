@@ -20,6 +20,7 @@ pub const CMD_AUTOSTART: u32 = 1201;
 pub const CMD_CONFIG: u32 = 1202;
 pub const CMD_QUIT: u32 = 1203;
 pub const CMD_LOG: u32 = 1204;
+pub const CMD_SETTINGS: u32 = 1205;
 
 pub struct Tray {
     hwnd: HWND,
@@ -135,6 +136,7 @@ impl Tray {
             let title = HSTRING::from(format!("Ngambang {}", ngambang_core::VERSION));
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &title);
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+            let _ = AppendMenuW(menu, MF_STRING, CMD_SETTINGS as usize, w!("Settings…"));
             let _ = AppendMenuW(menu, MF_POPUP, modules.0 as usize, w!("Modules"));
             let _ = AppendMenuW(menu, MF_POPUP, edges.0 as usize, w!("Dock edge"));
             let _ = AppendMenuW(menu, if paused { MF_STRING | MF_CHECKED } else { MF_STRING }, CMD_PAUSE as usize, w!("Pause island"));

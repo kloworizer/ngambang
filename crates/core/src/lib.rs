@@ -12,6 +12,7 @@ pub mod icons;
 pub mod layout;
 pub mod model;
 pub mod protocol;
+pub mod settings;
 pub mod theme;
 pub mod view;
 

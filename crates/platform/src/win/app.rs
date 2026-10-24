@@ -226,6 +226,11 @@ fn run_inner(opts: RunOptions) -> Result<i32> {
     let mut msg = MSG::default();
     unsafe {
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            // Tab, Enter and Esc inside the Settings window.
+            let settings = super::settings::SETTINGS_HWND.load(Ordering::SeqCst);
+            if settings != 0 && IsDialogMessageW(HWND(settings as *mut _), &msg).as_bool() {
+                continue;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -864,6 +869,7 @@ impl App {
                 cfg.dock.edge = edge;
                 self.dispatch(Event::Config(cfg));
             }
+            tray::CMD_SETTINGS => super::settings::open(self.hwnd, &self.model.config),
             tray::CMD_PAUSE => {
                 let p = !self.model.paused;
                 self.dispatch(Event::Pause(p));
@@ -1064,6 +1070,14 @@ impl App {
                 }
                 None
             }
+            WM_APP_SETTINGS => {
+                let (cfg, warnings) = load_config();
+                for w in warnings {
+                    self.dispatch(Event::Notice(w));
+                }
+                self.dispatch(Event::Config(cfg));
+                zero
+            }
             WM_APP_TRAY => {
                 match loword(lp.0 as usize) {
                     WM_RBUTTONUP | WM_CONTEXTMENU => self.tray_menu(),
@@ -1126,7 +1140,7 @@ impl App {
 }
 
 /// Open a text file in its associated editor, or Notepad when .toml has none.
-fn open_text_file(path: &std::path::Path) {
+pub(crate) fn open_text_file(path: &std::path::Path) {
     use windows::Win32::UI::Shell::ShellExecuteW;
     let p = HSTRING::from(path.as_os_str());
     unsafe {

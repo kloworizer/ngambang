@@ -12,6 +12,7 @@ pub mod media;
 pub mod pipe;
 pub mod ports;
 pub mod selftest;
+pub mod settings;
 pub mod system;
 pub mod tray;
 pub mod util;

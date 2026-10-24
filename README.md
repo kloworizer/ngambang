@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/kloworizer/ngambang/actions/workflows/ci.yml/badge.svg)](https://github.com/kloworizer/ngambang/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/kloworizer/ngambang?include_prereleases&label=release)](https://github.com/kloworizer/ngambang/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
 An edge-docked floating island for Windows. A small orb rests on any screen
 edge, shows what is running on a progress ring, and unfolds into slips:
@@ -45,7 +45,7 @@ Mockup: <https://claude.ai/artifact/S2ADpcUg2EJqHLpewaD7uZ> · Specification: [d
 | Wheel on the slips, or ↑ / ↓ | Flip between slips |
 | Drag the orb | Move it to another edge or monitor |
 | `Win+Alt+Space` | Open with the keyboard (`Tab`, `Enter`, `←`/`→` on sliders, `Esc`) |
-| Right-click the orb or tray icon | Modules, dock edge, pause, autostart, config |
+| Right-click the orb or tray icon | Settings, modules, dock edge, pause, start with Windows |
 
 ## Modules
 
@@ -113,10 +113,30 @@ Add the hook to your shell to get a tag whenever a command runs longer than
 
 More (git hooks, Claude Code hooks, the pipe protocol): [docs/integrations.md](docs/integrations.md).
 
-## Configuration
+## Settings
 
-`%APPDATA%\Ngambang\config.toml` is created on first run with every option
-commented. Changes apply as soon as you save. The most useful keys:
+Right-click the orb or the tray icon and choose **Settings…**. The window
+covers everything you would normally change:
+
+| Section | Options |
+|---------|---------|
+| General | Start with Windows · sink to a thin line in fullscreen apps · reduce motion · hide from screenshots and screen sharing · hotkey |
+| Position | Screen edge · monitor · position along the edge |
+| Modules | Turn each of the nine modules on or off |
+| Media & clipboard | Track-change tags · volume step · clipboard tags |
+| Commands, timer & games | Long-command threshold · timer presets · break reminder · ping host · power plan to use while gaming (picked from your plans) |
+
+Everything applies as soon as you press **Save**; nothing needs a restart.
+The tray menu also has quick toggles for modules, dock edge, pause and
+Start with Windows.
+
+## Configuration file
+
+Settings are stored in `%APPDATA%\Ngambang\config.toml`, created on first run
+with every option commented. You can edit it directly (**Open config file**
+in Settings); changes apply as soon as you save. Saving from the Settings
+window rewrites only the lines it changes, so your comments stay. The most
+useful keys:
 
 ```toml
 [dock]
@@ -190,4 +210,16 @@ version lives once, in `[workspace.package]` of `Cargo.toml`, and
 
 ## License
 
-[MIT](LICENSE)
+Ngambang is **source-available** under the
+[PolyForm Noncommercial License 1.0.0](LICENSE).
+
+- **Allowed:** using it, studying and changing the code, and sharing it
+  (with the license and the `Required Notice` line), for any noncommercial
+  purpose: personal use, hobby projects, research, education, charities and
+  public institutions.
+- **Not allowed without permission:** selling it, or using it or a modified
+  version for commercial purposes.
+
+For a commercial license, contact the copyright holder through
+[GitHub](https://github.com/kloworizer). Because it restricts commercial use,
+this is not an OSI-approved open-source license.

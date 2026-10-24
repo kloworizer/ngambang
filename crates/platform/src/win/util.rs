@@ -15,6 +15,8 @@ pub const WM_APP_EVENT: u32 = WM_APP + 1;
 pub const WM_APP_TRAY: u32 = WM_APP + 2;
 pub const WM_APP_APPBAR: u32 = WM_APP + 3;
 pub const WM_APP_FOREGROUND: u32 = WM_APP + 4;
+/// The Settings window saved config.toml.
+pub const WM_APP_SETTINGS: u32 = WM_APP + 5;
 
 /// Monotonic milliseconds.
 pub fn now_ms() -> u64 {

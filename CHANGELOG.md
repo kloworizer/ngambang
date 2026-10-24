@@ -24,5 +24,10 @@ First release.
 - Game detection: the island sinks to a 3 px line while a fullscreen app has
   focus; session timer, break reminder, GPU load, VRAM, NVIDIA temperature,
   ping and an optional power-plan switch.
-- Config hot-reload, tray menu, start with Windows, keyboard navigation.
+- Settings window (tray or orb right-click → Settings…): start with Windows,
+  fullscreen behaviour, motion, capture hiding, hotkey, edge, monitor,
+  position, modules, media, clipboard, command, timer and game options,
+  including a power-plan picker.
+- Config hot-reload, tray menu, keyboard navigation.
 - CI on Linux and Windows (x64, ARM64), tagged releases, GitHub Pages site.
+- Licensed under PolyForm Noncommercial 1.0.0.

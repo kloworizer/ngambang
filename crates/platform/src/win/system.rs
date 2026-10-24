@@ -381,3 +381,48 @@ pub fn reduce_motion() -> bool {
     }
     !on.as_bool()
 }
+
+// ---- Lists for the Settings window ----------------------------------------
+
+/// Power plans as (GUID, friendly name).
+pub fn power_plans() -> Vec<(String, String)> {
+    use windows::Win32::System::Power::{PowerEnumerate, PowerReadFriendlyName, ACCESS_SCHEME};
+    let mut out = Vec::new();
+    for index in 0..32u32 {
+        let mut guid = GUID::zeroed();
+        let mut size = std::mem::size_of::<GUID>() as u32;
+        let r = unsafe { PowerEnumerate(None, None, None, ACCESS_SCHEME, index, Some(&mut guid as *mut GUID as *mut u8), &mut size) };
+        if r.is_err() {
+            break;
+        }
+        let mut name = [0u16; 128];
+        let mut bytes = (name.len() * 2) as u32;
+        let ok = unsafe { PowerReadFriendlyName(None, Some(&guid), None, None, Some(name.as_mut_ptr() as *mut u8), &mut bytes) }.is_ok();
+        let label = if ok { super::util::from_wide(&name) } else { guid_to_string(&guid) };
+        out.push((guid_to_string(&guid), label));
+    }
+    out
+}
+
+/// Device names of the monitors that are not the primary one.
+pub fn secondary_monitors() -> Vec<String> {
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR, MONITORINFOEXW};
+    use windows::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY;
+    unsafe extern "system" fn collect(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> windows::core::BOOL {
+        let v = &mut *(data.0 as *mut Vec<String>);
+        let mut mi = MONITORINFOEXW {
+            monitorInfo: MONITORINFO { cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32, ..Default::default() },
+            ..Default::default()
+        };
+        if GetMonitorInfoW(m, &mut mi.monitorInfo).as_bool() && mi.monitorInfo.dwFlags & MONITORINFOF_PRIMARY == 0 {
+            v.push(super::util::from_wide(&mi.szDevice));
+        }
+        true.into()
+    }
+    let mut v: Vec<String> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(collect), LPARAM(&mut v as *mut _ as isize));
+    }
+    v
+}

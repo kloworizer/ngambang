@@ -256,7 +256,12 @@ Hotkey via `RegisterHotKey`; it grants foreground rights, so the window may
 
 ### 4.6 Tray, startup, single instance
 
-- Tray icon (`Shell_NotifyIconW`): Modules ▸ (one check item per module),
+- Settings window (Settings… in the tray / orb menu): a native window with
+  standard controls (keyboard and screen-reader friendly) for every common
+  option, including Start with Windows and a power-plan picker. Saving
+  validates the form (`core::settings`), rewrites only changed lines of
+  `config.toml`, and the island reloads immediately.
+- Tray icon (`Shell_NotifyIconW`): Settings…, Modules ▸ (one check item per module),
   Dock edge ▸, Pause island, Start with Windows ✓, Open config file, Open log
   folder, Quit. Left-click the tray icon opens the slips.
 - Autostart: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
