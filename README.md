@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/kloworizer/ngambang/actions/workflows/ci.yml/badge.svg)](https://github.com/kloworizer/ngambang/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/kloworizer/ngambang?include_prereleases&label=release)](https://github.com/kloworizer/ngambang/releases)
-[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
+[![License: MIT + Commons Clause](https://img.shields.io/badge/license-MIT%20%2B%20Commons%20Clause-blue.svg)](LICENSE)
 
 An edge-docked floating island for Windows. A small orb rests on any screen
 edge, shows what is running on a progress ring, and unfolds into slips:
@@ -210,16 +210,13 @@ version lives once, in `[workspace.package]` of `Cargo.toml`, and
 
 ## License
 
-Ngambang is **source-available** under the
-[PolyForm Noncommercial License 1.0.0](LICENSE).
+Ngambang is free to use, change and share under the [MIT License with the Commons Clause](LICENSE).
 
-- **Allowed:** using it, studying and changing the code, and sharing it
-  (with the license and the `Required Notice` line), for any noncommercial
-  purpose: personal use, hobby projects, research, education, charities and
-  public institutions.
-- **Not allowed without permission:** selling it, or using it or a modified
-  version for commercial purposes.
+| | |
+|---|---|
+| **Allowed** | Using it for anything: personal use, work and client projects, streaming and monetized channels, schools, companies. Changing it, and sharing it or your changed version for free (with the license). |
+| **Not allowed** | Selling Ngambang: selling copies or a changed version of it, charging for it as part of a product, or offering a paid service (hosting, support, consulting) whose value comes mainly from Ngambang. |
 
-For a commercial license, contact the copyright holder through
-[GitHub](https://github.com/kloworizer). Because it restricts commercial use,
-this is not an OSI-approved open-source license.
+To sell Ngambang or build a paid product or service on it, ask for a separate license: esha@angkasa.dev.
+
+The Commons Clause makes this "source available" rather than open source in the OSI sense. Third-party software used by Ngambang keeps its own license: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

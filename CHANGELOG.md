@@ -30,4 +30,5 @@ First release.
   including a power-plan picker.
 - Config hot-reload, tray menu, keyboard navigation.
 - CI on Linux and Windows (x64, ARM64), tagged releases, GitHub Pages site.
-- Licensed under PolyForm Noncommercial 1.0.0.
+- Licensed under the MIT License with the Commons Clause; third-party
+  licenses listed in THIRD_PARTY_NOTICES.md.
