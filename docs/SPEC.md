@@ -7,8 +7,6 @@ screen edge, shows ambient progress, and unfolds into slips for media, coding
 and gaming. It is built natively (Rust + Windows composition) to idle at
 **0 % CPU and under 12 MB private working set**.
 
-Mockup: https://claude.ai/artifact/S2ADpcUg2EJqHLpewaD7uZ
-
 ---
 
 ## 1. Final feature recommendation

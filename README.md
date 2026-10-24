@@ -19,12 +19,7 @@ mic/camera alert.
 - **Never in the way.** When a game or video goes fullscreen, the island
   sinks to a 3 px line on the edge.
 
-Mockup: <https://claude.ai/artifact/S2ADpcUg2EJqHLpewaD7uZ> · Specification: [docs/SPEC.md](docs/SPEC.md)
-
-> **Status: 0.1.0, early.** Everything below is implemented, unit-tested
-> where it is platform-independent, and built and self-tested on Windows in
-> CI. It has not yet been through the full manual test matrix on real
-> hardware ([SPEC §12](docs/SPEC.md#12-testing)), so expect rough edges.
+Specification: [docs/SPEC.md](docs/SPEC.md)
 
 ## The island
 
@@ -111,7 +106,7 @@ Add the hook to your shell to get a tag whenever a command runs longer than
 | bash (Git Bash, WSL) | `~/.bashrc` | `eval "$(ngambang.exe hook bash)"` |
 | zsh (WSL) | `~/.zshrc` | `eval "$(ngambang.exe hook zsh)"` |
 
-More (git hooks, Claude Code hooks, the pipe protocol): [docs/integrations.md](docs/integrations.md).
+More (git hooks, coding-agent hooks, the pipe protocol): [docs/integrations.md](docs/integrations.md).
 
 ## Settings
 
