@@ -98,6 +98,17 @@ freely, subject to the following restrictions:
 - Unicode-3.0: <https://www.unicode.org/license.txt> (build only)
 - Unlicense: <https://unlicense.org>
 
+## Data sources
+
+The Weather & early warnings module shows data from these services. Ngambang
+fetches it on your device; nothing is redistributed with the program.
+
+| Source | Data | Terms |
+|--------|------|-------|
+| [Open-Meteo](https://open-meteo.com) | Weather forecasts | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) — "Weather data by Open-Meteo.com"; the source is named in the weather slip |
+| [GDACS](https://www.gdacs.org) (UN OCHA / European Commission JRC) | Disaster alerts | [GDACS terms of use](https://www.gdacs.org/About/termofuse.aspx) |
+| [USGS Earthquake Hazards Program](https://earthquake.usgs.gov) | Earthquake reports | Public domain (U.S. Government work) |
+
 ## Not bundled
 
 Ngambang uses fonts, the Direct2D/DirectWrite/Composition APIs and NVIDIA's

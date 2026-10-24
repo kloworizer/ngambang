@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::clipboard::{self, ClipAction, ClipKind};
 use crate::config::{Config, ModuleId};
-use crate::games::{classify, FullscreenKind};
+use crate::games::{classify, FullscreenKind, Signals};
 use crate::protocol::{Level, Request};
 
 pub const HOVER_DELAY_MS: u64 = 120;
@@ -21,6 +21,8 @@ pub const CONFIRM_MS: u64 = 3000;
 pub const VOLUME_FLASH_MS: u64 = 1500;
 pub const SNOOZE_MS: u64 = 15 * 60_000;
 pub const BREAK_REPEAT_MS: u64 = 30 * 60_000;
+/// Slips opened without the pointer on them (tray, hotkey) close after this.
+pub const UNATTENDED_MS: u64 = 4000;
 pub const MAX_JOBS: usize = 8;
 pub const MAX_CAPTURES: usize = 5;
 
@@ -44,10 +46,11 @@ pub enum TimerId {
     GameGrace,
     ConfirmExpire,
     VolumeFlash,
+    Prayer,
 }
 
 impl TimerId {
-    pub const ALL: [TimerId; 9] = [
+    pub const ALL: [TimerId; 10] = [
         TimerId::HoverDelay,
         TimerId::SeamPeek,
         TimerId::Collapse,
@@ -57,6 +60,7 @@ impl TimerId {
         TimerId::GameGrace,
         TimerId::ConfirmExpire,
         TimerId::VolumeFlash,
+        TimerId::Prayer,
     ];
 }
 
@@ -311,6 +315,13 @@ pub enum Icon {
     Image,
     Plug,
     Clipboard,
+    Moon,
+    Download,
+    Sun,
+    Cloud,
+    Rain,
+    Storm,
+    Warning,
 }
 
 /// Something the user clicked.
@@ -341,6 +352,9 @@ pub enum Action {
     CaptureFolder(usize),
     MicMute,
     PrivacySettings(Device),
+    InstallUpdate,
+    OpenUrl(String),
+    RefreshWeather,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,6 +391,7 @@ pub enum Fullscreen {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)] // short-lived; boxing would only add noise
 pub enum Event {
     PointerEnter,
     PointerLeave,
@@ -401,9 +416,31 @@ pub enum Event {
         text: String,
         unix_now: i64,
     },
+    /// `exe` is the full executable path of the fullscreen app.
     Fullscreen {
         active: bool,
         exe: String,
+        signals: Signals,
+    },
+    /// Another window became the foreground (the user clicked elsewhere).
+    OutsideFocus,
+    /// Local wall clock, sent at start, at midnight and after time changes.
+    Clock {
+        year: i32,
+        month: u32,
+        day: u32,
+        minutes: f64,
+        utc_offset_min: i32,
+        unix: i64,
+    },
+    Weather(crate::weather::Weather),
+    /// Current early warnings from all feeds.
+    Alerts(Vec<crate::weather::Alert>),
+    /// Internet reachable or not, as Windows reports it.
+    Online(bool),
+    /// A newer release exists.
+    UpdateAvailable {
+        version: String,
     },
     Stats(GpuStats),
     Capture(Capture),
@@ -455,6 +492,24 @@ pub enum Effect {
     SaveModule(ModuleId, bool),
     TakeFocus,
     ReleaseFocus,
+    /// Download and install the latest release, then restart.
+    InstallUpdate,
+    /// Fetch weather and warnings now.
+    RefreshWeather,
+}
+
+/// The local wall clock, anchored to the monotonic clock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Clock {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    /// Local minutes after midnight at `at_ms`.
+    pub minutes: f64,
+    pub at_ms: u64,
+    pub utc_offset_min: i32,
+    /// Unix seconds at `at_ms`.
+    pub unix: i64,
 }
 
 pub struct Model {
@@ -484,6 +539,17 @@ pub struct Model {
     pub privacy: Vec<PrivacyUse>,
     pub tags: Vec<Tag>,
     pub volume_flash_until: u64,
+    /// When the next break reminder fires (monotonic ms).
+    pub break_due_ms: Option<u64>,
+    pub clock: Option<Clock>,
+    pub prayer_day: Option<crate::prayer::Day>,
+    /// A newer version on GitHub, if one was found.
+    pub update: Option<String>,
+    pub weather: Option<crate::weather::Weather>,
+    pub alerts: Vec<crate::weather::Alert>,
+    alerts_seen: BTreeSet<String>,
+    /// None until Windows has told us.
+    pub online: Option<bool>,
 
     samplers: BTreeSet<Sampler>,
     rng: u64,
@@ -516,6 +582,14 @@ impl Model {
             privacy: Vec::new(),
             tags: Vec::new(),
             volume_flash_until: 0,
+            break_due_ms: None,
+            clock: None,
+            prayer_day: None,
+            update: None,
+            weather: None,
+            alerts: Vec::new(),
+            alerts_seen: BTreeSet::new(),
+            online: None,
             samplers: BTreeSet::new(),
             rng: seed | 1,
         };
@@ -566,6 +640,12 @@ impl Model {
                     ModuleId::Clipboard => return None,
                     ModuleId::Captures if !self.captures.is_empty() => 9,
                     ModuleId::Captures => return None,
+                    ModuleId::Prayer if self.prayer_soon(15.0) => 3,
+                    ModuleId::Prayer if self.prayer_day.is_some() => 11,
+                    ModuleId::Prayer => return None,
+                    ModuleId::Weather if self.urgent_alert() => 0,
+                    ModuleId::Weather if self.weather.is_some() || !self.alerts.is_empty() || self.online == Some(false) => 10,
+                    ModuleId::Weather => return None,
                     ModuleId::Game if self.playlog.total() > 0 => 12,
                     ModuleId::Game => return None,
                     // Always available: mixer, ports, timer.
@@ -645,6 +725,10 @@ impl Model {
             }
             if self.front == Some(ModuleId::Ports) {
                 fx.push(Effect::RefreshPorts);
+            }
+            // Opened from the tray or a click that left: don't stay open forever.
+            if !self.hover && !self.keyboard_open {
+                fx.push(Effect::SetTimer(TimerId::Collapse, UNATTENDED_MS));
             }
         }
         self.state = state;
@@ -755,12 +839,15 @@ impl Model {
             Event::Timer(TimerId::Break) => {
                 if let Some(s) = &self.game {
                     let played = crate::format::hours_minutes(self.now_ms.saturating_sub(s.started_ms) / 60_000);
-                    let t = self.tag(format!("{played} played · time for a break"), theme::MEDIA, Icon::Clock, 2, 6000);
+                    let mut t = self.tag(format!("{played} played · time for a break"), theme::MEDIA, Icon::Clock, 2, 8000);
+                    t.action = Some(("Snooze".into(), Action::BreakSnooze));
                     self.push_tag(t, fx);
+                    self.break_due_ms = Some(self.now_ms + BREAK_REPEAT_MS);
                     fx.push(Effect::SetTimer(TimerId::Break, BREAK_REPEAT_MS));
                 }
             }
             Event::Timer(TimerId::GameGrace) => self.end_game(fx),
+            Event::Timer(TimerId::Prayer) => self.prayer_alerts(fx),
             Event::Sample(_) => {}
 
             Event::Click(action) => self.click(action, fx),
@@ -825,6 +912,38 @@ impl Model {
             }
             Event::Key(Key::Up) => self.flip(-1, fx),
             Event::Key(Key::Down) => self.flip(1, fx),
+            Event::OutsideFocus => {
+                if !self.hover {
+                    match self.state {
+                        IslandState::Slips if !self.keyboard_open => self.settle(fx),
+                        IslandState::Tag if self.hover_tag => self.settle(fx),
+                        _ => {}
+                    }
+                }
+            }
+            Event::Clock { year, month, day, minutes, utc_offset_min, unix } => {
+                self.clock = Some(Clock { year, month, day, minutes, at_ms: self.now_ms, utc_offset_min, unix });
+                self.compute_prayer(fx);
+            }
+            Event::Weather(w) => {
+                if self.enabled(ModuleId::Weather) {
+                    self.weather = Some(w);
+                }
+            }
+            Event::Alerts(list) => {
+                if self.enabled(ModuleId::Weather) {
+                    self.new_alerts(list, fx);
+                }
+            }
+            Event::Online(on) => self.online = Some(on),
+            Event::UpdateAvailable { version } => {
+                if self.update.as_deref() != Some(version.as_str()) {
+                    let mut t = self.tag(format!("Ngambang {version} is available"), theme::OK, Icon::Download, 5, 12_000);
+                    t.action = Some(("Install".into(), Action::InstallUpdate));
+                    self.update = Some(version);
+                    self.push_tag(t, fx);
+                }
+            }
             Event::FocusLost => {
                 if self.state == IslandState::Slips && self.keyboard_open {
                     self.keyboard_open = false;
@@ -903,7 +1022,7 @@ impl Model {
                     None => self.clip = None,
                 }
             }
-            Event::Fullscreen { active, exe } => self.fullscreen_changed(active, exe, fx),
+            Event::Fullscreen { active, exe, signals } => self.fullscreen_changed(active, exe, signals, fx),
             Event::Stats(s) => self.stats.merge(s),
             Event::Capture(c) => {
                 if !self.enabled(ModuleId::Captures) {
@@ -950,6 +1069,7 @@ impl Model {
                         self.clear_module(m, fx);
                     }
                 }
+                self.compute_prayer(fx);
                 if !matches!(self.state, IslandState::Slips | IslandState::Tag) {
                     let rest = self.rest_state();
                     self.go(rest, fx);
@@ -958,6 +1078,9 @@ impl Model {
             Event::SetModule(m, on) => {
                 self.config.modules.set(m, on);
                 fx.push(Effect::SaveModule(m, on));
+                if on && m == ModuleId::Prayer {
+                    self.compute_prayer(fx);
+                }
                 if !on {
                     self.clear_module(m, fx);
                 }
@@ -1016,6 +1139,14 @@ impl Model {
             }
             ModuleId::Captures => self.captures.clear(),
             ModuleId::Privacy => self.privacy.clear(),
+            ModuleId::Prayer => {
+                self.prayer_day = None;
+                fx.push(Effect::KillTimer(TimerId::Prayer));
+            }
+            ModuleId::Weather => {
+                self.weather = None;
+                self.alerts.clear();
+            }
         }
         if self.front == Some(m) {
             self.front = None;
@@ -1167,9 +1298,16 @@ impl Model {
             }
             Action::BreakSnooze => {
                 if self.game.is_some() {
+                    self.break_due_ms = Some(now + SNOOZE_MS);
                     fx.push(Effect::SetTimer(TimerId::Break, SNOOZE_MS));
+                    self.tags.retain(|t| !t.text.contains("time for a break"));
+                    let t = self.tag("Break snoozed · 15 min".into(), theme::GAME, Icon::Clock, 2, 2500);
+                    self.push_tag(t, fx);
                 }
             }
+            Action::InstallUpdate => fx.push(Effect::InstallUpdate),
+            Action::OpenUrl(url) => fx.push(Effect::Open(url)),
+            Action::RefreshWeather => fx.push(Effect::RefreshWeather),
             Action::CaptureOpen(i) | Action::CaptureCopy(i) | Action::CaptureFolder(i) => {
                 if let Some(c) = self.captures.get(i) {
                     let p = c.path.clone();
@@ -1281,10 +1419,15 @@ impl Model {
         }
     }
 
-    fn fullscreen_changed(&mut self, active: bool, exe: String, fx: &mut Vec<Effect>) {
+    fn fullscreen_changed(&mut self, active: bool, exe: String, signals: Signals, fx: &mut Vec<Effect>) {
         if active {
-            let kind = if self.enabled(ModuleId::Game) { classify(&exe, &self.config.game) } else { FullscreenKind::Media };
+            let kind = match classify(&exe, signals, &self.config.game) {
+                FullscreenKind::Game if !self.enabled(ModuleId::Game) => FullscreenKind::Media,
+                k => k,
+            };
             self.fullscreen = match kind {
+                // Overlays (snipping, Start, magnifier) change nothing.
+                FullscreenKind::Ignore => return,
                 FullscreenKind::Game => Fullscreen::Game,
                 FullscreenKind::Media => Fullscreen::Media,
             };
@@ -1299,7 +1442,9 @@ impl Model {
                         self.game = Some(GameSession { exe: exe.clone(), started_ms: self.now_ms });
                         fx.push(Effect::GameStarted(exe));
                         if self.config.game.break_after_min > 0 {
-                            fx.push(Effect::SetTimer(TimerId::Break, self.config.game.break_after_min as u64 * 60_000));
+                            let ms = self.config.game.break_after_min as u64 * 60_000;
+                            self.break_due_ms = Some(self.now_ms + ms);
+                            fx.push(Effect::SetTimer(TimerId::Break, ms));
                         }
                     }
                 }
@@ -1329,8 +1474,119 @@ impl Model {
             fx.push(Effect::GameEnded);
             fx.push(Effect::KillTimer(TimerId::Break));
             fx.push(Effect::KillTimer(TimerId::GameGrace));
+            self.break_due_ms = None;
             self.stats = GpuStats::default();
         }
+    }
+
+    /// Unix seconds now, from the last clock sync.
+    pub fn unix_now(&self) -> Option<i64> {
+        self.clock.map(|c| c.unix + (self.now_ms.saturating_sub(c.at_ms) / 1000) as i64)
+    }
+
+    /// Alerts to list for the configured location.
+    pub fn relevant_alerts(&self, limit: usize) -> Vec<crate::weather::Alert> {
+        let l = &self.config.location;
+        crate::weather::relevant(&self.alerts, l.latitude, l.longitude, self.config.weather.quake_radius_km as f64, limit)
+    }
+
+    fn urgent_alert(&self) -> bool {
+        let (l, w) = (&self.config.location, &self.config.weather);
+        self.alerts
+            .iter()
+            .any(|a| crate::weather::alert_priority(a, l.latitude, l.longitude, w.quake_radius_km as f64, w.quake_min_magnitude) == Some(1))
+    }
+
+    fn new_alerts(&mut self, list: Vec<crate::weather::Alert>, fx: &mut Vec<Effect>) {
+        use crate::weather::Level;
+        let unix = self.unix_now();
+        let (l, w) = (self.config.location.clone(), self.config.weather.clone());
+        for a in &list {
+            if !self.alerts_seen.insert(a.id.clone()) {
+                continue;
+            }
+            // Only announce what is recent; older items stay in the slip.
+            let recent = unix.is_some_and(|now| now - a.time < 6 * 3600);
+            if !w.alerts || !recent {
+                continue;
+            }
+            if let Some(prio) = crate::weather::alert_priority(a, l.latitude, l.longitude, w.quake_radius_km as f64, w.quake_min_magnitude)
+            {
+                let km = crate::weather::distance_km(a.lat, a.lon, l.latitude, l.longitude);
+                let lead = if a.tsunami { "Tsunami warning".to_string() } else { a.hazard.label().to_string() };
+                let text = format!("{lead} · {} · {:.0} km", crate::format::ellipsize(&a.title, 40), km);
+                let color = if prio == 1 || a.level == Level::Red { crate::theme::PRIVACY } else { crate::theme::MEDIA };
+                let mut t = self.tag(text, color, Icon::Warning, prio, 15_000);
+                t.action = Some(("Details".into(), Action::OpenUrl(a.url.clone())));
+                self.push_tag(t, fx);
+            }
+        }
+        self.alerts = list;
+    }
+
+    /// Local minutes after midnight now, from the last clock sync.
+    pub fn local_minute(&self) -> Option<f64> {
+        self.clock.map(|c| c.minutes + self.now_ms.saturating_sub(c.at_ms) as f64 / 60_000.0)
+    }
+
+    /// The next prayer is within `minutes`.
+    fn prayer_soon(&self, minutes: f64) -> bool {
+        match (self.prayer_day, self.local_minute()) {
+            (Some(d), Some(now)) => d.next(now).is_some_and(|(_, t)| t - now <= minutes),
+            _ => false,
+        }
+    }
+
+    fn compute_prayer(&mut self, fx: &mut Vec<Effect>) {
+        fx.push(Effect::KillTimer(TimerId::Prayer));
+        let Some(c) = self.clock.filter(|_| self.enabled(ModuleId::Prayer)) else {
+            self.prayer_day = None;
+            return;
+        };
+        let (p, l) = (&self.config.prayer, &self.config.location);
+        self.prayer_day =
+            Some(crate::prayer::compute(c.year, c.month, c.day, l.latitude, l.longitude, c.utc_offset_min as f64 / 60.0, p.method, p.asr));
+        self.schedule_prayer(fx);
+    }
+
+    /// Reminder and prayer moments today, in local minutes.
+    fn prayer_moments(&self) -> Vec<(f64, crate::prayer::Prayer, bool)> {
+        let Some(day) = self.prayer_day else { return Vec::new() };
+        let before = self.config.prayer.reminder_min as f64;
+        let mut v = Vec::new();
+        for p in crate::prayer::Prayer::FIVE {
+            if let Some(t) = day.get(p) {
+                v.push((t.ceil(), p, true));
+                if before > 0.0 {
+                    v.push((t.ceil() - before, p, false));
+                }
+            }
+        }
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        v
+    }
+
+    fn schedule_prayer(&self, fx: &mut Vec<Effect>) {
+        let Some(now) = self.local_minute() else { return };
+        if let Some((t, _, _)) = self.prayer_moments().into_iter().find(|(t, _, _)| *t > now + 0.01) {
+            fx.push(Effect::SetTimer(TimerId::Prayer, ((t - now) * 60_000.0).ceil().max(1.0) as u64));
+        }
+    }
+
+    fn prayer_alerts(&mut self, fx: &mut Vec<Effect>) {
+        let Some(now) = self.local_minute() else { return };
+        let due: Vec<_> = self.prayer_moments().into_iter().filter(|(t, _, _)| *t <= now + 0.05 && *t > now - 1.5).collect();
+        for (t, p, at_time) in due {
+            let text = if at_time {
+                format!("Waktu {} · {}", p.name(), crate::prayer::hhmm(t))
+            } else {
+                format!("{} in {} min", p.name(), self.config.prayer.reminder_min)
+            };
+            let prio = if at_time { 2 } else { 4 };
+            let tag = self.tag(text, crate::theme::OK, Icon::Moon, prio, if at_time { 15_000 } else { 8000 });
+            self.push_tag(tag, fx);
+        }
+        self.schedule_prayer(fx);
     }
 
     fn desired_samplers(&self) -> BTreeSet<Sampler> {
@@ -1374,6 +1630,8 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const GPU: Signals = Signals { exclusive_d3d: false, gpu_3d_pct: Some(60.0) };
 
     fn model() -> Model {
         Model::new(Config::default(), 7, 0)
@@ -1447,7 +1705,10 @@ mod tests {
     #[test]
     fn game_sinks_to_seam_and_only_urgent_tags_show() {
         let mut m = model();
-        let fx = m.update(0, Event::Fullscreen { active: true, exe: "C:\\Games\\Doom.exe".into() });
+        let fx = m.update(
+            0,
+            Event::Fullscreen { active: true, exe: "D:\\steamapps\\common\\Doom\\Doom.exe".into(), signals: Signals::default() },
+        );
         assert_eq!(m.state, IslandState::Seam);
         assert!(fx.iter().any(|e| matches!(e, Effect::GameStarted(x) if x == "doom.exe")));
         assert!(has_timer(&fx, TimerId::Break));
@@ -1462,14 +1723,14 @@ mod tests {
     #[test]
     fn alt_tab_within_grace_keeps_one_session() {
         let mut m = model();
-        m.update(0, Event::Fullscreen { active: true, exe: "game.exe".into() });
-        let fx = m.update(60_000, Event::Fullscreen { active: false, exe: String::new() });
+        m.update(0, Event::Fullscreen { active: true, exe: "game.exe".into(), signals: GPU });
+        let fx = m.update(60_000, Event::Fullscreen { active: false, exe: String::new(), signals: Signals::default() });
         assert!(has_timer(&fx, TimerId::GameGrace));
         assert_eq!(m.state, IslandState::Orb);
-        let fx = m.update(90_000, Event::Fullscreen { active: true, exe: "game.exe".into() });
+        let fx = m.update(90_000, Event::Fullscreen { active: true, exe: "game.exe".into(), signals: GPU });
         assert!(!fx.iter().any(|e| matches!(e, Effect::GameStarted(_))));
         assert_eq!(m.game.as_ref().unwrap().started_ms, 0);
-        m.update(200_000, Event::Fullscreen { active: false, exe: String::new() });
+        m.update(200_000, Event::Fullscreen { active: false, exe: String::new(), signals: Signals::default() });
         let fx = m.update(260_000, Event::Timer(TimerId::GameGrace));
         assert!(fx.contains(&Effect::GameEnded));
         assert_eq!(m.playlog.minutes["game.exe"], 4);
@@ -1478,7 +1739,7 @@ mod tests {
     #[test]
     fn browser_fullscreen_is_not_a_game() {
         let mut m = model();
-        let fx = m.update(0, Event::Fullscreen { active: true, exe: "chrome.exe".into() });
+        let fx = m.update(0, Event::Fullscreen { active: true, exe: "chrome.exe".into(), signals: GPU });
         assert_eq!(m.state, IslandState::Seam);
         assert!(m.game.is_none());
         assert!(!fx.iter().any(|e| matches!(e, Effect::GameStarted(_))));
@@ -1488,7 +1749,7 @@ mod tests {
     fn game_module_off_still_seams_but_no_session() {
         let mut m = model();
         m.update(0, Event::SetModule(ModuleId::Game, false));
-        m.update(0, Event::Fullscreen { active: true, exe: "game.exe".into() });
+        m.update(0, Event::Fullscreen { active: true, exe: "game.exe".into(), signals: GPU });
         assert_eq!(m.state, IslandState::Seam);
         assert!(m.game.is_none());
     }
@@ -1750,12 +2011,144 @@ mod tests {
     #[test]
     fn break_reminder_repeats_and_snoozes() {
         let mut m = model();
-        m.update(0, Event::Fullscreen { active: true, exe: "g.exe".into() });
+        m.update(0, Event::Fullscreen { active: true, exe: "g.exe".into(), signals: GPU });
         let fx = m.update(90 * 60_000, Event::Timer(TimerId::Break));
         assert!(m.current_tag().unwrap().text.starts_with("1h 30m played"));
         assert!(fx.contains(&Effect::SetTimer(TimerId::Break, BREAK_REPEAT_MS)));
         let fx = m.update(90 * 60_000 + 1, Event::Click(Action::BreakSnooze));
         assert!(fx.contains(&Effect::SetTimer(TimerId::Break, SNOOZE_MS)));
+    }
+
+    #[test]
+    fn snipping_tool_changes_nothing() {
+        let mut m = model();
+        let fx = m.update(0, Event::Fullscreen { active: true, exe: "C:\\Windows\\System32\\SnippingTool.exe".into(), signals: GPU });
+        assert_eq!(m.state, IslandState::Orb);
+        assert!(m.game.is_none());
+        assert!(!fx.iter().any(|e| matches!(e, Effect::GameStarted(_))));
+    }
+
+    #[test]
+    fn plain_fullscreen_app_is_not_a_game() {
+        let mut m = model();
+        m.update(0, Event::Fullscreen { active: true, exe: "C:\\Tools\\slides.exe".into(), signals: Signals::default() });
+        assert_eq!(m.state, IslandState::Seam);
+        assert!(m.game.is_none());
+    }
+
+    #[test]
+    fn snooze_gives_feedback_and_moves_the_reminder() {
+        let mut m = model();
+        m.update(0, Event::Fullscreen { active: true, exe: "g.exe".into(), signals: GPU });
+        assert_eq!(m.break_due_ms, Some(90 * 60_000));
+        m.update(90 * 60_000, Event::Timer(TimerId::Break));
+        let (_, action) = m.current_tag().unwrap().action.clone().unwrap();
+        assert_eq!(action, Action::BreakSnooze);
+        let now = 90 * 60_000 + 5;
+        m.update(now, Event::Click(action));
+        assert_eq!(m.break_due_ms, Some(now + SNOOZE_MS));
+        assert_eq!(m.current_tag().unwrap().text, "Break snoozed · 15 min");
+        assert!(!m.tags.iter().any(|t| t.text.contains("time for a break")));
+    }
+
+    #[test]
+    fn slips_opened_from_the_tray_close_by_themselves() {
+        let mut m = model();
+        let fx = m.update(0, Event::Click(Action::ToggleSlips));
+        assert_eq!(m.state, IslandState::Slips);
+        assert!(fx.contains(&Effect::SetTimer(TimerId::Collapse, UNATTENDED_MS)));
+        m.update(UNATTENDED_MS, Event::Timer(TimerId::Collapse));
+        assert_eq!(m.state, IslandState::Orb);
+    }
+
+    #[test]
+    fn clicking_elsewhere_closes_the_slips() {
+        let mut m = model();
+        m.update(0, Event::PointerEnter);
+        m.update(10, Event::Click(Action::ToggleSlips));
+        m.update(20, Event::PointerLeave);
+        m.update(30, Event::OutsideFocus);
+        assert_eq!(m.state, IslandState::Orb);
+        // Not while the pointer is still on the island.
+        m.update(40, Event::PointerEnter);
+        m.update(50, Event::Click(Action::ToggleSlips));
+        m.update(60, Event::OutsideFocus);
+        assert_eq!(m.state, IslandState::Slips);
+    }
+
+    #[test]
+    fn prayer_reminders_fire_on_time() {
+        let mut m = model();
+        m.update(0, Event::SetModule(ModuleId::Prayer, true));
+        // 11:00 local in Jakarta.
+        let fx = m.update(0, Event::Clock { year: 2025, month: 1, day: 1, minutes: 11.0 * 60.0, utc_offset_min: 420, unix: 1_735_704_000 });
+        let dzuhur = m.prayer_day.unwrap().get(crate::prayer::Prayer::Dzuhur).unwrap().ceil();
+        let wait = fx.iter().find_map(|e| if let Effect::SetTimer(TimerId::Prayer, ms) = e { Some(*ms) } else { None }).unwrap();
+        assert_eq!(wait, ((dzuhur - 10.0 - 660.0) * 60_000.0) as u64, "reminder 10 min before Dzuhur");
+        m.update(wait, Event::Timer(TimerId::Prayer));
+        assert_eq!(m.current_tag().unwrap().text, "Dzuhur in 10 min");
+        let at = wait + 10 * 60_000;
+        m.update(at, Event::Timer(TimerId::Prayer));
+        assert!(m.tags.iter().any(|t| t.text.starts_with("Waktu Dzuhur")));
+        assert!(m.available_slips().contains(&ModuleId::Prayer));
+        // Off by default.
+        assert!(!Config::default().modules.prayer);
+    }
+
+    #[test]
+    fn update_notice_offers_install() {
+        let mut m = model();
+        m.update(0, Event::UpdateAvailable { version: "0.2.0".into() });
+        let (label, action) = m.current_tag().unwrap().action.clone().unwrap();
+        assert_eq!(label, "Install");
+        let fx = m.update(5, Event::Click(action));
+        assert!(fx.contains(&Effect::InstallUpdate));
+        let before = m.tags.len();
+        m.update(10, Event::UpdateAvailable { version: "0.2.0".into() });
+        assert_eq!(m.tags.len(), before, "announced once");
+    }
+
+    fn quake_near_jakarta(id: &str, mag: f32, time: i64) -> crate::weather::Alert {
+        crate::weather::Alert {
+            id: id.into(),
+            hazard: crate::weather::Hazard::Earthquake,
+            level: crate::weather::Level::Green,
+            title: format!("M{mag} · near Jakarta"),
+            lat: -6.6,
+            lon: 106.9,
+            time,
+            magnitude: Some(mag),
+            source: "USGS".into(),
+            url: "https://earthquake.usgs.gov/x".into(),
+            tsunami: false,
+        }
+    }
+
+    #[test]
+    fn nearby_alerts_tag_once_and_old_ones_stay_quiet() {
+        let mut m = model();
+        let unix = 1_792_825_200;
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 24, minutes: 600.0, utc_offset_min: 420, unix });
+        m.update(0, Event::Alerts(vec![quake_near_jakarta("old", 5.0, unix - 2 * 86_400)]));
+        assert!(m.current_tag().is_none(), "two days old: no tag");
+        m.update(10, Event::Alerts(vec![quake_near_jakarta("old", 5.0, unix - 2 * 86_400), quake_near_jakarta("new", 5.2, unix - 60)]));
+        let t = m.current_tag().unwrap();
+        assert!(t.text.starts_with("Earthquake"), "{}", t.text);
+        assert_eq!(t.action.as_ref().unwrap().1, Action::OpenUrl("https://earthquake.usgs.gov/x".into()));
+        let n = m.tags.len();
+        m.update(20, Event::Alerts(vec![quake_near_jakarta("new", 5.2, unix - 60)]));
+        assert_eq!(m.tags.len(), n, "same alert is not repeated");
+        assert!(m.available_slips().contains(&ModuleId::Weather));
+    }
+
+    #[test]
+    fn offline_shows_the_weather_slip_without_errors() {
+        let mut m = model();
+        m.update(0, Event::Online(false));
+        assert!(m.current_tag().is_none(), "no error tag for being offline");
+        assert!(m.available_slips().contains(&ModuleId::Weather));
+        let fx = m.update(5, Event::Click(Action::RefreshWeather));
+        assert!(fx.contains(&Effect::RefreshWeather));
     }
 
     #[test]

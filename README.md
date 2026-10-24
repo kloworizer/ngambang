@@ -44,9 +44,9 @@ Specification: [docs/SPEC.md](docs/SPEC.md)
 
 ## Modules
 
-All modules start enabled. Switch any of them off in the tray menu
-(**Modules ▸**) or in `[modules]` of the config file; a module that is off
-costs nothing.
+Every module except Jadwal sholat starts enabled. Switch any of them on or
+off in **Settings…**, the tray menu (**Modules ▸**) or `[modules]` of the
+config file; a module that is off costs nothing.
 
 | Key | Module | What it does |
 |-----|--------|--------------|
@@ -59,6 +59,8 @@ costs nothing.
 | `game` | Game stats & sessions | Session time, GPU load, VRAM, NVIDIA temperature, ping, a break reminder, today's play time and an optional power-plan switch. |
 | `captures` | Screenshots & clips | Tags new files in `Videos\Captures`, `Pictures\Screenshots` and folders you add; copy or reveal them. |
 | `privacy` | Mic & camera beacon | Alerts when an app uses the microphone or camera — even during games — with a button to mute the mic. |
+| `weather` | Weather & early warnings | Current weather and the next hours from [Open-Meteo](https://open-meteo.com), plus early warnings from [GDACS](https://www.gdacs.org) (the UN/EU Global Disaster Alert and Coordination System: earthquakes, tsunamis, cyclones, floods, volcanoes, droughts, wildfires) and [USGS](https://earthquake.usgs.gov) earthquake reports. Disasters near your location raise a tag; tsunami and Red alerts come through even during games. |
+| `prayer` | Jadwal sholat | Prayer times for your location, calculated offline (Kemenag RI by default; MWL, ISNA, Egypt, Umm al-Qura, JAKIM, Karachi), with a reminder before each prayer and a tag at the time. Off by default. |
 
 ### What "control all apps" means
 
@@ -117,7 +119,10 @@ covers everything you would normally change:
 |---------|---------|
 | General | Start with Windows · sink to a thin line in fullscreen apps · reduce motion · hide from screenshots and screen sharing · hotkey |
 | Position | Screen edge · monitor · position along the edge |
-| Modules | Turn each of the nine modules on or off |
+| Modules | Turn each of the eleven modules on or off |
+| Location | A city from the list (Indonesian cities and neighbours, Jakarta by default), your own coordinates, or **Use my location** |
+| Jadwal sholat | Calculation method · Asr (standard or Hanafi) · reminder minutes |
+| Weather & updates | Disaster tags on/off · earthquake radius · automatic update checks · **Check for updates now** |
 | Media & clipboard | Track-change tags · volume step · clipboard tags |
 | Commands, timer & games | Long-command threshold · timer presets · break reminder · ping host · power plan to use while gaming (picked from your plans) |
 
@@ -155,12 +160,38 @@ State (dock position, today's play time) lives in
 
 ## Privacy
 
-- No telemetry. The only network traffic is ICMP ping to your gateway (or a
-  host you choose), and only while game stats are on screen.
+- No telemetry and no accounts. Ngambang only makes these requests:
+  - weather from Open-Meteo for your location's coordinates (every 30 min),
+  - early warnings from GDACS and USGS (every 5 min),
+  - one update check per day to GitHub Releases,
+  - ICMP ping to your gateway while game stats are on screen.
+
+  Turn off the Weather module and automatic update checks and none of these
+  run except the ping.
+- **Works offline.** Before each request Ngambang asks Windows whether the
+  computer is online. Without a connection nothing is requested and no
+  errors pop up: the weather slip keeps the last data marked
+  "No connection · showing data from …", prayer times keep working (they are
+  calculated on the device), and everything refreshes when the connection
+  returns.
 - Clipboard text is kept in memory only while it is shown, and never logged.
 - The CLI pipe accepts only your user account and only local connections.
 
-## Known limitations (0.1.0)
+## Updates
+
+Ngambang checks GitHub Releases once a day. When a new version is out, a tag
+offers **Install**; it downloads the zip, verifies its SHA-256 checksum,
+replaces the files and restarts. You can also use **Check for updates** in
+the tray menu or Settings. Updating needs the install folder to be writable
+(for example `%LOCALAPPDATA%\Programs\Ngambang`).
+
+## Troubleshooting
+
+`ngambang doctor` prints what the island can see: whether it is running, the
+internet status, and every microphone/camera use Windows has recorded. Run it
+with the app in question open and include the output in a bug report.
+
+## Known limitations
 
 - Games in legacy *exclusive* fullscreen cover all top-most windows, so the
   Seam is not visible there; borderless and modern fullscreen work.

@@ -1,0 +1,141 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -80.769,
+     7.5868
+    ]
+   },
+   "properties": {
+    "eventtype": "EQ",
+    "eventid": 1570339,
+    "episodeid": 1738684,
+    "eventname": "",
+    "name": "Earthquake in Panama",
+    "htmldescription": "Orange M 7.7 Earthquake in Panama at: 09 Oct 2026 17:56:06.",
+    "alertlevel": "Orange",
+    "alertscore": 2,
+    "iscurrent": "false",
+    "country": "Panama",
+    "fromdate": "2026-10-09T17:56:06",
+    "todate": "2026-10-09T17:56:06",
+    "severitydata": {
+     "severity": 7.7,
+     "severitytext": "Magnitude 7.7M, Depth:12.647km",
+     "severityunit": "M"
+    },
+    "url": {
+     "geometry": "https://www.gdacs.org/gdacsapi/api/polygons/getgeometry?eventtype=EQ&eventid=1570339&episodeid=1738684",
+     "report": "https://www.gdacs.org/report.aspx?eventid=1570339&episodeid=1738684&eventtype=EQ",
+     "details": "https://www.gdacs.org/gdacsapi/api/events/geteventdata?eventtype=EQ&eventid=1570339"
+    }
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     168.1889,
+     -15.5411
+    ]
+   },
+   "properties": {
+    "eventtype": "EQ",
+    "eventid": 1570077,
+    "episodeid": 1738390,
+    "eventname": "",
+    "name": "Earthquake in Vanuatu",
+    "htmldescription": "Orange M 6.3 Earthquake in Vanuatu at: 08 Oct 2026 09:00:07.",
+    "alertlevel": "Orange",
+    "alertscore": 2,
+    "iscurrent": "false",
+    "country": "Vanuatu",
+    "fromdate": "2026-10-08T09:00:07",
+    "todate": "2026-10-08T09:00:07",
+    "severitydata": {
+     "severity": 6.3,
+     "severitytext": "Magnitude 6.3M, Depth:10km",
+     "severityunit": "M"
+    },
+    "url": {
+     "geometry": "https://www.gdacs.org/gdacsapi/api/polygons/getgeometry?eventtype=EQ&eventid=1570077&episodeid=1738390",
+     "report": "https://www.gdacs.org/report.aspx?eventid=1570077&episodeid=1738390&eventtype=EQ",
+     "details": "https://www.gdacs.org/gdacsapi/api/events/geteventdata?eventtype=EQ&eventid=1570077"
+    }
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     121.3517,
+     -8.3101
+    ]
+   },
+   "properties": {
+    "eventtype": "EQ",
+    "eventid": 1558059,
+    "episodeid": 1725109,
+    "eventname": "",
+    "name": "Earthquake in Indonesia",
+    "htmldescription": "Red M 7.7 Earthquake in Indonesia at: 14 Aug 2026 21:58:21.",
+    "alertlevel": "Red",
+    "alertscore": 3,
+    "iscurrent": "false",
+    "country": "Indonesia",
+    "fromdate": "2026-08-14T21:58:21",
+    "todate": "2026-08-14T21:58:21",
+    "severitydata": {
+     "severity": 7.7,
+     "severitytext": "Magnitude 7.7M, Depth:10km",
+     "severityunit": "M"
+    },
+    "url": {
+     "geometry": "https://www.gdacs.org/gdacsapi/api/polygons/getgeometry?eventtype=EQ&eventid=1558059&episodeid=1725109",
+     "report": "https://www.gdacs.org/report.aspx?eventid=1558059&episodeid=1725109&eventtype=EQ",
+     "details": "https://www.gdacs.org/gdacsapi/api/events/geteventdata?eventtype=EQ&eventid=1558059"
+    }
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     125.276,
+     5.1812
+    ]
+   },
+   "properties": {
+    "eventtype": "EQ",
+    "eventid": 1556215,
+    "episodeid": 1723078,
+    "eventname": "",
+    "name": "Earthquake in Philippines",
+    "htmldescription": "Orange M 6.3 Earthquake in Philippines at: 05 Aug 2026 04:14:06.",
+    "alertlevel": "Orange",
+    "alertscore": 2,
+    "iscurrent": "false",
+    "country": "Philippines",
+    "fromdate": "2026-08-05T04:14:06",
+    "todate": "2026-08-05T04:14:06",
+    "severitydata": {
+     "severity": 6.3,
+     "severitytext": "Magnitude 6.3M, Depth:10km",
+     "severityunit": "M"
+    },
+    "url": {
+     "geometry": "https://www.gdacs.org/gdacsapi/api/polygons/getgeometry?eventtype=EQ&eventid=1556215&episodeid=1723078",
+     "report": "https://www.gdacs.org/report.aspx?eventid=1556215&episodeid=1723078&eventtype=EQ",
+     "details": "https://www.gdacs.org/gdacsapi/api/events/geteventdata?eventtype=EQ&eventid=1556215"
+    }
+   }
+  }
+ ]
+}

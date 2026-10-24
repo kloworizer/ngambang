@@ -66,6 +66,9 @@ struct SavedState {
     playlog: PlayLog,
     /// Power plan to restore if we exited during a game.
     power_restore: Option<String>,
+    /// Last weather and warnings, shown while offline.
+    weather: Option<ngambang_core::weather::Weather>,
+    alerts: Vec<ngambang_core::weather::Alert>,
 }
 
 fn load_state() -> SavedState {
@@ -111,9 +114,10 @@ fn edit_config(edits: &[(&str, &str, String)]) {
 
 struct Press {
     action: Action,
-    x: f32,
-    y: f32,
-    orb: bool,
+    /// Screen pixels where the button went down (the scene can change while dragging).
+    screen: POINT,
+    /// Pressed on the orb or its tag: a drag moves the island.
+    draggable: bool,
 }
 
 struct Workers {
@@ -125,6 +129,7 @@ struct Workers {
     privacy: Option<Stopper>,
     _config: Option<Stopper>,
     clipboard: bool,
+    net: Option<super::net::NetWorker>,
 }
 
 struct App {
@@ -368,6 +373,7 @@ impl App {
                 privacy: None,
                 _config: None,
                 clipboard: false,
+                net: None,
             },
             tray: None,
             accepting: Arc::new(AtomicBool::new(true)),
@@ -418,7 +424,16 @@ impl App {
             Err(e) => log_warn!("config watch: {e}"),
         }
         self.apply_config(true);
+        // Cached warnings go in before the clock is known, so they count as
+        // already seen and don't raise tags again after a restart.
+        if !self.state.alerts.is_empty() {
+            self.dispatch(Event::Alerts(self.state.alerts.clone()));
+        }
+        if let Some(w) = self.state.weather.clone() {
+            self.dispatch(Event::Weather(w));
+        }
         self.dispatch(Event::Day(today()));
+        self.dispatch(clock_event());
         self.check_fullscreen();
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
@@ -631,6 +646,18 @@ impl App {
                 if on(ModuleId::Privacy) { watch::privacy(self.bus.clone()).map_err(|e| log_warn!("privacy: {e}")).ok() } else { None };
         }
         self.accepting.store(on(ModuleId::Commands), Ordering::SeqCst);
+        let c = &self.model.config;
+        let net = super::net::NetConfig {
+            weather: on(ModuleId::Weather),
+            city: c.location.city.clone(),
+            lat: c.location.latitude,
+            lon: c.location.longitude,
+            auto_update: c.update.auto_check,
+        };
+        match &self.workers.net {
+            Some(n) => n.configure(net),
+            None => self.workers.net = Some(super::net::NetWorker::start(self.bus.clone(), net)),
+        }
         if !on(ModuleId::Game) {
             self.workers.stats = None;
         }
@@ -737,6 +764,20 @@ impl App {
                 save_state(&self.state);
             }
             Effect::SaveModule(m, on) => edit_config(&[("modules", m.key(), on.to_string())]),
+            Effect::InstallUpdate => match super::net::install_pending() {
+                Ok(()) => unsafe {
+                    let _ = DestroyWindow(self.hwnd);
+                },
+                Err(e) => {
+                    self.dispatch(Event::Notice(e));
+                    system::shell_open(ngambang_core::update::RELEASES_PAGE);
+                }
+            },
+            Effect::RefreshWeather => {
+                if let Some(n) = &self.workers.net {
+                    n.refresh();
+                }
+            }
             Effect::TakeFocus => unsafe {
                 let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
                 SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex & !(WS_EX_NOACTIVATE.0 as isize));
@@ -765,9 +806,54 @@ impl App {
 
     fn check_fullscreen(&mut self) {
         let app = system::fullscreen_app(self.hwnd, self.monitor);
-        if app != self.last_fullscreen {
-            self.last_fullscreen = app.clone();
-            self.dispatch(Event::Fullscreen { active: app.is_some(), exe: app.unwrap_or_default() });
+        let path = app.as_ref().map(|(p, _)| p.clone());
+        if path == self.last_fullscreen {
+            return;
+        }
+        self.last_fullscreen = path.clone();
+        let Some((path, pid)) = app else {
+            self.dispatch(Event::Fullscreen { active: false, exe: String::new(), signals: Default::default() });
+            return;
+        };
+        // Decide right away from the path and the exclusive-mode flag ...
+        let signals = ngambang_core::games::Signals { exclusive_d3d: system::exclusive_d3d(), gpu_3d_pct: None };
+        self.dispatch(Event::Fullscreen { active: true, exe: path.clone(), signals });
+        // ... then measure the app's own 3D load; a busy GPU makes it a game.
+        let (bus, ours, monitor) = (self.bus.clone(), self.hwnd.0 as isize, self.monitor.0 as isize);
+        let _ = std::thread::Builder::new().name("ngambang-gpu-probe".into()).spawn(move || {
+            let gpu = system::process_gpu_3d(pid);
+            let still = system::fullscreen_app(HWND(ours as *mut _), HMONITOR(monitor as *mut _)).is_some_and(|(p, _)| p == path);
+            if still && gpu.is_some_and(|g| g >= ngambang_core::games::GPU_GAME_PCT) {
+                bus.send(Event::Fullscreen {
+                    active: true,
+                    exe: path,
+                    signals: ngambang_core::games::Signals { exclusive_d3d: signals.exclusive_d3d, gpu_3d_pct: gpu },
+                });
+            }
+        });
+    }
+
+    /// After a click or drag released mouse capture, Windows stops tracking
+    /// the pointer: start again, or report that it already left.
+    fn after_capture(&mut self) {
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        let over = unsafe { WindowFromPoint(pt) } == self.hwnd;
+        self.tracking = over;
+        if over {
+            let mut t = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: self.hwnd,
+                dwHoverTime: 0,
+            };
+            unsafe {
+                let _ = TrackMouseEvent(&mut t);
+            }
+        } else if self.model.hover {
+            self.dispatch(Event::PointerLeave);
         }
     }
 
@@ -848,7 +934,7 @@ impl App {
         // A menu only dismisses properly when its owner can be the foreground window.
         let ex = unsafe { GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) };
         unsafe { SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex & !(WS_EX_NOACTIVATE.0 as isize)) };
-        let picked = tray.show_menu(&self.model.config, self.model.paused, system::autostart_enabled());
+        let picked = tray.show_menu(&self.model.config, self.model.paused, system::autostart_enabled(), self.model.update.as_deref());
         unsafe {
             if !self.model.keyboard_open {
                 SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE.0 as isize);
@@ -870,6 +956,13 @@ impl App {
                 self.dispatch(Event::Config(cfg));
             }
             tray::CMD_SETTINGS => super::settings::open(self.hwnd, &self.model.config),
+            tray::CMD_UPDATE => {
+                if self.model.update.is_some() {
+                    self.exec(Effect::InstallUpdate);
+                } else if let Some(n) = &self.workers.net {
+                    n.check_update();
+                }
+            }
             tray::CMD_PAUSE => {
                 let p = !self.model.paused;
                 self.dispatch(Event::Pause(p));
@@ -896,6 +989,17 @@ impl App {
             WM_APP_EVENT => {
                 let events: Vec<Event> = self.rx.try_iter().collect();
                 for ev in events {
+                    match &ev {
+                        Event::Weather(w) => {
+                            self.state.weather = Some(w.clone());
+                            save_state(&self.state);
+                        }
+                        Event::Alerts(a) => {
+                            self.state.alerts = a.clone();
+                            save_state(&self.state);
+                        }
+                        _ => {}
+                    }
                     self.dispatch(ev);
                 }
                 zero
@@ -919,12 +1023,13 @@ impl App {
                 } else if id == TIMER_MIDNIGHT {
                     unsafe { SetTimer(Some(self.hwnd), TIMER_MIDNIGHT, ms_until_midnight() as u32, None) };
                     self.dispatch(Event::Day(today()));
+                    self.dispatch(clock_event());
                 }
                 zero
             }
             WM_MOUSEMOVE => {
                 let (px, py) = lparam_point(lp);
-                let (x, y) = self.to_scene(px, py);
+                let (x, _) = self.to_scene(px, py);
                 if !self.tracking {
                     self.tracking = true;
                     let mut t = TRACKMOUSEEVENT {
@@ -942,8 +1047,15 @@ impl App {
                     let v = self.slider_value(r, x);
                     self.dispatch(Event::Slider(target, v));
                 } else if let Some(p) = &self.press {
-                    if p.orb && !self.dragging && ((x - p.x).powi(2) + (y - p.y).powi(2)).sqrt() > DRAG_THRESHOLD {
+                    let mut pt = POINT::default();
+                    unsafe {
+                        let _ = GetCursorPos(&mut pt);
+                    }
+                    let moved = (((pt.x - p.screen.x).pow(2) + (pt.y - p.screen.y).pow(2)) as f32).sqrt();
+                    if p.draggable && !self.dragging && moved > DRAG_THRESHOLD * self.scale {
                         self.dragging = true;
+                        // Close any tag or slips so only the move is happening.
+                        self.dispatch(Event::Click(Action::Collapse));
                         unsafe { SetCursor(LoadCursorW(None, IDC_SIZEALL).ok()) };
                     }
                 }
@@ -976,8 +1088,12 @@ impl App {
                         self.dispatch(Event::Slider(t, self.slider_value(r, x)));
                     }
                     Some(HitKind::Click(action)) => {
-                        let orb = self.model.state == IslandState::Orb;
-                        self.press = Some(Press { action, x, y, orb });
+                        let draggable = matches!(self.model.state, IslandState::Orb | IslandState::Tag) && action == Action::ToggleSlips;
+                        let mut screen = POINT::default();
+                        unsafe {
+                            let _ = GetCursorPos(&mut screen);
+                        }
+                        self.press = Some(Press { action, screen, draggable });
                         unsafe { SetCapture(self.hwnd) };
                     }
                     None => {}
@@ -1002,6 +1118,7 @@ impl App {
                         }
                     }
                 }
+                self.after_capture();
                 zero
             }
             WM_MBUTTONUP => {
@@ -1070,6 +1187,13 @@ impl App {
                 }
                 None
             }
+            WM_APP_SETTINGS if wp.0 == 1 => {
+                // "Check for updates now" in the Settings window.
+                if let Some(n) = &self.workers.net {
+                    n.check_update();
+                }
+                zero
+            }
             WM_APP_SETTINGS => {
                 let (cfg, warnings) = load_config();
                 for w in warnings {
@@ -1093,6 +1217,10 @@ impl App {
                 zero
             }
             WM_APP_FOREGROUND => {
+                // Another window took the foreground: the user clicked elsewhere.
+                if unsafe { GetForegroundWindow() } != self.hwnd {
+                    self.dispatch(Event::OutsideFocus);
+                }
                 self.check_fullscreen();
                 if self.last_fullscreen.is_none() {
                     self.assert_topmost();
@@ -1121,6 +1249,20 @@ impl App {
                 if wp.0 as u32 == SPI_SETWORKAREA.0 {
                     self.place_window();
                     self.render();
+                }
+                None
+            }
+            WM_TIMECHANGE => {
+                self.dispatch(clock_event());
+                None
+            }
+            WM_POWERBROADCAST => {
+                // Back from sleep: the clock jumped and the network may have changed.
+                if wp.0 == 0x12 {
+                    self.dispatch(clock_event());
+                    if let Some(n) = &self.workers.net {
+                        n.refresh();
+                    }
                 }
                 None
             }

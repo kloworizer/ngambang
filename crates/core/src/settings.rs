@@ -26,6 +26,15 @@ pub struct Form {
     pub ping_host: String,
     /// Power plan GUID, or empty for "don't switch".
     pub power_plan: String,
+    pub prayer_city: String,
+    pub prayer_lat: String,
+    pub prayer_lon: String,
+    pub prayer_method: crate::prayer::Method,
+    pub prayer_asr: crate::prayer::Asr,
+    pub prayer_reminder: String,
+    pub update_check: bool,
+    pub weather_alerts: bool,
+    pub quake_radius_km: String,
 }
 
 /// One `key = value` change inside a table; `value` is a TOML literal.
@@ -63,6 +72,15 @@ impl Form {
             break_after_min: c.game.break_after_min.to_string(),
             ping_host: c.game.ping_host.clone(),
             power_plan: c.game.power_plan.clone(),
+            prayer_city: c.location.city.clone(),
+            prayer_lat: format!("{:.4}", c.location.latitude),
+            prayer_lon: format!("{:.4}", c.location.longitude),
+            prayer_method: c.prayer.method,
+            prayer_asr: c.prayer.asr,
+            prayer_reminder: c.prayer.reminder_min.to_string(),
+            update_check: c.update.auto_check,
+            weather_alerts: c.weather.alerts,
+            quake_radius_km: c.weather.quake_radius_km.to_string(),
         }
     }
 
@@ -93,6 +111,18 @@ impl Form {
         if !self.power_plan.is_empty() && crate::format::parse_guid(&self.power_plan).is_none() {
             return Err("Power plan: pick one from the list".into());
         }
+        let coord = |field: &str, text: &str, limit: f64| -> Result<f64, String> {
+            let v: f64 = text.trim().replace(',', ".").parse().map_err(|_| format!("{field}: enter a number like -6.2088"))?;
+            if !(-limit..=limit).contains(&v) {
+                return Err(format!("{field}: use a value from -{limit} to {limit}"));
+            }
+            Ok(v)
+        };
+        let lat = coord("Latitude", &self.prayer_lat, 90.0)?;
+        let lon = coord("Longitude", &self.prayer_lon, 180.0)?;
+        let reminder = number("Prayer reminder", &self.prayer_reminder, 0, 60)?;
+        let city = self.prayer_city.trim();
+        let radius = number("Earthquake radius", &self.quake_radius_km, 10, 5000)?;
         let b = |v: bool| v.to_string();
         let mut out: Vec<Edit> = vec![
             ("dock", "edge", toml_str(self.edge.name())),
@@ -110,6 +140,15 @@ impl Form {
             ("game", "break_after_min", brk.to_string()),
             ("game", "ping_host", toml_str(host)),
             ("game", "power_plan", toml_str(&self.power_plan)),
+            ("location", "city", toml_str(if city.is_empty() { "My location" } else { city })),
+            ("location", "latitude", format!("{lat:.4}")),
+            ("location", "longitude", format!("{lon:.4}")),
+            ("prayer", "method", toml_str(self.prayer_method.key())),
+            ("prayer", "asr", toml_str(if self.prayer_asr == crate::prayer::Asr::Hanafi { "hanafi" } else { "standard" })),
+            ("prayer", "reminder_min", reminder.to_string()),
+            ("update", "auto_check", b(self.update_check)),
+            ("weather", "alerts", b(self.weather_alerts)),
+            ("weather", "quake_radius_km", radius.to_string()),
         ];
         for m in ModuleId::ALL {
             out.push(("modules", m.key(), b(self.modules.get(m))));
@@ -149,6 +188,15 @@ mod tests {
         form.timer_presets = "15 45 90".into();
         form.ping_host = "1.1.1.1".into();
         form.power_plan = "{8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c}".into();
+        form.modules.set(ModuleId::Prayer, true);
+        form.prayer_city = "Makassar".into();
+        form.prayer_lat = "-5,1477".into();
+        form.prayer_lon = "119.4327".into();
+        form.prayer_method = crate::prayer::Method::Mwl;
+        form.prayer_asr = crate::prayer::Asr::Hanafi;
+        form.update_check = false;
+        form.weather_alerts = false;
+        form.quake_radius_km = "500".into();
         let (c, w) = Config::parse(&apply(DEFAULT_TOML, &form.edits().unwrap()));
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(c.dock.edge, Edge::Top);
@@ -158,6 +206,14 @@ mod tests {
         assert_eq!(c.timer.presets_min, vec![15, 45, 90]);
         assert_eq!(c.game.ping_host, "1.1.1.1");
         assert!(!c.game.power_plan.is_empty());
+        assert!(c.modules.prayer);
+        assert_eq!(c.location.city, "Makassar");
+        assert!((c.location.latitude + 5.1477).abs() < 1e-9);
+        assert_eq!(c.prayer.method, crate::prayer::Method::Mwl);
+        assert_eq!(c.prayer.asr, crate::prayer::Asr::Hanafi);
+        assert!(!c.update.auto_check);
+        assert!(!c.weather.alerts);
+        assert_eq!(c.weather.quake_radius_km, 500);
     }
 
     #[test]
@@ -174,6 +230,9 @@ mod tests {
         check(Form { timer_presets: "".into(), ..base.clone() }, "Timer");
         check(Form { timer_presets: "1,2,3,4".into(), ..base.clone() }, "Timer");
         check(Form { ping_host: "a b".into(), ..base.clone() }, "Ping");
-        check(Form { power_plan: "nope".into(), ..base }, "Power plan");
+        check(Form { power_plan: "nope".into(), ..base.clone() }, "Power plan");
+        check(Form { prayer_lat: "95".into(), ..base.clone() }, "Latitude");
+        check(Form { prayer_lon: "east".into(), ..base.clone() }, "Longitude");
+        check(Form { prayer_reminder: "90".into(), ..base }, "Prayer reminder");
     }
 }

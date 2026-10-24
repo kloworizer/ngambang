@@ -34,3 +34,37 @@ pub fn start_island() -> std::io::Result<()> {
     let island = exe.with_file_name("ngambangw.exe");
     std::process::Command::new(island).creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP).spawn().map(|_| ())
 }
+
+/// `ngambang doctor`: what the island can see, for bug reports.
+pub fn doctor() -> i32 {
+    println!("Ngambang {}", ngambang_core::VERSION);
+    println!("config: {}", crate::paths::config_file().display());
+    println!("state:  {}", crate::paths::state_file().display());
+    println!("log:    {}", crate::paths::log_file().display());
+    match super::pipe::default_pipe_name().map(|n| super::pipe::send(&n, &ngambang_core::protocol::Request::Ping.to_line())) {
+        Ok(Ok(())) => println!("island: running"),
+        Ok(Err(SendError::NotRunning)) => println!("island: not running"),
+        Ok(Err(e)) => println!("island: {e:?}"),
+        Err(e) => println!("island: {e}"),
+    }
+    let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
+    println!(
+        "internet: {}",
+        match super::net::online() {
+            Some(true) => "connected",
+            Some(false) => "offline",
+            None => "unknown",
+        }
+    );
+    println!("exclusive fullscreen app: {}", super::system::exclusive_d3d());
+    println!();
+    println!("Microphone and camera use recorded by Windows:");
+    let report = super::watch::privacy_report();
+    if report.is_empty() {
+        println!("  (nothing recorded)");
+    }
+    for line in report {
+        println!("  {line}");
+    }
+    0
+}

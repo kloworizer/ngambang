@@ -11,9 +11,12 @@ pub mod hotkey;
 pub mod icons;
 pub mod layout;
 pub mod model;
+pub mod prayer;
 pub mod protocol;
 pub mod settings;
 pub mod theme;
+pub mod update;
 pub mod view;
+pub mod weather;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

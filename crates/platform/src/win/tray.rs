@@ -21,6 +21,7 @@ pub const CMD_CONFIG: u32 = 1202;
 pub const CMD_QUIT: u32 = 1203;
 pub const CMD_LOG: u32 = 1204;
 pub const CMD_SETTINGS: u32 = 1205;
+pub const CMD_UPDATE: u32 = 1206;
 
 pub struct Tray {
     hwnd: HWND,
@@ -114,7 +115,7 @@ impl Tray {
         }
     }
 
-    pub fn show_menu(&self, cfg: &Config, paused: bool, autostart: bool) -> Option<u32> {
+    pub fn show_menu(&self, cfg: &Config, paused: bool, autostart: bool, update: Option<&str>) -> Option<u32> {
         unsafe {
             let menu = CreatePopupMenu().ok()?;
             let modules = CreatePopupMenu().ok()?;
@@ -148,6 +149,11 @@ impl Tray {
             );
             let _ = AppendMenuW(menu, MF_STRING, CMD_CONFIG as usize, w!("Open config file"));
             let _ = AppendMenuW(menu, MF_STRING, CMD_LOG as usize, w!("Open log folder"));
+            let update_label = match update {
+                Some(v) => HSTRING::from(format!("Install update {v}")),
+                None => HSTRING::from("Check for updates"),
+            };
+            let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE as usize, &update_label);
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT as usize, w!("Quit"));
             let mut pt = POINT::default();

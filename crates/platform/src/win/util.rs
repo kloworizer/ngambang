@@ -127,3 +127,27 @@ pub fn process_display_name(path: &str) -> String {
         exe.strip_suffix(".exe").or_else(|| exe.strip_suffix(".EXE")).unwrap_or(exe).to_string()
     })
 }
+
+/// The local wall clock for the core model (date, minutes, UTC offset).
+pub fn clock_event() -> ngambang_core::model::Event {
+    use windows::Win32::System::SystemInformation::GetSystemTime;
+    let (l, u) = unsafe { (GetLocalTime(), GetSystemTime()) };
+    let minutes = |t: &windows::Win32::Foundation::SYSTEMTIME| {
+        t.wHour as f64 * 60.0 + t.wMinute as f64 + t.wSecond as f64 / 60.0 + t.wMilliseconds as f64 / 60_000.0
+    };
+    let date = |t: &windows::Win32::Foundation::SYSTEMTIME| (t.wYear, t.wMonth, t.wDay);
+    let day_shift = match date(&l).cmp(&date(&u)) {
+        std::cmp::Ordering::Greater => 1440.0,
+        std::cmp::Ordering::Less => -1440.0,
+        std::cmp::Ordering::Equal => 0.0,
+    };
+    let offset = (minutes(&l) - minutes(&u) + day_shift).round() as i32;
+    ngambang_core::model::Event::Clock {
+        year: l.wYear as i32,
+        month: l.wMonth as u32,
+        day: l.wDay as u32,
+        minutes: minutes(&l),
+        utc_offset_min: offset,
+        unix: unix_now(),
+    }
+}

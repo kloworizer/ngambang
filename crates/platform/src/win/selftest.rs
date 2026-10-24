@@ -56,10 +56,17 @@ fn sample_model() -> Model {
     );
     m.update(now, Event::Ports(vec![PortEntry { port: 3000, pid: 42, process: "node.exe".into(), can_stop: true }]));
     m.update(now, Event::Clipboard { text: "1700000000".into(), unix_now: 1_700_000_000 });
-    m.update(now, Event::Fullscreen { active: true, exe: "game.exe".into() });
+    m.update(
+        now,
+        Event::Fullscreen {
+            active: true,
+            exe: "game.exe".into(),
+            signals: ngambang_core::games::Signals { exclusive_d3d: true, gpu_3d_pct: None },
+        },
+    );
     m.update(now, Event::Capture(Capture { path: "C:\\a.png".into(), name: "a.png".into(), kind: CaptureKind::Screenshot, at_ms: now }));
     m.update(now, Event::Privacy(vec![(Device::Microphone, "Voice".into())]));
-    m.update(now, Event::Fullscreen { active: false, exe: String::new() });
+    m.update(now, Event::Fullscreen { active: false, exe: String::new(), signals: Default::default() });
     m
 }
 

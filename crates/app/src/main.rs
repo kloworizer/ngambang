@@ -80,6 +80,7 @@ fn platform(cmd: Command) -> i32 {
             }
         },
         Command::SelfTest { strict } => ngambang_platform::self_test(strict),
+        Command::Doctor => cli::doctor(),
         Command::Send { mut req, quiet } => {
             let hwnd = cli::terminal_window();
             match &mut req {

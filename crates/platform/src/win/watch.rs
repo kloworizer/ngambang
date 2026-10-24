@@ -298,10 +298,14 @@ fn scan(device_key: HKEY) -> Vec<String> {
 pub fn privacy(bus: Bus) -> Result<Stopper> {
     let (stop, stop_handle) = Stopper::new()?;
     let root = unsafe { CONSENT.to_string().unwrap_or_default() };
-    let mic = open_key(HKEY_CURRENT_USER, &HSTRING::from(format!("{root}\\microphone")));
-    let cam = open_key(HKEY_CURRENT_USER, &HSTRING::from(format!("{root}\\webcam")));
+    // Windows records use per user, and for some apps machine-wide too.
+    let mut sources = Vec::new();
+    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        sources.push((Device::Microphone, open_key(hive, &HSTRING::from(format!("{root}\\microphone")))));
+        sources.push((Device::Camera, open_key(hive, &HSTRING::from(format!("{root}\\webcam")))));
+    }
     let _ = std::thread::Builder::new().name("ngambang-privacy".into()).spawn(move || {
-        let keys: Vec<(Device, RegKey, OwnedHandle)> = [(Device::Microphone, mic), (Device::Camera, cam)]
+        let keys: Vec<(Device, RegKey, OwnedHandle)> = sources
             .into_iter()
             .filter_map(|(d, k)| Some((d, k?, OwnedHandle(unsafe { CreateEventW(None, false, false, None).ok()? }))))
             .collect();
@@ -316,6 +320,8 @@ pub fn privacy(bus: Bus) -> Result<Stopper> {
             for (d, k, _) in &keys {
                 now.extend(scan(k.0).into_iter().map(|a| (*d, a)));
             }
+            now.sort();
+            now.dedup();
             if now != last {
                 last = now.clone();
                 bus.send(Event::Privacy(now));
@@ -330,4 +336,38 @@ pub fn privacy(bus: Bus) -> Result<Stopper> {
         }
     });
     Ok(stop)
+}
+
+/// Every app Windows has recorded for the microphone and camera, with the
+/// raw start/stop stamps (for `ngambang doctor`).
+pub fn privacy_report() -> Vec<String> {
+    let root = unsafe { CONSENT.to_string().unwrap_or_default() };
+    let mut out = Vec::new();
+    for (hive, hive_name) in [(HKEY_CURRENT_USER, "HKCU"), (HKEY_LOCAL_MACHINE, "HKLM")] {
+        for device in ["microphone", "webcam"] {
+            let Some(k) = open_key(hive, &HSTRING::from(format!("{root}\\{device}"))) else {
+                out.push(format!("{hive_name}\\{device}: not readable"));
+                continue;
+            };
+            let mut line = |key: HKEY, name: &str| {
+                let (start, stop) = (qword(key, name, w!("LastUsedTimeStart")), qword(key, name, w!("LastUsedTimeStop")));
+                if start != 0 {
+                    let state = if stop == 0 { "IN USE" } else { "idle" };
+                    out.push(format!("{hive_name}\\{device}\\{name}: {state} (start {start}, stop {stop})"));
+                }
+            };
+            for sub in subkeys(k.0) {
+                if sub == "NonPackaged" {
+                    if let Some(np) = open_key(k.0, &HSTRING::from("NonPackaged")) {
+                        for s in subkeys(np.0) {
+                            line(np.0, &s);
+                        }
+                    }
+                } else {
+                    line(k.0, &sub);
+                }
+            }
+        }
+    }
+    out
 }

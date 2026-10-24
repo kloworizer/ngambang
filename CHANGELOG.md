@@ -6,6 +6,38 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Weather & early warnings** module: current weather and the next hours
+  from Open-Meteo, early warnings from GDACS (earthquakes, tsunamis,
+  cyclones, floods, volcanoes, droughts, wildfires) and USGS earthquake
+  reports. Nearby disasters raise a tag; tsunami and Red alerts come through
+  even during games.
+- **Jadwal sholat** module: prayer times calculated offline (Kemenag RI by
+  default, plus MWL, ISNA, Egypt, Umm al-Qura, JAKIM, Karachi), reminders
+  before each prayer and a tag at the time.
+- Shared **location** setting (Jakarta by default) with a list of cities,
+  custom coordinates and **Use my location**.
+- **Automatic updates**: a daily check against GitHub Releases, then a
+  one-click install that verifies the checksum and restarts.
+- Works **offline**: no requests or errors without a connection; cached
+  weather is shown and refreshed when the connection returns.
+- `ngambang doctor` for troubleshooting.
+- Favicon for the project page.
+
+### Fixed
+- Clicking elsewhere, or opening from the tray, now always returns the
+  island to the orb.
+- Dragging the orb to another edge works (it used to need the orb to be
+  pressed before the hover label appeared).
+- Only real games start a game session: Snipping Tool and other screen
+  overlays are ignored, and a fullscreen app needs to be in a game library
+  folder, in exclusive fullscreen, or using the GPU heavily.
+- The break reminder can be snoozed from its tag, and snoozing now shows a
+  confirmation and the time until the next reminder.
+- Mic/camera use recorded machine-wide is detected too.
+- Saving settings no longer duplicated a config table whose header had a
+  comment.
+
 ## [0.1.0] - 2026-10-24
 
 First release.

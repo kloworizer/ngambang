@@ -9,6 +9,7 @@ pub mod clipboard;
 pub mod comp;
 pub mod gfx;
 pub mod media;
+pub mod net;
 pub mod pipe;
 pub mod ports;
 pub mod selftest;

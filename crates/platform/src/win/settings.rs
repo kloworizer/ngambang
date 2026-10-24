@@ -28,10 +28,18 @@ thread_local! {
 const ID_SAVE: usize = 1; // IDOK: Enter
 const ID_CANCEL: usize = 2; // IDCANCEL: Esc
 const ID_OPEN_FILE: usize = 3;
+const ID_CITY: usize = 10;
+const ID_LOCATE: usize = 11;
+const ID_CHECK_UPDATE: usize = 12;
+/// Posted to the Settings window when "Use my location" finishes.
+const WM_LOCATED: u32 = WM_APP + 20;
+
+/// The result of the last location request.
+static LOCATED: std::sync::Mutex<Option<Result<(f64, f64), String>>> = std::sync::Mutex::new(None);
 
 // Client size and column geometry, in DIPs.
-const W: i32 = 640;
-const H: i32 = 548;
+const W: i32 = 952;
+const H: i32 = 600;
 const COL: i32 = 296;
 const LABEL: i32 = 140;
 
@@ -53,6 +61,16 @@ struct Controls {
     break_after: HWND,
     ping_host: HWND,
     power_plan: HWND,
+    city: HWND,
+    lat: HWND,
+    lon: HWND,
+    locate: HWND,
+    method: HWND,
+    asr: HWND,
+    reminder: HWND,
+    weather_alerts: HWND,
+    quake_radius: HWND,
+    update_check: HWND,
 }
 
 struct Settings {
@@ -62,6 +80,8 @@ struct Settings {
     c: Controls,
     monitors: Vec<String>,
     plans: Vec<(String, String)>,
+    /// City name kept when "Custom" is selected.
+    custom_city: String,
 }
 
 /// Open the window, or bring it forward if it is already open.
@@ -137,13 +157,17 @@ impl Builder {
     }
 
     fn combo(&self, items: &[String], selected: usize, x: i32, y: i32) -> HWND {
+        self.combo_id(items, selected, x, y, 0)
+    }
+
+    fn combo_id(&self, items: &[String], selected: usize, x: i32, y: i32, id: usize) -> HWND {
         let h = self.make(
             w!("COMBOBOX"),
             "",
             (CBS_DROPDOWNLIST as u32) | WS_TABSTOP.0 | WS_VSCROLL.0,
             WINDOW_EX_STYLE(0),
             (x + LABEL, y, COL - 24 - LABEL, 220),
-            0,
+            id,
         );
         unsafe {
             for item in items {
@@ -155,9 +179,9 @@ impl Builder {
         h
     }
 
-    fn button(&self, text: &str, x: i32, y: i32, w: i32, id: usize, default: bool) {
+    fn button(&self, text: &str, x: i32, y: i32, w: i32, id: usize, default: bool) -> HWND {
         let style = if default { BS_DEFPUSHBUTTON } else { BS_PUSHBUTTON } as u32 | WS_TABSTOP.0;
-        self.make(w!("BUTTON"), text, style, WINDOW_EX_STYLE(0), (x, y, w, 32), id);
+        self.make(w!("BUTTON"), text, style, WINDOW_EX_STYLE(0), (x, y, w, 32), id)
     }
 }
 
@@ -247,21 +271,21 @@ fn create(owner: HWND, cfg: &Config) -> windows::core::Result<()> {
     let clipboard_tags = b.check("Show a tag for recognised clipboard text", ix(lx), 424, form.clipboard_tags);
 
     // Modules
-    b.group("Modules", rx, 12, COL, 266);
+    b.group("Modules", rx, 12, COL, 318);
     let modules =
         ModuleId::ALL.iter().enumerate().map(|(i, m)| (*m, b.check(m.label(), ix(rx), 36 + i as i32 * 26, form.modules.get(*m)))).collect();
 
     // Commands, timer & games
-    b.group("Commands, timer && games", rx, 290, COL, 192);
-    b.label("Long command (s)", ix(rx), 314);
-    let long_command = b.edit(&form.long_command_s, ix(rx), 314);
-    b.label("Timer presets (min)", ix(rx), 346);
-    let presets = b.edit(&form.timer_presets, ix(rx), 346);
-    b.label("Break reminder (min)", ix(rx), 378);
-    let break_after = b.edit(&form.break_after_min, ix(rx), 378);
-    b.label("Ping host", ix(rx), 410);
-    let ping_host = b.edit(&form.ping_host, ix(rx), 410);
-    b.label("Power plan in games", ix(rx), 442);
+    b.group("Commands, timer && games", rx, 342, COL, 192);
+    b.label("Long command (s)", ix(rx), 366);
+    let long_command = b.edit(&form.long_command_s, ix(rx), 366);
+    b.label("Timer presets (min)", ix(rx), 398);
+    let presets = b.edit(&form.timer_presets, ix(rx), 398);
+    b.label("Break reminder (min)", ix(rx), 430);
+    let break_after = b.edit(&form.break_after_min, ix(rx), 430);
+    b.label("Ping host", ix(rx), 462);
+    let ping_host = b.edit(&form.ping_host, ix(rx), 462);
+    b.label("Power plan in games", ix(rx), 494);
     let plans = system::power_plans();
     let mut plan_items = vec!["Don't switch".to_string()];
     plan_items.extend(plans.iter().map(|(_, n)| n.clone()));
@@ -271,12 +295,47 @@ fn create(owner: HWND, cfg: &Config) -> windows::core::Result<()> {
         let want = ngambang_core::format::parse_guid(&form.power_plan);
         plans.iter().position(|(g, _)| ngambang_core::format::parse_guid(g) == want).map(|i| i + 1).unwrap_or(0)
     };
-    let power_plan = b.combo(&plan_items, plan_index, ix(rx), 442);
+    let power_plan = b.combo(&plan_items, plan_index, ix(rx), 494);
+
+    // Location, shared by prayer times and weather
+    let tx = rx + COL + 16;
+    b.group("Location", tx, 12, COL, 172);
+    b.label("City", ix(tx), 36);
+    let mut city_items = vec!["Custom (coordinates below)".to_string()];
+    city_items.extend(ngambang_core::prayer::CITIES.iter().map(|c| c.0.to_string()));
+    let city_index =
+        ngambang_core::prayer::CITIES.iter().position(|c| c.0.eq_ignore_ascii_case(&form.prayer_city)).map(|i| i + 1).unwrap_or(0);
+    let city = b.combo_id(&city_items, city_index, ix(tx), 36, ID_CITY);
+    b.label("Latitude", ix(tx), 68);
+    let lat = b.edit(&form.prayer_lat, ix(tx), 68);
+    b.label("Longitude", ix(tx), 100);
+    let lon = b.edit(&form.prayer_lon, ix(tx), 100);
+    let locate = b.button("Use my location", ix(tx), 136, COL - 24, ID_LOCATE, false);
+
+    // Jadwal sholat
+    b.group("Jadwal sholat", tx, 196, COL, 128);
+    b.label("Method", ix(tx), 220);
+    let methods: Vec<String> = ngambang_core::prayer::Method::ALL.iter().map(|m| m.label().to_string()).collect();
+    let method =
+        b.combo(&methods, ngambang_core::prayer::Method::ALL.iter().position(|m| *m == form.prayer_method).unwrap_or(0), ix(tx), 220);
+    b.label("Asr", ix(tx), 252);
+    let asr_items = vec!["Standard (Shafi'i, Maliki, Hanbali)".to_string(), "Hanafi".to_string()];
+    let asr = b.combo(&asr_items, (form.prayer_asr == ngambang_core::prayer::Asr::Hanafi) as usize, ix(tx), 252);
+    b.label("Reminder (min before)", ix(tx), 284);
+    let reminder = b.edit(&form.prayer_reminder, ix(tx), 284);
+
+    // Weather & updates
+    b.group("Weather && updates", tx, 336, COL, 198);
+    let weather_alerts = b.check("Tags for disasters near my location", ix(tx), 360, form.weather_alerts);
+    b.label("Earthquake radius (km)", ix(tx), 390);
+    let quake_radius = b.edit(&form.quake_radius_km, ix(tx), 390);
+    let update_check = b.check("Check for updates automatically", ix(tx), 424, form.update_check);
+    b.button("Check for updates now", ix(tx), 456, COL - 24, ID_CHECK_UPDATE, false);
 
     // Buttons
-    b.button("Open config file", lx, 500, 140, ID_OPEN_FILE, false);
-    b.button("Cancel", W - 16 - 96 - 8 - 96, 500, 96, ID_CANCEL, false);
-    b.button("Save", W - 16 - 96, 500, 96, ID_SAVE, true);
+    b.button("Open config file", lx, 552, 140, ID_OPEN_FILE, false);
+    b.button("Cancel", W - 16 - 96 - 8 - 96, 552, 96, ID_CANCEL, false);
+    b.button("Save", W - 16 - 96, 552, 96, ID_SAVE, true);
 
     let c = Controls {
         autostart,
@@ -296,8 +355,28 @@ fn create(owner: HWND, cfg: &Config) -> windows::core::Result<()> {
         break_after,
         ping_host,
         power_plan,
+        city,
+        lat,
+        lon,
+        locate,
+        method,
+        asr,
+        reminder,
+        weather_alerts,
+        quake_radius,
+        update_check,
     };
-    WINDOW.with(|w| *w.borrow_mut() = Some(Settings { hwnd, owner, font, c, monitors, plans }));
+    WINDOW.with(|w| {
+        *w.borrow_mut() = Some(Settings {
+            hwnd,
+            owner,
+            font,
+            c,
+            monitors,
+            plans,
+            custom_city: if city_index == 0 { form.prayer_city.clone() } else { "My location".into() },
+        })
+    });
     SETTINGS_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -347,6 +426,18 @@ impl Settings {
             break_after_min: text(c.break_after),
             ping_host: text(c.ping_host),
             power_plan: if plan == 0 { String::new() } else { self.plans.get(plan - 1).map(|p| p.0.clone()).unwrap_or_default() },
+            prayer_city: match selected(c.city) {
+                0 => self.custom_city.clone(),
+                i => ngambang_core::prayer::CITIES.get(i - 1).map(|x| x.0.to_string()).unwrap_or_default(),
+            },
+            prayer_lat: text(c.lat),
+            prayer_lon: text(c.lon),
+            prayer_method: ngambang_core::prayer::Method::ALL[selected(c.method).min(ngambang_core::prayer::Method::ALL.len() - 1)],
+            prayer_asr: if selected(c.asr) == 1 { ngambang_core::prayer::Asr::Hanafi } else { ngambang_core::prayer::Asr::Standard },
+            prayer_reminder: text(c.reminder),
+            update_check: checked(c.update_check),
+            weather_alerts: checked(c.weather_alerts),
+            quake_radius_km: text(c.quake_radius),
         }
     }
 
@@ -402,6 +493,43 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 ID_CANCEL => unsafe {
                     let _ = DestroyWindow(hwnd);
                 },
+                ID_CITY if (wp.0 >> 16) as u32 == CBN_SELCHANGE => {
+                    WINDOW.with(|w| {
+                        if let Ok(g) = w.try_borrow() {
+                            if let Some(s) = g.as_ref() {
+                                if let Some(c) = selected(s.c.city).checked_sub(1).and_then(|i| ngambang_core::prayer::CITIES.get(i)) {
+                                    set_text(s.c.lat, &format!("{:.4}", c.1));
+                                    set_text(s.c.lon, &format!("{:.4}", c.2));
+                                }
+                            }
+                        }
+                    });
+                }
+                ID_LOCATE => {
+                    WINDOW.with(|w| {
+                        if let Ok(g) = w.try_borrow() {
+                            if let Some(s) = g.as_ref() {
+                                set_text(s.c.locate, "Locating…");
+                                unsafe {
+                                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(s.c.locate, false);
+                                }
+                            }
+                        }
+                    });
+                    let target = hwnd.0 as isize;
+                    let _ = std::thread::Builder::new().name("ngambang-locate".into()).spawn(move || {
+                        *LOCATED.lock().unwrap_or_else(|e| e.into_inner()) = Some(locate());
+                        unsafe {
+                            let _ = PostMessageW(Some(HWND(target as *mut _)), WM_LOCATED, WPARAM(0), LPARAM(0));
+                        }
+                    });
+                }
+                ID_CHECK_UPDATE => {
+                    let owner = WINDOW.with(|w| w.try_borrow().ok().and_then(|g| g.as_ref().map(|s| s.owner.0 as isize))).unwrap_or(0);
+                    unsafe {
+                        let _ = PostMessageW(Some(HWND(owner as *mut _)), WM_APP_SETTINGS, WPARAM(1), LPARAM(0));
+                    }
+                }
                 ID_OPEN_FILE => {
                     let path = crate::paths::config_file();
                     if !path.exists() {
@@ -411,6 +539,40 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 }
                 _ => {}
             }
+            LRESULT(0)
+        }
+        WM_LOCATED => {
+            let result = LOCATED.lock().unwrap_or_else(|e| e.into_inner()).take();
+            WINDOW.with(|w| {
+                if let Ok(mut g) = w.try_borrow_mut() {
+                    if let Some(s) = g.as_mut() {
+                        set_text(s.c.locate, "Use my location");
+                        unsafe {
+                            let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(s.c.locate, true);
+                        }
+                        match result {
+                            Some(Ok((la, lo))) => {
+                                set_text(s.c.lat, &format!("{la:.4}"));
+                                set_text(s.c.lon, &format!("{lo:.4}"));
+                                unsafe { SendMessageW(s.c.city, CB_SETCURSEL, Some(WPARAM(0)), None) };
+                                s.custom_city = "My location".into();
+                            }
+                            Some(Err(msg)) => unsafe {
+                                let r = MessageBoxW(
+                                    Some(s.hwnd),
+                                    &HSTRING::from(format!("{msg}\n\nOpen Windows location settings?")),
+                                    w!("Ngambang settings"),
+                                    MB_ICONINFORMATION | MB_YESNO,
+                                );
+                                if r == IDYES {
+                                    system::shell_open("ms-settings:privacy-location");
+                                }
+                            },
+                            None => {}
+                        }
+                    }
+                }
+            });
             LRESULT(0)
         }
         WM_CLOSE => {
@@ -430,4 +592,31 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
+}
+
+fn set_text(h: HWND, t: &str) {
+    unsafe {
+        let _ = SetWindowTextW(h, &HSTRING::from(t));
+    }
+}
+
+/// Ask Windows for the device location (needs "Let desktop apps access your location").
+fn locate() -> Result<(f64, f64), String> {
+    use windows::Devices::Geolocation::{GeolocationAccessStatus, Geolocator};
+    unsafe {
+        let _ = windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED);
+    }
+    let denied = || "Windows did not share your location. Turn on Location and \"Let desktop apps access your location\".".to_string();
+    let access = Geolocator::RequestAccessAsync().and_then(|a| a.join()).map_err(|_| denied())?;
+    if access != GeolocationAccessStatus::Allowed {
+        return Err(denied());
+    }
+    let pos = Geolocator::new()
+        .and_then(|g| g.GetGeopositionAsync())
+        .and_then(|op| op.join())
+        .and_then(|p| p.Coordinate())
+        .and_then(|c| c.Point())
+        .and_then(|p| p.Position())
+        .map_err(|e| format!("Could not get your location: {}", e.message()))?;
+    Ok((pos.Latitude, pos.Longitude))
 }

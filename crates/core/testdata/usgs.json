@@ -1,0 +1,125 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "id": "us6000u4m9",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     122.0872,
+     19.805,
+     10
+    ]
+   },
+   "properties": {
+    "mag": 4.7,
+    "place": "72 km S of Basco, Philippines",
+    "time": 1792842488678,
+    "updated": 1792843833040,
+    "url": "https://earthquake.usgs.gov/earthquakes/eventpage/us6000u4m9",
+    "alert": null,
+    "tsunami": 0,
+    "sig": 340,
+    "title": "M 4.7 - 72 km S of Basco, Philippines",
+    "type": "earthquake"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "us6000u4m7",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -77.7768,
+     -1.6316,
+     181.216
+    ]
+   },
+   "properties": {
+    "mag": 4.2,
+    "place": "22 km ENE of Palora, Ecuador",
+    "time": 1792841445048,
+    "updated": 1792846568040,
+    "url": "https://earthquake.usgs.gov/earthquakes/eventpage/us6000u4m7",
+    "alert": null,
+    "tsunami": 0,
+    "sig": 271,
+    "title": "M 4.2 - 22 km ENE of Palora, Ecuador",
+    "type": "earthquake"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "us6000u4m6",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     51.5108,
+     13.3207,
+     10
+    ]
+   },
+   "properties": {
+    "mag": 4.9,
+    "place": "148 km NNW of Kilmia, Yemen",
+    "time": 1792840827157,
+    "updated": 1792841763040,
+    "url": "https://earthquake.usgs.gov/earthquakes/eventpage/us6000u4m6",
+    "alert": null,
+    "tsunami": 0,
+    "sig": 369,
+    "title": "M 4.9 - 148 km NNW of Kilmia, Yemen",
+    "type": "earthquake"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "us6000u4m5",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     165.7345,
+     -13.8212,
+     10
+    ]
+   },
+   "properties": {
+    "mag": 4.9,
+    "place": "196 km W of Sola, Vanuatu",
+    "time": 1792840440121,
+    "updated": 1792841392040,
+    "url": "https://earthquake.usgs.gov/earthquakes/eventpage/us6000u4m5",
+    "alert": null,
+    "tsunami": 0,
+    "sig": 369,
+    "title": "M 4.9 - 196 km W of Sola, Vanuatu",
+    "type": "earthquake"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "nc75454181",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.832664489746,
+     37.446834564209,
+     2.29999995231628
+    ]
+   },
+   "properties": {
+    "mag": 2.89,
+    "place": "19 km SW of Toms Place, CA",
+    "time": 1792839291710,
+    "updated": 1792839725090,
+    "url": "https://earthquake.usgs.gov/earthquakes/eventpage/nc75454181",
+    "alert": null,
+    "tsunami": 0,
+    "sig": 128,
+    "title": "M 2.9 - 19 km SW of Toms Place, CA",
+    "type": "earthquake"
+   }
+  }
+ ]
+}

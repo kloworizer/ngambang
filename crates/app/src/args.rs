@@ -22,6 +22,7 @@ USAGE:
     ngambang hook <powershell|bash|zsh>   Print a shell snippet for long commands
     ngambang self-test [--strict]         Check drawing, pipe and config
     ngambang config-path                  Print the config file location
+    ngambang doctor                       Show what the island can see (for bug reports)
     ngambang --version | --help
 
 Add --quiet to notify/done/clear to stay silent when the island is not running.";
@@ -34,6 +35,7 @@ pub enum Command {
     Hook(Shell),
     SelfTest { strict: bool },
     ConfigPath,
+    Doctor,
     Version,
     Help,
 }
@@ -66,6 +68,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
         "help" => Ok(Command::Help),
         "version" => Ok(Command::Version),
         "config-path" => Ok(Command::ConfigPath),
+        "doctor" => Ok(Command::Doctor),
         "self-test" => {
             let mut strict = false;
             while let Some(a) = p.next().map_err(|e| e.to_string())? {

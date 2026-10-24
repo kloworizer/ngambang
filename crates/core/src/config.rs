@@ -18,10 +18,12 @@ pub enum ModuleId {
     Game,
     Captures,
     Privacy,
+    Prayer,
+    Weather,
 }
 
 impl ModuleId {
-    pub const ALL: [ModuleId; 9] = [
+    pub const ALL: [ModuleId; 11] = [
         ModuleId::Media,
         ModuleId::Mixer,
         ModuleId::Commands,
@@ -31,6 +33,8 @@ impl ModuleId {
         ModuleId::Game,
         ModuleId::Captures,
         ModuleId::Privacy,
+        ModuleId::Prayer,
+        ModuleId::Weather,
     ];
 
     /// Key used in the `[modules]` table.
@@ -45,6 +49,8 @@ impl ModuleId {
             ModuleId::Game => "game",
             ModuleId::Captures => "captures",
             ModuleId::Privacy => "privacy",
+            ModuleId::Prayer => "prayer",
+            ModuleId::Weather => "weather",
         }
     }
 
@@ -60,6 +66,8 @@ impl ModuleId {
             ModuleId::Game => "Game stats & sessions",
             ModuleId::Captures => "Screenshots & clips",
             ModuleId::Privacy => "Mic & camera beacon",
+            ModuleId::Prayer => "Jadwal sholat (prayer times)",
+            ModuleId::Weather => "Weather & early warnings",
         }
     }
 
@@ -81,6 +89,10 @@ pub struct Config {
     pub game: GameConfig,
     pub captures: CapturesConfig,
     pub privacy: PrivacyConfig,
+    pub location: LocationConfig,
+    pub prayer: PrayerConfig,
+    pub weather: WeatherConfig,
+    pub update: UpdateConfig,
     pub motion: MotionConfig,
 }
 
@@ -115,6 +127,8 @@ pub struct Modules {
     pub game: bool,
     pub captures: bool,
     pub privacy: bool,
+    pub prayer: bool,
+    pub weather: bool,
 }
 
 impl Default for Modules {
@@ -129,6 +143,8 @@ impl Default for Modules {
             game: true,
             captures: true,
             privacy: true,
+            prayer: false,
+            weather: true,
         }
     }
 }
@@ -145,6 +161,8 @@ impl Modules {
             ModuleId::Game => self.game,
             ModuleId::Captures => self.captures,
             ModuleId::Privacy => self.privacy,
+            ModuleId::Prayer => self.prayer,
+            ModuleId::Weather => self.weather,
         }
     }
 
@@ -159,6 +177,8 @@ impl Modules {
             ModuleId::Game => &mut self.game,
             ModuleId::Captures => &mut self.captures,
             ModuleId::Privacy => &mut self.privacy,
+            ModuleId::Prayer => &mut self.prayer,
+            ModuleId::Weather => &mut self.weather,
         };
         *slot = on;
     }
@@ -278,6 +298,66 @@ pub struct PrivacyConfig {
     pub hide_from_capture: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocationConfig {
+    /// Display name of the place.
+    pub city: String,
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+impl Default for LocationConfig {
+    fn default() -> Self {
+        LocationConfig { city: "Jakarta".into(), latitude: -6.2088, longitude: 106.8456 }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrayerConfig {
+    pub method: crate::prayer::Method,
+    pub asr: crate::prayer::Asr,
+    /// Minutes before each prayer for a reminder tag; 0 = only at the time.
+    pub reminder_min: u32,
+}
+
+impl Default for PrayerConfig {
+    fn default() -> Self {
+        PrayerConfig { method: crate::prayer::Method::Kemenag, asr: crate::prayer::Asr::Standard, reminder_min: 10 }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WeatherConfig {
+    /// Raise tags for early warnings near the location.
+    pub alerts: bool,
+    /// Earthquakes within this distance raise a tag.
+    pub quake_radius_km: u32,
+    /// Smallest earthquake magnitude that raises a tag.
+    pub quake_min_magnitude: f32,
+}
+
+impl Default for WeatherConfig {
+    fn default() -> Self {
+        WeatherConfig { alerts: true, quake_radius_km: 300, quake_min_magnitude: 4.5 }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// Look for a newer release on GitHub once a day.
+    pub auto_check: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        UpdateConfig { auto_check: true }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MotionConfig {
@@ -306,6 +386,8 @@ timer = true       # focus timer
 game = true        # game sessions, GPU, ping, break reminder
 captures = true    # new screenshots and clips
 privacy = true     # mic / camera in use
+prayer = false     # jadwal sholat: prayer times and reminders
+weather = true     # weather and early warnings (GDACS, USGS)
 
 [media]
 track_tags = true
@@ -339,6 +421,24 @@ extra_dirs = []
 
 [privacy]
 hide_from_capture = false
+
+[location]                 # used by prayer times and weather
+city = "Jakarta"
+latitude = -6.2088
+longitude = 106.8456
+
+[prayer]
+method = "kemenag"         # kemenag | jakim | mwl | isna | egypt | makkah | karachi
+asr = "standard"           # standard | hanafi
+reminder_min = 10          # reminder before each prayer; 0 = only at the time
+
+[weather]
+alerts = true              # tags for disasters near the location
+quake_radius_km = 300
+quake_min_magnitude = 4.5
+
+[update]
+auto_check = true          # look for a new release on GitHub once a day
 
 [motion]
 reduce = false
@@ -386,6 +486,10 @@ impl Config {
         section!("game", game);
         section!("captures", captures);
         section!("privacy", privacy);
+        section!("location", location);
+        section!("prayer", prayer);
+        section!("weather", weather);
+        section!("update", update);
         section!("motion", motion);
         cfg
     }
@@ -415,6 +519,18 @@ impl Config {
             self.timer.presets_min = TimerConfig::default().presets_min;
         }
         self.timer.presets_min.truncate(3);
+        if !(-90.0..=90.0).contains(&self.location.latitude) || !(-180.0..=180.0).contains(&self.location.longitude) {
+            warnings.push("location.latitude/longitude are out of range".into());
+            self.location = LocationConfig::default();
+        }
+        if !(10..=5000).contains(&self.weather.quake_radius_km) {
+            warnings.push("weather.quake_radius_km must be 10–5000".into());
+            self.weather.quake_radius_km = self.weather.quake_radius_km.clamp(10, 5000);
+        }
+        if self.prayer.reminder_min > 60 {
+            warnings.push("prayer.reminder_min must be 0–60".into());
+            self.prayer.reminder_min = 60;
+        }
         if !self.game.power_plan.is_empty() && crate::format::parse_guid(&self.game.power_plan).is_none() {
             warnings.push("game.power_plan is not a GUID".into());
             self.game.power_plan.clear();
@@ -439,7 +555,7 @@ pub fn set_toml_value(text: &str, table: &str, key: &str, value: &str) -> String
     let mut table_start = None;
     let mut table_end = lines.len();
     for (i, line) in lines.iter().enumerate() {
-        let t = line.trim();
+        let t = line.split('#').next().unwrap_or("").trim();
         if t.starts_with('[') {
             if in_table {
                 table_end = i;
@@ -452,7 +568,7 @@ pub fn set_toml_value(text: &str, table: &str, key: &str, value: &str) -> String
             continue;
         }
         if in_table {
-            if let Some((k, rest)) = t.split_once('=') {
+            if let Some((k, rest)) = line.trim().split_once('=') {
                 if k.trim() == key {
                     // Preserve a trailing comment if there is one.
                     let comment = rest.find('#').map(|h| rest[rest[..h].trim_end().len()..].to_string()).unwrap_or_default();
@@ -549,6 +665,14 @@ mod tests {
         assert!(w.is_empty());
         assert!(!cfg.modules.ports);
         assert!(cfg.modules.media);
+    }
+
+    #[test]
+    fn set_value_finds_headers_with_comments() {
+        let text = "[location]   # shared\ncity = \"Jakarta\"\n";
+        let out = set_toml_value(text, "location", "city", "\"Bandung\"");
+        assert_eq!(out.matches("[location]").count(), 1);
+        assert!(out.contains("city = \"Bandung\""));
     }
 
     #[test]

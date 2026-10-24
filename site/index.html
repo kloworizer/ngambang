@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Ngambang</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="apple-touch-icon" href="favicon.svg">
+<meta name="theme-color" content="#15171a">
 <meta name="description" content="An edge-docked floating island for Windows: media for every app, a per-app mixer, command tags, ports, a dev clipboard, game stats and a mic/camera beacon. Native, light, and every module optional.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -544,7 +547,9 @@ ngambang.exe notify <span class="k">"backup finished"</span> --level ok</pre>
     ["timer", "Focus timer", "--game", "25 or 50-minute rounds on the ring. Minor tags wait until the break."],
     ["game", "Game stats", "--game", "Session time, GPU load, VRAM, temperature, ping and a break reminder."],
     ["captures", "Screenshots & clips", "--ports", "New captures get a tag; copy them or show them in their folder."],
-    ["privacy", "Mic & camera", "--privacy", "Tells you when an app uses the microphone or camera, even mid-game."]
+    ["privacy", "Mic & camera", "--privacy", "Tells you when an app uses the microphone or camera, even mid-game."],
+    ["weather", "Weather & warnings", "--ports", "Weather for your location, plus earthquake, tsunami, cyclone and flood warnings from GDACS and USGS."],
+    ["prayer", "Jadwal sholat", "--ok", "Prayer times calculated on your device, with a reminder before each prayer. Off by default."]
   ];
   var state = {};
   var grid = document.getElementById("mod-grid");
@@ -560,15 +565,16 @@ ngambang.exe notify <span class="k">"backup finished"</span> --level ok</pre>
     out.innerHTML = lines.join("\n");
   }
   modules.forEach(function (m) {
-    state[m[0]] = true;
+    state[m[0]] = m[0] !== "prayer";
     var card = document.createElement("div");
     card.className = "mod";
     var id = "mod-" + m[0];
     card.innerHTML =
       '<h3><span class="dot" style="background: var(' + m[2] + ')"></span><label for="' + id + '">' + esc(m[1]) + "</label></h3>" +
-      '<span class="switch"><input type="checkbox" role="switch" id="' + id + '" checked><span class="track"></span><span class="knob"></span></span>' +
+      '<span class="switch"><input type="checkbox" role="switch" id="' + id + '"' + (state[m[0]] ? " checked" : "") + '><span class="track"></span><span class="knob"></span></span>' +
       "<p>" + esc(m[3]) + "</p>" +
       '<code class="key">' + m[0] + "</code>";
+    if (!state[m[0]]) card.classList.add("off");
     grid.appendChild(card);
     card.querySelector("input").addEventListener("change", function (e) {
       state[m[0]] = e.target.checked;

@@ -105,6 +105,67 @@ pub fn icon_prims(icon: Icon, rect: Rect, color: Color) -> Vec<Prim> {
             line(&[(12.0, 14.0), (12.0, 21.0)]),
         ],
         Icon::Clipboard => vec![rr(5.0, 4.0, 14.0, 17.0, 2.0), rr_fill(9.0, 2.0, 6.0, 4.0, 1.0)],
+        // Crescent: an outer arc and an inner arc that meet at the tips.
+        Icon::Moon => {
+            let mut pts = arc_points(ox + 12.0 * s, oy + 12.0 * s, 8.5 * s, 45.0, 315.0, 24);
+            let mut inner = arc_points(ox + 15.0 * s, oy + 12.0 * s, 6.4 * s, 300.0, 60.0 - 360.0, 24);
+            pts.append(&mut inner);
+            vec![Prim::Polygon { points: pts, fill: color }]
+        }
+        Icon::Download => {
+            vec![line(&[(12.0, 3.0), (12.0, 15.0)]), line(&[(7.0, 10.0), (12.0, 15.0), (17.0, 10.0)]), line(&[(4.0, 20.0), (20.0, 20.0)])]
+        }
+        Icon::Sun => {
+            let mut v = vec![circle(12.0, 12.0, 4.5)];
+            for i in 0..8 {
+                let ang = (i as f32 * 45.0).to_radians();
+                let (c, si) = (ang.cos(), ang.sin());
+                v.push(line(&[(12.0 + 7.0 * c, 12.0 + 7.0 * si), (12.0 + 9.5 * c, 12.0 + 9.5 * si)]));
+            }
+            v
+        }
+        Icon::Cloud => vec![Prim::Polyline {
+            points: [
+                arc_points(ox + 8.0 * s, oy + 14.0 * s, 4.0 * s, 90.0, 270.0, 10),
+                arc_points(ox + 12.5 * s, oy + 10.0 * s, 5.0 * s, 200.0, 340.0, 12),
+                arc_points(ox + 17.0 * s, oy + 14.0 * s, 4.0 * s, 270.0, 450.0, 10),
+            ]
+            .concat(),
+            width: w,
+            color,
+            closed: true,
+        }],
+        Icon::Rain => vec![
+            Prim::Polyline {
+                points: [
+                    arc_points(ox + 8.0 * s, oy + 14.0 * s, 4.0 * s, 90.0, 270.0, 10),
+                    arc_points(ox + 12.5 * s, oy + 10.0 * s, 5.0 * s, 200.0, 340.0, 12),
+                    arc_points(ox + 17.0 * s, oy + 14.0 * s, 4.0 * s, 270.0, 450.0, 10),
+                ]
+                .concat(),
+                width: w,
+                color,
+                closed: true,
+            },
+            line(&[(9.0, 20.0), (8.0, 22.5)]),
+            line(&[(13.0, 20.0), (12.0, 22.5)]),
+            line(&[(17.0, 20.0), (16.0, 22.5)]),
+        ],
+        Icon::Storm => vec![
+            Prim::Polyline {
+                points: [
+                    arc_points(ox + 8.0 * s, oy + 14.0 * s, 4.0 * s, 90.0, 270.0, 10),
+                    arc_points(ox + 12.5 * s, oy + 10.0 * s, 5.0 * s, 200.0, 340.0, 12),
+                    arc_points(ox + 17.0 * s, oy + 14.0 * s, 4.0 * s, 270.0, 450.0, 10),
+                ]
+                .concat(),
+                width: w,
+                color,
+                closed: true,
+            },
+            fill(&[(13.0, 17.5), (9.5, 22.5), (12.0, 22.5), (10.5, 24.0), (15.0, 19.5), (12.5, 19.5), (14.0, 17.5)]),
+        ],
+        Icon::Warning => vec![closed(&[(12.0, 3.0), (22.0, 20.5), (2.0, 20.5)]), line(&[(12.0, 9.5), (12.0, 14.0)]), dot(12.0, 17.0, 1.3)],
     }
 }
 
@@ -112,7 +173,7 @@ pub fn icon_prims(icon: Icon, rect: Rect, color: Color) -> Vec<Prim> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 22] = [
+    const ALL: [Icon; 29] = [
         Icon::Note,
         Icon::Play,
         Icon::Pause,
@@ -135,6 +196,13 @@ mod tests {
         Icon::Image,
         Icon::Plug,
         Icon::Clipboard,
+        Icon::Moon,
+        Icon::Download,
+        Icon::Sun,
+        Icon::Cloud,
+        Icon::Rain,
+        Icon::Storm,
+        Icon::Warning,
     ];
 
     #[test]

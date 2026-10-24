@@ -34,6 +34,19 @@ thread, registers no callback and allocates nothing.
 | 12 | Captures watcher (new screenshot / clip → tag, copy) | `captures` | Closes the "where did my clip go?" loop |
 | 13 | Privacy beacon (mic / camera in use → alert, mute mic) | `privacy` | Must interrupt even during games; cheap to build |
 | 14 | Focus timer | `timer` | Reuses the tide ring |
+| 15 | Weather + early warnings (Open-Meteo; GDACS and USGS), offline-safe | `weather` | Added in 0.1.1 |
+| 16 | Jadwal sholat: offline prayer times and reminders | `prayer` | Added in 0.1.1, off by default |
+| 17 | Automatic updates from GitHub Releases | *(always on, can be disabled)* | Added in 0.1.1 |
+
+**0.1.1 notes.** Network work runs on one worker thread (`net.rs`): WinHTTP
+GETs with 10–15 s timeouts, preceded by Windows' `INetworkListManager`
+connectivity check. Offline, nothing is requested; due work waits and the
+connection is re-checked every minute. Weather refreshes every 30 min,
+warnings every 5 min, update checks daily; failures retry after 10 min and
+never raise tags. The last weather and warnings are cached in `state.json`.
+Game detection now requires a game-library folder, exclusive fullscreen, or
+≥ 20 % 3D GPU load by the process (Task Manager's counter), and ignores
+screen overlays such as Snipping Tool.
 
 ### 1.2 Deliberately *not* in v0.1
 

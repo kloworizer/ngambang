@@ -253,6 +253,15 @@ pub fn summary(m: &Model) -> Option<Summary> {
     if let Some(s) = game_line() {
         return Some(s);
     }
+    if let Some(w) = &m.weather {
+        return Some(Summary {
+            icon: condition_icon(w.condition),
+            color: PORTS,
+            text: format!("{:.0}° · {}", w.temp_c, w.description),
+            detail: None,
+            wave: false,
+        });
+    }
     m.jobs.first().map(|j| {
         let (icon, color, detail) = match &j.status {
             JobStatus::Done { ok: true, duration_s, .. } => (Icon::Check, OK, duration_s.map(|d| format::duration_short(d.round() as u64))),
@@ -591,6 +600,8 @@ fn module_icon(m: ModuleId) -> (Icon, Color) {
         ModuleId::Game => (Icon::Game, GAME),
         ModuleId::Captures => (Icon::Image, PORTS),
         ModuleId::Privacy => (Icon::Mic, PRIVACY),
+        ModuleId::Prayer => (Icon::Moon, OK),
+        ModuleId::Weather => (Icon::Cloud, PORTS),
     }
 }
 
@@ -613,6 +624,8 @@ fn slips(m: &Model, edge: Edge, front: ModuleId, tm: &dyn TextMeasure) -> Scene 
         ModuleId::Game => game_slip(m, &mut b, pad),
         ModuleId::Captures => captures_slip(m, &mut b, pad),
         ModuleId::Privacy => privacy_slip(m, &mut b, pad),
+        ModuleId::Prayer => prayer_slip(m, &mut b, pad),
+        ModuleId::Weather => weather_slip(m, &mut b, pad),
     };
     let content: Vec<Prim> = b.prims.drain(body_start..).collect();
     let slip_h = (bottom + pad).ceil();
@@ -1054,6 +1067,9 @@ fn game_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                 y += 68.0;
             }
             if m.config.game.break_after_min > 0 {
+                let left = m.break_due_ms.map(|d| format::clock(d.saturating_sub(now).div_ceil(1000))).unwrap_or_else(|| "—".into());
+                b.text(Rect::new(b.x, y, b.w, 20.0), format!("Next break reminder in {left}"), TextStyle::SMALL, TEXT_2);
+                y += 28.0;
                 y = b.button_row(y, vec![("Snooze break 15 min".into(), Btn::Primary(GAME), Action::BreakSnooze)]);
             } else {
                 y -= 12.0;
@@ -1140,6 +1156,181 @@ fn privacy_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let dev = m.privacy.first().map(|p| p.device).unwrap_or(Device::Microphone);
     buttons.push(("Privacy settings".to_string(), Btn::Secondary, Action::PrivacySettings(dev)));
     b.button_row(y, buttons)
+}
+
+fn prayer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    use crate::prayer::{hhmm, Prayer};
+    let city = format::ellipsize(&m.config.location.city, 22);
+    let mut y = b.header(top, OK, &format!("Jadwal sholat · {city}"), Some((m.config.prayer.method.label().to_string(), TEXT_2))) + 12.0;
+    let (Some(day), Some(now)) = (m.prayer_day, m.local_minute()) else {
+        return b.empty(y + 4.0, "Waiting for the clock…");
+    };
+    match day.next(now) {
+        Some((p, t)) => {
+            b.text(Rect::new(b.x, y, 160.0, 44.0), p.name(), TextStyle { size: 26.0, weight: Weight::Semibold, mono: false }, TEXT);
+            let left = ((t - now) * 60.0).max(0.0) as u64;
+            b.text_end(
+                Rect::new(b.x + 160.0, y, b.w - 160.0, 44.0),
+                format!("{} · in {}", hhmm(t), format::clock(left)),
+                TextStyle { size: 15.0, weight: Weight::Regular, mono: true },
+                OK,
+            );
+        }
+        None => b.text(Rect::new(b.x, y, b.w, 44.0), "Isya has passed — see you at Subuh", TextStyle::BODY, TEXT_2),
+    }
+    y += 54.0;
+    let next = day.next(now).map(|(p, _)| p);
+    let cols = 4;
+    let gap = 6.0;
+    let w = (b.w - gap * (cols as f32 - 1.0)) / cols as f32;
+    for (i, p) in Prayer::ALL.iter().enumerate() {
+        let r = Rect::new(b.x + (i % cols) as f32 * (w + gap), y + (i / cols) as f32 * (52.0 + gap), w, 52.0);
+        let active = Some(*p) == next;
+        b.rect(r, 8.0, if active { Color::rgb(0x1F3A30) } else { SURFACE_2 });
+        b.text(
+            Rect::new(r.x + 10.0, r.y + 6.0, r.w - 12.0, 18.0),
+            p.name(),
+            TextStyle { size: 11.0, weight: Weight::Medium, mono: true },
+            if active { OK } else { LABEL },
+        );
+        let t = day.get(*p).map(hhmm).unwrap_or_else(|| "—".into());
+        b.text(
+            Rect::new(r.x + 10.0, r.y + 24.0, r.w - 12.0, 22.0),
+            t,
+            TextStyle { size: 15.0, weight: Weight::Regular, mono: true },
+            if active { OK } else { TEXT },
+        );
+    }
+    y + 2.0 * 52.0 + gap
+}
+
+pub fn condition_icon(c: crate::weather::Condition) -> Icon {
+    use crate::weather::Condition::*;
+    match c {
+        Clear => Icon::Sun,
+        PartlyCloudy | Cloudy | Haze | Fog => Icon::Cloud,
+        Drizzle | Rain | HeavyRain => Icon::Rain,
+        Thunder => Icon::Storm,
+    }
+}
+
+fn level_color(l: crate::weather::Level) -> Color {
+    match l {
+        crate::weather::Level::Red => PRIVACY,
+        crate::weather::Level::Orange => MEDIA,
+        crate::weather::Level::Green => OK,
+    }
+}
+
+fn weather_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let unix = m.unix_now();
+    let offline = m.online == Some(false);
+    let place = format::ellipsize(&m.config.location.city, 22);
+    let status =
+        if offline { ("Offline".to_string(), MEDIA) } else { (m.weather.as_ref().map(|w| w.source.clone()).unwrap_or_default(), LABEL) };
+    let mut y = b.header(top, PORTS, &format!("Weather · {place}"), Some(status)) + 12.0;
+    match &m.weather {
+        Some(w) => {
+            b.icon(condition_icon(w.condition), Rect::new(b.x, y + 4.0, 36.0, 36.0), PORTS);
+            b.text(
+                Rect::new(b.x + 46.0, y, 100.0, 46.0),
+                format!("{:.0}°", w.temp_c),
+                TextStyle { size: 36.0, weight: Weight::Medium, mono: true },
+                TEXT,
+            );
+            b.text(Rect::new(b.x + 140.0, y + 2.0, b.w - 140.0, 22.0), w.description.clone(), TextStyle::BODY_MEDIUM, TEXT);
+            let mut bits = Vec::new();
+            if let Some(f) = w.feels_c {
+                bits.push(format!("Feels {f:.0}°"));
+            }
+            if let Some(h) = w.humidity {
+                bits.push(format!("{h}%"));
+            }
+            if let Some(k) = w.wind_kmh {
+                bits.push(format!("{k:.0} km/h"));
+            }
+            b.text(Rect::new(b.x + 140.0, y + 24.0, b.w - 140.0, 20.0), bits.join(" · "), TextStyle::SMALL, TEXT_2);
+            y += 52.0;
+            let mut today = Vec::new();
+            if let (Some(lo), Some(hi)) = (w.min_c, w.max_c) {
+                today.push(format!("Today {lo:.0}°–{hi:.0}°"));
+            }
+            if let Some(r) = w.rain_chance {
+                today.push(format!("rain {r}%"));
+            }
+            if !today.is_empty() {
+                b.text(Rect::new(b.x, y, b.w, 20.0), today.join(" · "), TextStyle::SMALL, TEXT_2);
+                y += 26.0;
+            }
+            if !w.next.is_empty() {
+                let n = w.next.len().min(4);
+                let gap = 6.0;
+                let tw = (b.w - gap * (n as f32 - 1.0)) / n as f32;
+                for (i, slot) in w.next.iter().take(n).enumerate() {
+                    let r = Rect::new(b.x + i as f32 * (tw + gap), y, tw, 56.0);
+                    b.rect(r, 8.0, SURFACE_2);
+                    b.text(
+                        Rect::new(r.x + 8.0, r.y + 6.0, r.w - 10.0, 14.0),
+                        slot.time.clone(),
+                        TextStyle { size: 10.0, weight: Weight::Regular, mono: true },
+                        LABEL,
+                    );
+                    b.icon(condition_icon(slot.condition), Rect::new(r.x + 8.0, r.y + 26.0, 18.0, 18.0), TEXT_2);
+                    b.text(
+                        Rect::new(r.x + 30.0, r.y + 24.0, r.w - 32.0, 22.0),
+                        format!("{:.0}°", slot.temp_c),
+                        TextStyle { size: 15.0, weight: Weight::Regular, mono: true },
+                        TEXT,
+                    );
+                }
+                y += 66.0;
+            }
+            let age = unix.map(|u| u - w.fetched).unwrap_or(0);
+            if offline || age > crate::weather::STALE_SECS {
+                let when = if age < 90 { "just now".to_string() } else { format::relative(-age) };
+                let msg = if offline { format!("No connection · showing data from {when}") } else { format!("Updated {when}") };
+                b.text(Rect::new(b.x, y, b.w, 18.0), msg, TextStyle::MONO_SMALL, if offline { MEDIA } else { LABEL });
+                y += 24.0;
+            }
+        }
+        None => {
+            let msg = if offline { "No connection. Weather loads once you're online." } else { "Loading weather…" };
+            y = b.empty(y, msg) + 10.0;
+        }
+    }
+    y += 2.0;
+    b.text(Rect::new(b.x, y, b.w, 16.0), "EARLY WARNINGS · GDACS, USGS", TextStyle::LABEL, LABEL);
+    y += 22.0;
+    let alerts = m.relevant_alerts(3);
+    if alerts.is_empty() {
+        let msg = if offline && m.alerts.is_empty() {
+            "Unavailable while offline".to_string()
+        } else {
+            format!("No active warnings near {place}")
+        };
+        b.text(Rect::new(b.x, y, b.w, 20.0), msg, TextStyle::SMALL, TEXT_2);
+        y += 24.0;
+    }
+    let l = &m.config.location;
+    for a in alerts {
+        let r = Rect::new(b.x, y, b.w, 44.0);
+        b.rect(r, 8.0, SURFACE_2);
+        b.prims.push(Prim::Circle { cx: r.x + 14.0, cy: r.y + 22.0, r: 5.0, fill: Some(level_color(a.level)), stroke: None });
+        let km = crate::weather::distance_km(a.lat, a.lon, l.latitude, l.longitude);
+        let ago = unix.map(|u| format::relative(a.time - u)).unwrap_or_default();
+        let title = if a.tsunami { format!("Tsunami · {}", a.title) } else { a.title.clone() };
+        b.text(Rect::new(r.x + 28.0, r.y + 4.0, r.w - 36.0, 20.0), title, TextStyle::SMALL, TEXT);
+        b.text(
+            Rect::new(r.x + 28.0, r.y + 23.0, r.w - 36.0, 16.0),
+            format!("{km:.0} km · {ago} · {}", a.source),
+            TextStyle { size: 11.0, weight: Weight::Regular, mono: true },
+            LABEL,
+        );
+        b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(a.url.clone())), label: format!("Open report: {}", a.title) });
+        y += 50.0;
+    }
+    y += 4.0;
+    b.button_row(y, vec![("Refresh".into(), Btn::Secondary, Action::RefreshWeather)])
 }
 
 /// Points for a static ring arc (used by tests and fallback renderers).
@@ -1229,11 +1420,30 @@ mod tests {
         m.update(now, Event::Click(Action::PortStop(3002)));
         m.update(now, Event::Clipboard { text: "#F2A93B".into(), unix_now: 1_700_000_000 });
         m.update(now, Event::Click(Action::TimerStart(25)));
-        m.update(now, Event::Fullscreen { active: true, exe: "game.exe".into() });
+        m.update(
+            now,
+            Event::Fullscreen {
+                active: true,
+                exe: "game.exe".into(),
+                signals: crate::games::Signals { exclusive_d3d: true, gpu_3d_pct: None },
+            },
+        );
         m.update(now, Event::Stats(GpuStats { gpu_pct: Some(87.0), vram_mb: Some(6200), temp_c: Some(71), ping_ms: Some(18) }));
         m.update(now, Event::Capture(Capture { path: "C:\\c.mp4".into(), name: "c.mp4".into(), kind: CaptureKind::Clip, at_ms: now }));
         m.update(now, Event::Privacy(vec![(Device::Microphone, "Discord".into()), (Device::Camera, "Zoom".into())]));
-        m.update(now, Event::Fullscreen { active: false, exe: String::new() });
+        m.update(now, Event::Fullscreen { active: false, exe: String::new(), signals: Default::default() });
+        m.update(now, Event::SetModule(ModuleId::Prayer, true));
+        m.update(
+            now,
+            Event::Weather(crate::weather::parse_open_meteo(include_str!("../testdata/openmeteo.json"), "Jakarta", 1_792_825_200).unwrap()),
+        );
+        let mut alerts = crate::weather::parse_usgs(include_str!("../testdata/usgs.json")).unwrap();
+        alerts[0].lat = -6.5;
+        alerts[0].lon = 106.9;
+        alerts[0].title = "M5.1 · a very long place description that has to be shortened somewhere".into();
+        m.update(now, Event::Alerts(alerts));
+        m.update(now, Event::Online(false));
+        m.update(now, Event::Clock { year: 2026, month: 10, day: 24, minutes: 14.0 * 60.0, utc_offset_min: 420, unix: 1_792_825_200 });
         for edge in Edge::ALL {
             m.state = IslandState::Orb;
             out.push((format!("orb {edge:?}"), build(&m, edge, &ApproxMeasure)));

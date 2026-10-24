@@ -27,8 +27,8 @@ use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow
 use super::util::{process_path, Bus};
 
 /// The foreground window covers its whole monitor (and is not the desktop).
-/// Returns the executable path of the fullscreen app.
-pub fn fullscreen_app(ours: HWND, island_monitor: windows::Win32::Graphics::Gdi::HMONITOR) -> Option<String> {
+/// Returns the executable path and process id of the fullscreen app.
+pub fn fullscreen_app(ours: HWND, island_monitor: windows::Win32::Graphics::Gdi::HMONITOR) -> Option<(String, u32)> {
     unsafe {
         let fg = GetForegroundWindow();
         if fg.0.is_null() || fg == ours {
@@ -62,7 +62,50 @@ pub fn fullscreen_app(ours: HWND, island_monitor: windows::Win32::Graphics::Gdi:
         }
         let mut pid = 0u32;
         GetWindowThreadProcessId(fg, Some(&mut pid));
-        Some(process_path(pid).unwrap_or_else(|| format!("pid{pid}.exe")))
+        Some((process_path(pid).unwrap_or_else(|| format!("pid{pid}.exe")), pid))
+    }
+}
+
+/// Windows reports an exclusive Direct3D fullscreen app (a classic game).
+pub fn exclusive_d3d() -> bool {
+    matches!(unsafe { SHQueryUserNotificationState() }, Ok(s) if s == QUNS_RUNNING_D3D_FULL_SCREEN)
+}
+
+/// The 3D engine load of one process, in percent, sampled over about a second.
+/// Uses the same performance counters as Task Manager's GPU column.
+pub fn process_gpu_3d(pid: u32) -> Option<f32> {
+    unsafe {
+        let mut query = PDH_HQUERY::default();
+        if PdhOpenQueryW(None, 0, &mut query) != 0 {
+            return None;
+        }
+        let path = HSTRING::from(format!("\\GPU Engine(pid_{pid}_*engtype_3D)\\Utilization Percentage"));
+        let mut counter = PDH_HCOUNTER::default();
+        let ok = PdhAddEnglishCounterW(query, &path, 0, &mut counter) == 0 && PdhCollectQueryData(query) == 0;
+        let result = if ok {
+            std::thread::sleep(Duration::from_millis(1000));
+            if PdhCollectQueryData(query) == 0 {
+                let mut size = 0u32;
+                let mut count = 0u32;
+                let _ = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &mut size, &mut count, None);
+                let mut buf = vec![0u8; size.max(1) as usize];
+                if size > 0
+                    && PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &mut size, &mut count, Some(buf.as_mut_ptr().cast())) == 0
+                {
+                    let items = std::slice::from_raw_parts(buf.as_ptr() as *const PDH_FMT_COUNTERVALUE_ITEM_W, count as usize);
+                    Some(items.iter().map(|i| i.FmtValue.Anonymous.doubleValue).filter(|v| v.is_finite()).sum::<f64>().clamp(0.0, 100.0)
+                        as f32)
+                } else {
+                    Some(0.0)
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        PdhCloseQuery(query);
+        result
     }
 }
 
