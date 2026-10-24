@@ -45,14 +45,15 @@ jobs:
           BUMP: ${{ inputs.bump || 'none' }}
         run: |
           set -euo pipefail
+          # Needed for the bump commit and the annotated tag.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             version=$(python3 scripts/version.py check "${GITHUB_REF_NAME}")
           else
             if [ "${BUMP}" != "none" ]; then
               version=$(python3 scripts/version.py bump "${BUMP}")
               cargo update --workspace --offline || cargo update --workspace
-              git config user.name "github-actions[bot]"
-              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
               git commit -am "Release v${version}"
               git push origin "HEAD:${GITHUB_REF_NAME}"
             else
