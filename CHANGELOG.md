@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-25
+
 ### Changed
 - **Slips fit their content.** Each slip is as tall as what it shows, inside
   a narrow band, so short modules no longer carry empty space and flipping
