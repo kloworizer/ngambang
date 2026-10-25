@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-25
+
 ### Added
 - **To-do list** module (on by default): add tasks from the slip, tick them
   off, clear finished ones; kept between restarts.
