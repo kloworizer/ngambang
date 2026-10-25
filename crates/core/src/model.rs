@@ -47,10 +47,11 @@ pub enum TimerId {
     ConfirmExpire,
     VolumeFlash,
     Prayer,
+    Calendar,
 }
 
 impl TimerId {
-    pub const ALL: [TimerId; 10] = [
+    pub const ALL: [TimerId; 11] = [
         TimerId::HoverDelay,
         TimerId::SeamPeek,
         TimerId::Collapse,
@@ -61,6 +62,7 @@ impl TimerId {
         TimerId::ConfirmExpire,
         TimerId::VolumeFlash,
         TimerId::Prayer,
+        TimerId::Calendar,
     ];
 }
 
@@ -76,6 +78,8 @@ pub enum Sampler {
     Peaks,
     /// Refresh the listening-ports table every few seconds.
     Ports,
+    /// Market quotes, while the watchlist is open.
+    Finance,
 }
 
 /// Album art, already scaled and converted to premultiplied BGRA by the platform.
@@ -361,6 +365,9 @@ pub enum Icon {
     Gear,
     Pin,
     Grid,
+    Calendar,
+    Chart,
+    Refresh,
 }
 
 /// Something the user clicked.
@@ -397,9 +404,14 @@ pub enum Action {
     OpenUrl(String),
     RefreshWeather,
     TodoAdd,
+    /// Add what was typed in the slip's field.
+    TodoSubmit,
+    TodoCancel,
     TodoToggle(u64),
     TodoRemove(u64),
     TodoClearDone,
+    /// Open the Settings window at a page (by module).
+    OpenSettings(ModuleId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -428,6 +440,8 @@ pub enum Key {
     Escape,
     Up,
     Down,
+    Enter,
+    Backspace,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -500,8 +514,13 @@ pub enum Event {
     Notice(String),
     /// The saved to-do list, at start.
     Todos(Vec<TodoItem>),
-    /// Text typed into the "Add task" box.
+    /// A task to add (from the command line or tests).
     TodoAdded(String),
+    /// Characters typed or pasted while a text field has focus.
+    Text(String),
+    /// Upcoming events from every linked calendar.
+    Calendar(Vec<crate::calendar::CalEvent>),
+    Quotes(Vec<crate::finance::Quote>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -547,9 +566,9 @@ pub enum Effect {
     InstallUpdate,
     /// Fetch weather and warnings now.
     RefreshWeather,
-    /// Ask the user for a new task (a small text box near the island).
-    PromptTodo,
     SaveTodos,
+    /// Open the Settings window at the page for this module.
+    OpenSettings(ModuleId),
     /// Write one value to config.toml: table, key, TOML literal.
     SaveValue(&'static str, &'static str, String),
 }
@@ -595,6 +614,8 @@ pub struct Model {
     pub privacy: Vec<PrivacyUse>,
     pub tags: Vec<Tag>,
     pub volume_flash_until: u64,
+    /// Whose volume the flash shows: an app (pid) or, when None, the system.
+    pub volume_target: Option<u32>,
     /// When the next break reminder fires (monotonic ms).
     pub break_due_ms: Option<u64>,
     pub clock: Option<Clock>,
@@ -607,9 +628,25 @@ pub struct Model {
     /// None until Windows has told us.
     pub online: Option<bool>,
     pub todos: Vec<TodoItem>,
+    /// The "Add task" field while it is open.
+    pub todo_input: Option<String>,
+    pub calendar: Vec<crate::calendar::CalEvent>,
+    calendar_reminded: BTreeSet<(i64, String)>,
+    pub quotes: Vec<crate::finance::Quote>,
 
     samplers: BTreeSet<Sampler>,
     rng: u64,
+}
+
+/// A media session (SMTC app id) and a mixer row belong to the same app.
+fn session_matches(session_id: &str, app: &AudioApp) -> bool {
+    let id = session_id.to_ascii_lowercase();
+    let id = id.split('#').next().unwrap_or(&id);
+    let exe = app.exe.to_ascii_lowercase();
+    let stem = exe.trim_end_matches(".exe");
+    (!exe.is_empty() && (id == exe || id == stem))
+        || app.aumid.as_ref().is_some_and(|a| a.eq_ignore_ascii_case(id))
+        || (!stem.is_empty() && id.ends_with(&format!("!{stem}")))
 }
 
 impl Model {
@@ -639,6 +676,7 @@ impl Model {
             privacy: Vec::new(),
             tags: Vec::new(),
             volume_flash_until: 0,
+            volume_target: None,
             break_due_ms: None,
             clock: None,
             prayer_day: None,
@@ -648,6 +686,10 @@ impl Model {
             alerts_seen: BTreeSet::new(),
             online: None,
             todos: Vec::new(),
+            todo_input: None,
+            calendar: Vec::new(),
+            calendar_reminded: BTreeSet::new(),
+            quotes: Vec::new(),
             samplers: BTreeSet::new(),
             rng: seed | 1,
         };
@@ -676,9 +718,21 @@ impl Model {
         self.tags.iter().min_by_key(|t| t.priority)
     }
 
-    /// Slips that have something to show, most urgent first.
+    /// Slips that have something to show, in the user's tab order.
     pub fn available_slips(&self) -> Vec<ModuleId> {
-        let mut v: Vec<(u8, ModuleId)> = ModuleId::ALL
+        self.slip_ranks().into_iter().map(|(_, m)| m).collect()
+    }
+
+    /// The slip that most needs attention, to open first.
+    pub fn most_urgent_slip(&self) -> Option<ModuleId> {
+        self.slip_ranks().into_iter().min_by_key(|(rank, _)| *rank).map(|(_, m)| m)
+    }
+
+    /// Available slips with their urgency (lower is more urgent), in tab order.
+    fn slip_ranks(&self) -> Vec<(u8, ModuleId)> {
+        self.config
+            .modules
+            .ordered()
             .into_iter()
             .filter(|m| self.enabled(*m))
             .filter_map(|m| {
@@ -704,8 +758,13 @@ impl Model {
                     ModuleId::Weather if self.urgent_alert() => 0,
                     ModuleId::Weather if self.weather.is_some() || !self.alerts.is_empty() || self.online == Some(false) => 10,
                     ModuleId::Weather => return None,
+                    ModuleId::Todo if self.todo_input.is_some() => 0,
                     ModuleId::Todo if self.todos.iter().any(|t| !t.done) => 8,
                     ModuleId::Todo => 13,
+                    ModuleId::Calendar if self.next_event_within(15 * 60).is_some() => 2,
+                    ModuleId::Calendar if !self.calendar.is_empty() => 9,
+                    ModuleId::Calendar => 14,
+                    ModuleId::Finance => 14,
                     ModuleId::Game if self.playlog.total() > 0 => 12,
                     ModuleId::Game => return None,
                     // Always available: mixer, ports, timer.
@@ -713,9 +772,7 @@ impl Model {
                 };
                 Some((rank, m))
             })
-            .collect();
-        v.sort();
-        v.into_iter().map(|(_, m)| m).collect()
+            .collect()
     }
 
     fn rest_state(&self) -> IslandState {
@@ -767,6 +824,7 @@ impl Model {
         }
         if self.state == IslandState::Slips {
             fx.push(Effect::KillTimer(TimerId::Collapse));
+            self.todo_input = None;
             if self.keyboard_open {
                 self.keyboard_open = false;
                 fx.push(Effect::ReleaseFocus);
@@ -781,7 +839,7 @@ impl Model {
                 return;
             }
             if self.front.is_none_or(|f| !avail.contains(&f)) {
-                self.front = avail.first().copied();
+                self.front = self.most_urgent_slip();
             }
             self.front_opened(fx);
             // Opened from the tray or a click that left: don't stay open forever.
@@ -915,6 +973,8 @@ impl Model {
                     SliderTarget::Master => {
                         self.mixer.master.level = v;
                         fx.push(Effect::SetMasterVolume(v));
+                        self.volume_target = None;
+                        self.flash_volume(fx);
                     }
                     SliderTarget::App(pid) => {
                         if let Some(a) = self.mixer.apps.iter_mut().find(|a| a.pid == pid) {
@@ -940,11 +1000,24 @@ impl Model {
                 }
                 IslandState::Orb | IslandState::Tag if self.enabled(ModuleId::Mixer) || self.enabled(ModuleId::Media) => {
                     let step = self.config.media.volume_step as f32 / 100.0;
-                    let v = (self.mixer.master.level + notches as f32 * step).clamp(0.0, 1.0);
-                    self.mixer.master.level = v;
-                    self.volume_flash_until = self.now_ms + VOLUME_FLASH_MS;
-                    fx.push(Effect::SetMasterVolume(v));
-                    fx.push(Effect::SetTimer(TimerId::VolumeFlash, VOLUME_FLASH_MS));
+                    // The player's own volume; the system volume when no player can be matched.
+                    match self.player_app().map(|a| (a.pid, a.volume.level)) {
+                        Some((pid, level)) => {
+                            let v = (level + notches as f32 * step).clamp(0.0, 1.0);
+                            if let Some(a) = self.mixer.apps.iter_mut().find(|a| a.pid == pid) {
+                                a.volume.level = v;
+                            }
+                            self.volume_target = Some(pid);
+                            fx.push(Effect::SetAppVolume(pid, v));
+                        }
+                        None => {
+                            let v = (self.mixer.master.level + notches as f32 * step).clamp(0.0, 1.0);
+                            self.mixer.master.level = v;
+                            self.volume_target = None;
+                            fx.push(Effect::SetMasterVolume(v));
+                        }
+                    }
+                    self.flash_volume(fx);
                 }
                 _ => {}
             },
@@ -963,6 +1036,15 @@ impl Model {
                     }
                 }
             }
+            Event::Key(Key::Escape) if self.todo_input.is_some() => self.end_input(false, fx),
+            Event::Key(Key::Enter) if self.todo_input.is_some() => self.end_input(true, fx),
+            Event::Key(Key::Backspace) => {
+                if let Some(t) = self.todo_input.as_mut() {
+                    t.pop();
+                }
+            }
+            Event::Key(Key::Enter) => {}
+            Event::Key(_) if self.todo_input.is_some() => {}
             Event::Key(Key::Escape) => {
                 if self.state == IslandState::Slips {
                     self.settle(fx);
@@ -970,6 +1052,25 @@ impl Model {
             }
             Event::Key(Key::Up) => self.flip(-1, fx),
             Event::Key(Key::Down) => self.flip(1, fx),
+            Event::Text(text) => {
+                if let Some(t) = self.todo_input.as_mut() {
+                    // One line, printable characters, a sensible length.
+                    let room = 200usize.saturating_sub(t.chars().count());
+                    t.extend(text.chars().map(|c| if c == '\n' || c == '\t' { ' ' } else { c }).filter(|c| !c.is_control()).take(room));
+                }
+            }
+            Event::Calendar(list) => {
+                if self.enabled(ModuleId::Calendar) {
+                    self.calendar = list;
+                    self.schedule_calendar(fx);
+                }
+            }
+            Event::Quotes(list) => {
+                if self.enabled(ModuleId::Finance) {
+                    self.quotes = list;
+                }
+            }
+            Event::Timer(TimerId::Calendar) => self.calendar_alerts(fx),
             Event::OutsideFocus => {
                 if !self.hover {
                     match self.state {
@@ -982,6 +1083,7 @@ impl Model {
             Event::Clock { year, month, day, minutes, utc_offset_min, unix } => {
                 self.clock = Some(Clock { year, month, day, minutes, at_ms: self.now_ms, utc_offset_min, unix });
                 self.compute_prayer(fx);
+                self.schedule_calendar(fx);
             }
             Event::Weather(w) => {
                 if self.enabled(ModuleId::Weather) {
@@ -1010,6 +1112,10 @@ impl Model {
                 }
             }
             Event::FocusLost => {
+                // Clicking away keeps what was typed.
+                if self.todo_input.is_some() {
+                    self.end_input(true, fx);
+                }
                 if self.state == IslandState::Slips && self.keyboard_open {
                     self.keyboard_open = false;
                     self.settle(fx);
@@ -1156,18 +1262,7 @@ impl Model {
                 self.push_tag(t, fx);
             }
             Event::Todos(list) => self.todos = list,
-            Event::TodoAdded(text) => {
-                let text: String = text.trim().chars().take(200).collect();
-                if !text.is_empty() && self.enabled(ModuleId::Todo) {
-                    let id = self.todos.iter().map(|t| t.id).max().unwrap_or(0) + 1;
-                    self.todos.insert(0, TodoItem { id, text, done: false });
-                    self.todos.truncate(MAX_TODOS);
-                    fx.push(Effect::SaveTodos);
-                    if self.state == IslandState::Slips {
-                        self.front = Some(ModuleId::Todo);
-                    }
-                }
-            }
+            Event::TodoAdded(text) => self.add_todo(&text, fx),
             Event::Pause(p) => {
                 self.paused = p;
                 self.tags.clear();
@@ -1242,7 +1337,12 @@ impl Model {
                 self.alerts.clear();
             }
             // The list itself stays saved for when the module comes back.
-            ModuleId::Todo => {}
+            ModuleId::Todo => self.todo_input = None,
+            ModuleId::Calendar => {
+                self.calendar.clear();
+                fx.push(Effect::KillTimer(TimerId::Calendar));
+            }
+            ModuleId::Finance => self.quotes.clear(),
         }
         if self.front == Some(m) {
             self.front = None;
@@ -1257,17 +1357,16 @@ impl Model {
 
     /// Mark mixer rows whose app also publishes media controls.
     fn match_controls(&mut self) {
-        let ids: Vec<String> = self.media.iter().map(|s| s.id.to_ascii_lowercase()).collect();
+        let ids: Vec<String> = self.media.iter().map(|s| s.id.clone()).collect();
         for app in &mut self.mixer.apps {
-            let exe = app.exe.to_ascii_lowercase();
-            let stem = exe.trim_end_matches(".exe").to_string();
-            app.has_controls = ids.iter().any(|id| {
-                let id = id.split('#').next().unwrap_or(id);
-                (!exe.is_empty() && (*id == exe || *id == stem))
-                    || app.aumid.as_ref().is_some_and(|a| a.eq_ignore_ascii_case(id))
-                    || (!stem.is_empty() && id.ends_with(&format!("!{stem}")))
-            });
+            app.has_controls = ids.iter().any(|id| session_matches(id, app));
         }
+    }
+
+    /// The mixer row of the app playing in front, if it is making sound.
+    pub fn player_app(&self) -> Option<&AudioApp> {
+        let s = self.front_media()?;
+        self.mixer.apps.iter().find(|a| session_matches(&s.id, a))
     }
 
     fn click(&mut self, action: Action, fx: &mut Vec<Effect>) {
@@ -1325,6 +1424,8 @@ impl Model {
             Action::MasterMute => {
                 self.mixer.master.muted = !self.mixer.master.muted;
                 fx.push(Effect::SetMasterMute(self.mixer.master.muted));
+                self.volume_target = None;
+                self.flash_volume(fx);
             }
             Action::JobOpenTerminal(id) => {
                 if let Some(h) = self.jobs.iter().find(|j| j.id == id).and_then(|j| j.hwnd) {
@@ -1412,7 +1513,21 @@ impl Model {
             Action::InstallUpdate => fx.push(Effect::InstallUpdate),
             Action::OpenUrl(url) => fx.push(Effect::Open(url)),
             Action::RefreshWeather => fx.push(Effect::RefreshWeather),
-            Action::TodoAdd => fx.push(Effect::PromptTodo),
+            Action::TodoAdd => {
+                if self.enabled(ModuleId::Todo) {
+                    self.todo_input = Some(String::new());
+                    self.front = Some(ModuleId::Todo);
+                    fx.push(Effect::KillTimer(TimerId::Collapse));
+                    // Typing needs the keyboard.
+                    if !self.keyboard_open {
+                        self.keyboard_open = true;
+                        fx.push(Effect::TakeFocus);
+                    }
+                }
+            }
+            Action::TodoSubmit => self.end_input(true, fx),
+            Action::TodoCancel => self.end_input(false, fx),
+            Action::OpenSettings(m) => fx.push(Effect::OpenSettings(m)),
             Action::TodoToggle(id) => {
                 if let Some(t) = self.todos.iter_mut().find(|t| t.id == id) {
                     t.done = !t.done;
@@ -1598,6 +1713,101 @@ impl Model {
         }
     }
 
+    /// Show the volume level for a moment, in whatever form the island is in.
+    fn flash_volume(&mut self, fx: &mut Vec<Effect>) {
+        self.volume_flash_until = self.now_ms + VOLUME_FLASH_MS;
+        fx.push(Effect::SetTimer(TimerId::VolumeFlash, VOLUME_FLASH_MS));
+    }
+
+    /// The volume level is being shown.
+    pub fn volume_flashing(&self) -> bool {
+        self.now_ms < self.volume_flash_until
+    }
+
+    /// What the volume flash shows: a name and that volume.
+    pub fn flashed_volume(&self) -> (String, Volume) {
+        match self.volume_target.and_then(|pid| self.mixer.apps.iter().find(|a| a.pid == pid)) {
+            Some(a) => (a.name.clone(), a.volume),
+            None => ("System".to_string(), self.mixer.master),
+        }
+    }
+
+    fn add_todo(&mut self, text: &str, fx: &mut Vec<Effect>) {
+        let text: String = text.trim().chars().take(200).collect();
+        if !text.is_empty() && self.enabled(ModuleId::Todo) {
+            let id = self.todos.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+            self.todos.insert(0, TodoItem { id, text, done: false });
+            self.todos.truncate(MAX_TODOS);
+            fx.push(Effect::SaveTodos);
+            if self.state == IslandState::Slips {
+                self.front = Some(ModuleId::Todo);
+            }
+        }
+    }
+
+    /// Close the "Add task" field, adding its text when `keep`.
+    fn end_input(&mut self, keep: bool, fx: &mut Vec<Effect>) {
+        let Some(text) = self.todo_input.take() else { return };
+        if keep {
+            self.add_todo(&text, fx);
+        }
+        if self.keyboard_open {
+            self.keyboard_open = false;
+            fx.push(Effect::ReleaseFocus);
+            if !self.hover && self.state == IslandState::Slips {
+                fx.push(Effect::SetTimer(TimerId::Collapse, UNATTENDED_MS));
+            }
+        }
+    }
+
+    /// The next timed event starting within `secs`, if any.
+    pub fn next_event_within(&self, secs: i64) -> Option<&crate::calendar::CalEvent> {
+        let now = self.unix_now()?;
+        self.calendar.iter().find(|e| !e.all_day && e.start >= now && e.start - now <= secs)
+    }
+
+    fn schedule_calendar(&self, fx: &mut Vec<Effect>) {
+        fx.push(Effect::KillTimer(TimerId::Calendar));
+        let (Some(now), lead) = (self.unix_now(), self.config.calendar.reminder_min as i64 * 60) else { return };
+        if lead == 0 {
+            return;
+        }
+        let next = self
+            .calendar
+            .iter()
+            .filter(|e| !e.all_day && !self.calendar_reminded.contains(&(e.start, e.title.clone())))
+            .map(|e| e.start - lead)
+            .filter(|at| *at > now - 60)
+            .min();
+        if let Some(at) = next {
+            fx.push(Effect::SetTimer(TimerId::Calendar, ((at - now).max(0) as u64 * 1000).max(1)));
+        }
+    }
+
+    fn calendar_alerts(&mut self, fx: &mut Vec<Effect>) {
+        let Some(now) = self.unix_now() else { return };
+        let lead = self.config.calendar.reminder_min as i64 * 60;
+        let due: Vec<crate::calendar::CalEvent> = self
+            .calendar
+            .iter()
+            .filter(|e| !e.all_day && e.start - lead <= now + 5 && e.start > now - 60)
+            .filter(|e| !self.calendar_reminded.contains(&(e.start, e.title.clone())))
+            .cloned()
+            .collect();
+        for e in due {
+            self.calendar_reminded.insert((e.start, e.title.clone()));
+            let mins = ((e.start - now) as f64 / 60.0).round().max(0.0) as i64;
+            let when = if mins == 0 { "now".to_string() } else { format!("in {mins} min") };
+            let mut t =
+                self.tag(format!("{} · {when}", crate::format::ellipsize(&e.title, 40)), crate::theme::CODER, Icon::Calendar, 3, 15_000);
+            if e.location.starts_with("https://") {
+                t.action = Some(("Join".into(), Action::OpenUrl(e.location.clone())));
+            }
+            self.push_tag(t, fx);
+        }
+        self.schedule_calendar(fx);
+    }
+
     /// Unix seconds now, from the last clock sync.
     pub fn unix_now(&self) -> Option<i64> {
         self.clock.map(|c| c.unix + (self.now_ms.saturating_sub(c.at_ms) / 1000) as i64)
@@ -1726,6 +1936,9 @@ impl Model {
         if slip(ModuleId::Ports) {
             s.insert(Sampler::Ports);
         }
+        if slip(ModuleId::Finance) && !self.config.finance.watchlist.is_empty() {
+            s.insert(Sampler::Finance);
+        }
         s
     }
 
@@ -1800,9 +2013,17 @@ mod tests {
     fn todo_add_toggle_remove() {
         let mut m = model();
         assert!(m.enabled(ModuleId::Todo), "on by default");
+        m.update(0, Event::Click(Action::ToggleSlips));
         let fx = m.update(0, Event::Click(Action::TodoAdd));
-        assert!(fx.contains(&Effect::PromptTodo));
-        let fx = m.update(0, Event::TodoAdded("  write release notes  ".into()));
+        assert!(fx.contains(&Effect::TakeFocus), "typing needs the keyboard");
+        assert_eq!(m.front, Some(ModuleId::Todo));
+        m.update(0, Event::Text("  write release notes\u{7}".into()));
+        m.update(0, Event::Text("x".into()));
+        m.update(0, Event::Key(Key::Backspace));
+        let fx = m.update(0, Event::Key(Key::Enter));
+        assert!(fx.contains(&Effect::ReleaseFocus));
+        assert!(m.todo_input.is_none());
+        assert_eq!(m.state, IslandState::Slips, "Enter adds, it does not close the island");
         assert!(fx.contains(&Effect::SaveTodos));
         m.update(0, Event::TodoAdded("".into()));
         m.update(0, Event::TodoAdded("review PR".into()));
@@ -1983,7 +2204,7 @@ mod tests {
         let (_, action) = tag.action.clone().unwrap();
         let fx = m.update(141_000, Event::Click(action));
         assert!(fx.contains(&Effect::FocusWindow(0x10)));
-        assert_eq!(m.available_slips()[0], ModuleId::Commands);
+        assert_eq!(m.most_urgent_slip(), Some(ModuleId::Commands));
     }
 
     #[test]
@@ -2177,7 +2398,7 @@ mod tests {
     fn privacy_comes_first_and_tags_once() {
         let mut m = model();
         m.update(0, Event::Privacy(vec![(Device::Camera, "Zoom".into())]));
-        assert_eq!(m.available_slips()[0], ModuleId::Privacy);
+        assert_eq!(m.most_urgent_slip(), Some(ModuleId::Privacy));
         let n = m.tags.len();
         m.update(10, Event::Privacy(vec![(Device::Camera, "Zoom".into())]));
         assert_eq!(m.tags.len(), n);

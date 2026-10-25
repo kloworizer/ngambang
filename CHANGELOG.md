@@ -6,6 +6,39 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Calendar** module: link Google Calendar (its secret iCal address) or any
+  iCal calendar, as many as you like, each with its own colour. The slip shows
+  this week and what is coming up; a reminder pops up before each event (with
+  a Join button for online meetings). Recurring events, exceptions and time
+  zones are handled; the last events are kept for offline use.
+- **Markets** module: a watchlist of shares, indices, crypto and currencies
+  (Yahoo Finance), with price, change and a sparkline for today. In Settings,
+  type a name or symbol and pick from the matches. Prices load only while the
+  slip is open, then every minute.
+- **Module order**: Settings ▸ Modules lists every module with a tick to show
+  it and Move up / Move down to order the tabs.
+- **Volume level** everywhere: scrolling shows the level in a glance on the
+  orb or tag and as a pill on an open slip; every mixer row shows its percent.
+
+### Changed
+- **Neumorphic design**: soft raised and pressed surfaces across the island
+  (buttons, tabs, tiles, sliders, the orb) and soft cards in Settings.
+- The slip's tabs always run in a rail along its bottom, on every edge, and
+  are part of the slip, so they never hang past a short slip.
+- Scrolling on the orb or a tag changes the volume of the player that is
+  playing (its own app volume); the system volume when there is no player.
+- "Add task" is a field in the to-do slip: type, Enter adds, Esc cancels.
+- Weather slip redesigned: an icon-only refresh button, the temperature with
+  feels-like, humidity and wind, the next hours as cards, warnings as a list.
+
+### Fixed
+- **Camera and microphone use** is now read from the devices: Media
+  Foundation's sensor monitor reports every app streaming from a camera, and
+  active audio capture sessions show every app recording. The privacy
+  registry is the fallback and is re-read every few seconds. `ngambang doctor`
+  shows all three.
+
 ## [0.1.2] - 2026-10-25
 
 ### Added

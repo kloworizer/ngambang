@@ -100,14 +100,19 @@ freely, subject to the following restrictions:
 
 ## Data sources
 
-The Weather & early warnings module shows data from these services. Ngambang
-fetches it on your device; nothing is redistributed with the program.
+The Weather & early warnings and Markets modules show data from these
+services. Ngambang fetches it on your device; nothing is redistributed with
+the program.
 
 | Source | Data | Terms |
 |--------|------|-------|
 | [Open-Meteo](https://open-meteo.com) | Weather forecasts | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) — "Weather data by Open-Meteo.com"; the source is named in the weather slip |
 | [GDACS](https://www.gdacs.org) (UN OCHA / European Commission JRC) | Disaster alerts | [GDACS terms of use](https://www.gdacs.org/About/termofuse.aspx) |
 | [USGS Earthquake Hazards Program](https://earthquake.usgs.gov) | Earthquake reports | Public domain (U.S. Government work) |
+| [Yahoo Finance](https://finance.yahoo.com) | Quotes and symbol search for the Markets watchlist | For personal, non-commercial display; prices may be delayed. Yahoo's [terms of service](https://legal.yahoo.com/us/en/yahoo/terms/otos/index.html) apply; the source is named in the slip |
+
+Calendars are read from the iCal addresses you add yourself; their content
+stays on your computer.
 
 ## Not bundled
 

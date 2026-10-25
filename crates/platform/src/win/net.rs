@@ -10,12 +10,13 @@ use std::time::{Duration, Instant};
 use ngambang_core::model::Event;
 use ngambang_core::update::{self, Release};
 use ngambang_core::weather;
+use ngambang_core::{calendar, finance};
 use windows::core::{w, HSTRING};
 use windows::Win32::Networking::NetworkListManager::{INetworkListManager, NetworkListManager};
 use windows::Win32::Networking::WinHttp::*;
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
 
-use super::util::{unix_now, Bus};
+use super::util::{local_offset_min, unix_now, Bus};
 
 /// The release found by the last update check, for the installer.
 pub static PENDING_RELEASE: Mutex<Option<Release>> = Mutex::new(None);
@@ -29,7 +30,8 @@ const RETRY: [Duration; 5] = [
     Duration::from_secs(10 * 60),
 ];
 const OFFLINE_POLL: Duration = Duration::from_secs(60);
-const MAX_BODY: usize = 4 * 1024 * 1024;
+/// Large calendars can be several megabytes.
+const MAX_BODY: usize = 16 * 1024 * 1024;
 
 struct Handle(*mut core::ffi::c_void);
 
@@ -126,10 +128,48 @@ pub struct NetConfig {
     pub lat: f64,
     pub lon: f64,
     pub auto_update: bool,
+    /// iCal addresses of linked calendars (empty: the module is off).
+    pub calendars: Vec<String>,
+    pub calendar_days: u32,
+    pub symbols: Vec<String>,
+}
+
+/// Search Yahoo Finance for symbols (Settings ▸ Markets).
+pub fn search_symbols(query: &str) -> Result<Vec<finance::SearchHit>, String> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(finance::parse_search(&http_get(&finance::search_url(query))?))
+}
+
+/// Download every linked calendar; None when none could be read.
+fn fetch_calendars(urls: &[String], days: u32) -> Option<Vec<calendar::CalEvent>> {
+    let now = unix_now();
+    let (from, to) = (now - 86_400, now + (days as i64 + 1) * 86_400);
+    let offset = local_offset_min();
+    let mut events = Vec::new();
+    let mut any = false;
+    for (i, url) in urls.iter().enumerate() {
+        match http_get(&calendar::feed_url(url)) {
+            Ok(text) => {
+                any = true;
+                events.extend(calendar::parse(&text, i, from, to, offset));
+            }
+            Err(e) => log_warn!("calendar {}: {e}", i + 1),
+        }
+    }
+    events.sort_by_key(|e| e.start);
+    any.then_some(events)
+}
+
+fn fetch_quotes(symbols: &[String]) -> Vec<finance::Quote> {
+    symbols.iter().filter_map(|s| http_get(&finance::chart_url(s)).ok().and_then(|j| finance::parse_chart(&j))).collect()
 }
 
 enum Msg {
     Config(NetConfig),
+    /// Quotes on (the watchlist is open) or off.
+    Finance(bool),
     Refresh,
     CheckUpdate,
     Stop,
@@ -155,12 +195,20 @@ impl NetWorker {
             let mut usgs: Vec<weather::Alert> = Vec::new();
             let mut manual_update = false;
             let (mut weather_fails, mut alert_fails) = (0usize, 0usize);
+            let (mut next_calendar, mut calendar_fails) = (now, 0usize);
+            let (mut quotes_on, mut next_quotes) = (false, now);
             let retry = |fails: usize| RETRY[fails.min(RETRY.len() - 1)];
             loop {
                 let now = Instant::now();
                 let mut due = next_update;
                 if cfg.weather {
                     due = due.min(next_weather).min(next_alerts);
+                }
+                if !cfg.calendars.is_empty() {
+                    due = due.min(next_calendar);
+                }
+                if quotes_on && !cfg.symbols.is_empty() {
+                    due = due.min(next_quotes);
                 }
                 // Offline, due work waits for the next connectivity check
                 // instead of spinning on a deadline that has already passed.
@@ -173,14 +221,28 @@ impl NetWorker {
                     Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => return,
                     Ok(Msg::Config(c)) => {
                         let moved = c.lat != cfg.lat || c.lon != cfg.lon || (c.weather && !cfg.weather);
+                        if c.calendars != cfg.calendars || c.calendar_days != cfg.calendar_days {
+                            next_calendar = Instant::now();
+                        }
+                        if c.symbols != cfg.symbols {
+                            next_quotes = Instant::now();
+                        }
                         cfg = c;
                         if moved {
                             next_weather = Instant::now();
                         }
                     }
+                    Ok(Msg::Finance(on)) => {
+                        // Fresh prices as soon as the watchlist opens, unless they are seconds old.
+                        if on && !quotes_on {
+                            next_quotes = next_quotes.min(Instant::now() + Duration::from_millis(300));
+                        }
+                        quotes_on = on;
+                    }
                     Ok(Msg::Refresh) => {
                         next_weather = Instant::now();
                         next_alerts = Instant::now();
+                        next_calendar = Instant::now();
                         // A manual refresh also re-checks a connection Windows called offline.
                         last_online = None;
                     }
@@ -255,6 +317,26 @@ impl NetWorker {
                         now + retry(alert_fails - 1)
                     };
                 }
+                if !cfg.calendars.is_empty() && now >= next_calendar {
+                    match fetch_calendars(&cfg.calendars, cfg.calendar_days) {
+                        Some(events) => {
+                            bus.send(Event::Calendar(events));
+                            calendar_fails = 0;
+                            next_calendar = now + Duration::from_millis(calendar::REFRESH_MS);
+                        }
+                        None => {
+                            next_calendar = now + retry(calendar_fails);
+                            calendar_fails += 1;
+                        }
+                    }
+                }
+                if quotes_on && !cfg.symbols.is_empty() && now >= next_quotes {
+                    let quotes = fetch_quotes(&cfg.symbols);
+                    if !quotes.is_empty() {
+                        bus.send(Event::Quotes(quotes));
+                    }
+                    next_quotes = Instant::now() + Duration::from_millis(finance::REFRESH_MS);
+                }
                 if now >= next_update && (cfg.auto_update || manual_update) {
                     match check_update() {
                         Ok(Some(r)) => {
@@ -283,6 +365,9 @@ impl NetWorker {
     }
     pub fn refresh(&self) {
         let _ = self.tx.send(Msg::Refresh);
+    }
+    pub fn finance(&self, on: bool) {
+        let _ = self.tx.send(Msg::Finance(on));
     }
     pub fn check_update(&self) {
         let _ = self.tx.send(Msg::CheckUpdate);

@@ -21,10 +21,12 @@ pub enum ModuleId {
     Prayer,
     Weather,
     Todo,
+    Calendar,
+    Finance,
 }
 
 impl ModuleId {
-    pub const ALL: [ModuleId; 12] = [
+    pub const ALL: [ModuleId; 14] = [
         ModuleId::Media,
         ModuleId::Mixer,
         ModuleId::Commands,
@@ -37,6 +39,8 @@ impl ModuleId {
         ModuleId::Prayer,
         ModuleId::Weather,
         ModuleId::Todo,
+        ModuleId::Calendar,
+        ModuleId::Finance,
     ];
 
     /// Key used in the `[modules]` table.
@@ -54,6 +58,8 @@ impl ModuleId {
             ModuleId::Prayer => "prayer",
             ModuleId::Weather => "weather",
             ModuleId::Todo => "todo",
+            ModuleId::Calendar => "calendar",
+            ModuleId::Finance => "finance",
         }
     }
 
@@ -72,6 +78,8 @@ impl ModuleId {
             ModuleId::Prayer => "Jadwal sholat (prayer times)",
             ModuleId::Weather => "Weather & early warnings",
             ModuleId::Todo => "To-do list",
+            ModuleId::Calendar => "Calendar",
+            ModuleId::Finance => "Markets watchlist",
         }
     }
 
@@ -96,6 +104,8 @@ pub struct Config {
     pub location: LocationConfig,
     pub prayer: PrayerConfig,
     pub weather: WeatherConfig,
+    pub calendar: CalendarConfig,
+    pub finance: FinanceConfig,
     pub update: UpdateConfig,
     pub motion: MotionConfig,
 }
@@ -134,6 +144,10 @@ pub struct Modules {
     pub prayer: bool,
     pub weather: bool,
     pub todo: bool,
+    pub calendar: bool,
+    pub finance: bool,
+    /// Tab order, by module key; modules not listed follow in the default order.
+    pub order: Vec<String>,
 }
 
 impl Default for Modules {
@@ -151,6 +165,9 @@ impl Default for Modules {
             prayer: false,
             weather: true,
             todo: true,
+            calendar: true,
+            finance: true,
+            order: Vec::new(),
         }
     }
 }
@@ -170,6 +187,8 @@ impl Modules {
             ModuleId::Prayer => self.prayer,
             ModuleId::Weather => self.weather,
             ModuleId::Todo => self.todo,
+            ModuleId::Calendar => self.calendar,
+            ModuleId::Finance => self.finance,
         }
     }
 
@@ -187,12 +206,29 @@ impl Modules {
             ModuleId::Prayer => &mut self.prayer,
             ModuleId::Weather => &mut self.weather,
             ModuleId::Todo => &mut self.todo,
+            ModuleId::Calendar => &mut self.calendar,
+            ModuleId::Finance => &mut self.finance,
         };
         *slot = on;
     }
 
     pub fn enabled(&self) -> impl Iterator<Item = ModuleId> + '_ {
         ModuleId::ALL.into_iter().filter(|m| self.get(*m))
+    }
+
+    /// Every module in the user's order: the listed ones first, then the rest.
+    pub fn ordered(&self) -> Vec<ModuleId> {
+        let mut out: Vec<ModuleId> = Vec::with_capacity(ModuleId::ALL.len());
+        for key in &self.order {
+            if let Some(m) = ModuleId::from_key(key) {
+                if !out.contains(&m) {
+                    out.push(m);
+                }
+            }
+        }
+        let rest: Vec<ModuleId> = ModuleId::ALL.into_iter().filter(|m| !out.contains(m)).collect();
+        out.extend(rest);
+        out
     }
 }
 
@@ -355,6 +391,53 @@ impl Default for WeatherConfig {
     }
 }
 
+/// One linked calendar: a secret iCal address (Google, Outlook, iCloud…).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CalendarFeed {
+    pub name: String,
+    pub url: String,
+    /// "#RRGGBB".
+    pub color: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CalendarConfig {
+    pub feeds: Vec<CalendarFeed>,
+    /// Minutes before an event for a reminder; 0 = none.
+    pub reminder_min: u32,
+    /// Days ahead shown in the slip.
+    pub days: u32,
+}
+
+impl Default for CalendarConfig {
+    fn default() -> Self {
+        CalendarConfig { feeds: Vec::new(), reminder_min: 10, days: 7 }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WatchItem {
+    /// Yahoo Finance symbol: BBCA.JK, ^JKSE, BTC-USD, USDIDR=X, AAPL…
+    pub symbol: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FinanceConfig {
+    pub watchlist: Vec<WatchItem>,
+}
+
+impl Default for FinanceConfig {
+    fn default() -> Self {
+        let item = |symbol: &str, name: &str| WatchItem { symbol: symbol.into(), name: name.into() };
+        FinanceConfig { watchlist: vec![item("^JKSE", "IDX Composite"), item("BTC-USD", "Bitcoin"), item("USDIDR=X", "USD/IDR")] }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpdateConfig {
@@ -376,7 +459,7 @@ pub struct MotionConfig {
 }
 
 /// The file written on first run. Kept in sync with `Config::default()` by a test.
-pub const DEFAULT_TOML: &str = r#"# Ngambang configuration — changes apply as soon as you save.
+pub const DEFAULT_TOML: &str = r##"# Ngambang configuration — changes apply as soon as you save.
 # Every module can be turned on or off; the tray menu "Modules" does the same.
 
 [dock]
@@ -399,6 +482,9 @@ privacy = true     # mic / camera in use
 prayer = false     # jadwal sholat: prayer times and reminders
 weather = true     # weather and early warnings (GDACS, USGS)
 todo = true        # a small to-do list
+calendar = true    # upcoming events from linked calendars
+finance = true     # prices for your watchlist
+order = []         # tab order by key, e.g. ["media", "todo"]; the rest follow
 
 [media]
 track_tags = true
@@ -449,12 +535,20 @@ alerts = true              # tags for disasters near the location
 quake_radius_km = 300
 quake_min_magnitude = 4.5
 
+[calendar]                 # link calendars in Settings ▸ Calendar
+feeds = []                 # [{ name = "Work", url = "https://…/basic.ics", color = "#A99BFF" }]
+reminder_min = 10          # reminder before each event; 0 = none
+days = 7                   # days ahead shown
+
+[finance]                  # add symbols in Settings ▸ Markets (search by name)
+watchlist = [{ symbol = "^JKSE", name = "IDX Composite" }, { symbol = "BTC-USD", name = "Bitcoin" }, { symbol = "USDIDR=X", name = "USD/IDR" }]
+
 [update]
 auto_check = true          # look for a new release on GitHub once a day
 
 [motion]
 reduce = false
-"#;
+"##;
 
 impl Config {
     /// Parse a config file. Never fails: problems are returned as warnings and
@@ -501,6 +595,8 @@ impl Config {
         section!("location", location);
         section!("prayer", prayer);
         section!("weather", weather);
+        section!("calendar", calendar);
+        section!("finance", finance);
         section!("update", update);
         section!("motion", motion);
         cfg
@@ -543,6 +639,14 @@ impl Config {
             warnings.push("weather.quake_radius_km must be 10–5000".into());
             self.weather.quake_radius_km = self.weather.quake_radius_km.clamp(10, 5000);
         }
+        if self.calendar.reminder_min > 120 {
+            warnings.push("calendar.reminder_min must be 0–120".into());
+            self.calendar.reminder_min = 120;
+        }
+        self.calendar.days = self.calendar.days.clamp(1, 30);
+        self.calendar.feeds.retain(|f| !f.url.trim().is_empty());
+        self.finance.watchlist.retain(|w| !w.symbol.trim().is_empty());
+        self.finance.watchlist.truncate(20);
         if self.prayer.reminder_min > 60 {
             warnings.push("prayer.reminder_min must be 0–60".into());
             self.prayer.reminder_min = 60;
@@ -571,7 +675,7 @@ pub fn set_toml_value(text: &str, table: &str, key: &str, value: &str) -> String
     let mut table_start = None;
     let mut table_end = lines.len();
     for (i, line) in lines.iter().enumerate() {
-        let t = line.split('#').next().unwrap_or("").trim();
+        let t = line[..comment_start(line).unwrap_or(line.len())].trim();
         if t.starts_with('[') {
             if in_table {
                 table_end = i;
@@ -587,7 +691,7 @@ pub fn set_toml_value(text: &str, table: &str, key: &str, value: &str) -> String
             if let Some((k, rest)) = line.trim().split_once('=') {
                 if k.trim() == key {
                     // Preserve a trailing comment if there is one.
-                    let comment = rest.find('#').map(|h| rest[rest[..h].trim_end().len()..].to_string()).unwrap_or_default();
+                    let comment = comment_start(rest).map(|h| rest[rest[..h].trim_end().len()..].to_string()).unwrap_or_default();
                     let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
                     lines[i] = format!("{indent}{key} = {value}{comment}");
                     return join_lines(&lines, text);
@@ -613,6 +717,25 @@ pub fn set_toml_value(text: &str, table: &str, key: &str, value: &str) -> String
         }
     }
     join_lines(&lines, text)
+}
+
+/// Where a `#` comment starts on a TOML line, skipping `#` inside strings
+/// (colours like "#A99BFF", URLs with fragments).
+fn comment_start(line: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        match quote {
+            Some('"') if escaped => escaped = false,
+            Some('"') if c == '\\' => escaped = true,
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '#' => return Some(i),
+            None => {}
+        }
+    }
+    None
 }
 
 fn join_lines(lines: &[String], original: &str) -> String {
@@ -681,6 +804,29 @@ mod tests {
         assert!(w.is_empty());
         assert!(!cfg.modules.ports);
         assert!(cfg.modules.media);
+    }
+
+    #[test]
+    fn hash_inside_strings_is_not_a_comment() {
+        let first =
+            set_toml_value(DEFAULT_TOML, "calendar", "feeds", r##"[{ name = "Work", url = "https://x/a.ics#y", color = "#A99BFF" }]"##);
+        let again = set_toml_value(&first, "calendar", "feeds", r##"[{ name = "Home", url = "https://x/b.ics", color = "#7FD1AE" }]"##);
+        let (cfg, w) = Config::parse(&again);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(cfg.calendar.feeds.len(), 1);
+        assert_eq!(cfg.calendar.feeds[0].color, "#7FD1AE");
+        assert!(again.lines().any(|l| l.starts_with("feeds = [{ name = \"Home\"") && l.contains("# [{ name = \"Work\"")));
+        assert_eq!(comment_start(r#"a = "x#y" # note"#), Some(10));
+        assert_eq!(comment_start(r#"a = 'x#y'"#), None);
+        assert_eq!(comment_start(r##"a = "q\"#" # c"##), Some(11));
+    }
+
+    #[test]
+    fn module_order_puts_listed_first() {
+        let (cfg, _) = Config::parse("[modules]\norder = [\"todo\", \"nope\", \"media\", \"todo\"]\n");
+        let o = cfg.modules.ordered();
+        assert_eq!(&o[..3], &[ModuleId::Todo, ModuleId::Media, ModuleId::Mixer]);
+        assert_eq!(o.len(), ModuleId::ALL.len());
     }
 
     #[test]

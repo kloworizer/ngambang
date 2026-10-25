@@ -2,9 +2,15 @@
 
 use crate::geometry::Color;
 
-pub const SURFACE: Color = Color::rgb(0x15171A);
-pub const SURFACE_2: Color = Color::rgb(0x1E2125);
-pub const SURFACE_3: Color = Color::rgb(0x23272C);
+/// The island's base: every raised and inset shape is the same material.
+pub const SURFACE: Color = Color::rgb(0x212428);
+/// Inset wells (tiles, fields, grooves).
+pub const SURFACE_2: Color = Color::rgb(0x1B1D21);
+/// A raised control's face.
+pub const SURFACE_3: Color = Color::rgb(0x25292E);
+/// Soft shadows: dark falls bottom-right, light top-left (neumorphism).
+pub const SHADOW_DARK: Color = Color::rgb(0x0E1012);
+pub const SHADOW_LIGHT: Color = Color::rgb(0x363B42);
 pub const HAIRLINE: Color = Color(0xFFFFFF14);
 pub const TRACK: Color = Color::rgb(0x3A3F45);
 pub const TEXT: Color = Color::rgb(0xECEDEE);
@@ -28,16 +34,14 @@ pub const RING_W: f32 = 2.0;
 pub const TAG_H: f32 = 40.0;
 pub const TAG_MAX_W: f32 = 360.0;
 pub const SLIP_W: f32 = 372.0;
-pub const TAB_W: f32 = 44.0;
-pub const TAB_H: f32 = 48.0;
-/// Height of the tab row under the slip on top and bottom docks.
+/// Height of one row of tabs under the slip.
 pub const TAB_ROW_H: f32 = 40.0;
 /// A now-playing tag is wider: it carries the player controls.
 pub const MEDIA_TAG_MAX_W: f32 = 420.0;
 pub const SEAM_T: f32 = 3.0;
 pub const SEAM_L: f32 = 92.0;
 /// The fixed window box around the anchor (SPEC §4.2): every state fits inside.
-pub const BOX_DEPTH: f32 = 520.0;
+pub const BOX_DEPTH: f32 = 580.0;
 pub const BOX_SPAN: f32 = 640.0;
 
 #[cfg(test)]

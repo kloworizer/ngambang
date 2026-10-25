@@ -128,6 +128,14 @@ pub fn process_display_name(path: &str) -> String {
     })
 }
 
+/// The computer's current UTC offset in minutes.
+pub fn local_offset_min() -> i32 {
+    match clock_event() {
+        ngambang_core::model::Event::Clock { utc_offset_min, .. } => utc_offset_min,
+        _ => 0,
+    }
+}
+
 /// The local wall clock for the core model (date, minutes, UTC offset).
 pub fn clock_event() -> ngambang_core::model::Event {
     use windows::Win32::System::SystemInformation::GetSystemTime;

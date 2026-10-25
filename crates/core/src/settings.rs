@@ -1,7 +1,7 @@
 //! The Settings window's form: built from the config, validated, and turned
 //! into in-place `config.toml` edits. Pure so it is tested on every OS.
 
-use crate::config::{Config, ModuleId, Modules};
+use crate::config::{CalendarFeed, Config, ModuleId, Modules, WatchItem};
 use crate::geometry::Edge;
 use crate::hotkey::Hotkey;
 
@@ -36,6 +36,21 @@ pub struct Form {
     pub update_check: bool,
     pub weather_alerts: bool,
     pub quake_radius_km: String,
+    /// Every module, in tab order.
+    pub module_order: Vec<ModuleId>,
+    pub calendar_feeds: Vec<CalendarFeed>,
+    pub calendar_reminder: String,
+    pub calendar_days: String,
+    pub watchlist: Vec<WatchItem>,
+}
+
+/// Colours offered for calendars, with names for the list.
+pub const CALENDAR_COLORS: [(&str, &str); 6] =
+    [("Violet", "#A99BFF"), ("Teal", "#4CC3D9"), ("Mint", "#7FD1AE"), ("Amber", "#F2A93B"), ("Lime", "#B7E04A"), ("Coral", "#FF8A70")];
+
+fn inline_table(fields: &[(&str, &str)]) -> String {
+    let body = fields.iter().map(|(k, v)| format!("{k} = {}", toml_str(v))).collect::<Vec<_>>().join(", ");
+    format!("{{ {body} }}")
 }
 
 /// One `key = value` change inside a table; `value` is a TOML literal.
@@ -83,6 +98,11 @@ impl Form {
             update_check: c.update.auto_check,
             weather_alerts: c.weather.alerts,
             quake_radius_km: c.weather.quake_radius_km.to_string(),
+            module_order: c.modules.ordered(),
+            calendar_feeds: c.calendar.feeds.clone(),
+            calendar_reminder: c.calendar.reminder_min.to_string(),
+            calendar_days: c.calendar.days.to_string(),
+            watchlist: c.finance.watchlist.clone(),
         }
     }
 
@@ -126,6 +146,28 @@ impl Form {
         let reminder = number("Prayer reminder", &self.prayer_reminder, 0, 60)?;
         let city = self.prayer_city.trim();
         let radius = number("Earthquake radius", &self.quake_radius_km, 10, 5000)?;
+        let cal_reminder = number("Event reminder", &self.calendar_reminder, 0, 120)?;
+        let cal_days = number("Days ahead", &self.calendar_days, 1, 30)?;
+        let mut feeds = Vec::new();
+        for (i, f) in self.calendar_feeds.iter().enumerate() {
+            let url = f.url.trim();
+            if !(url.starts_with("https://") || url.starts_with("webcal://")) {
+                return Err(format!("Calendar address: \"{}\" must start with https:// or webcal://", f.name));
+            }
+            let name = if f.name.trim().is_empty() { format!("Calendar {}", i + 1) } else { f.name.trim().to_string() };
+            let color = if f.color.len() == 7 && f.color.starts_with('#') { f.color.clone() } else { CALENDAR_COLORS[i % 6].1.to_string() };
+            feeds.push(inline_table(&[("name", &name), ("url", url), ("color", &color)]));
+        }
+        let watch: Vec<String> = self
+            .watchlist
+            .iter()
+            .filter(|w| !w.symbol.trim().is_empty())
+            .take(20)
+            .map(|w| inline_table(&[("symbol", w.symbol.trim()), ("name", w.name.trim())]))
+            .collect();
+        // The default order is written as [] so the file stays short.
+        let order: Vec<String> =
+            if self.module_order == ModuleId::ALL { Vec::new() } else { self.module_order.iter().map(|m| toml_str(m.key())).collect() };
         let b = |v: bool| v.to_string();
         let mut out: Vec<Edit> = vec![
             ("dock", "edge", toml_str(self.edge.name())),
@@ -153,6 +195,11 @@ impl Form {
             ("update", "auto_check", b(self.update_check)),
             ("weather", "alerts", b(self.weather_alerts)),
             ("weather", "quake_radius_km", radius.to_string()),
+            ("modules", "order", format!("[{}]", order.join(", "))),
+            ("calendar", "feeds", format!("[{}]", feeds.join(", "))),
+            ("calendar", "reminder_min", cal_reminder.to_string()),
+            ("calendar", "days", cal_days.to_string()),
+            ("finance", "watchlist", format!("[{}]", watch.join(", "))),
         ];
         for m in ModuleId::ALL {
             out.push(("modules", m.key(), b(self.modules.get(m))));
@@ -220,6 +267,43 @@ mod tests {
         assert!(!c.update.auto_check);
         assert!(!c.weather.alerts);
         assert_eq!(c.weather.quake_radius_km, 500);
+    }
+
+    #[test]
+    fn order_calendars_and_watchlist_apply() {
+        let mut form = Form::from_config(&Config::default(), false);
+        form.module_order.retain(|m| *m != ModuleId::Finance);
+        form.module_order.insert(0, ModuleId::Finance);
+        form.calendar_feeds = vec![
+            CalendarFeed {
+                name: "Work \"team\"".into(),
+                url: "https://calendar.google.com/calendar/ical/a%40b/private-x/basic.ics".into(),
+                color: "#4CC3D9".into(),
+            },
+            CalendarFeed { name: "".into(), url: "webcal://p01-caldav.icloud.com/x.ics#frag".into(), color: "".into() },
+        ];
+        form.calendar_days = "10".into();
+        form.watchlist = vec![
+            WatchItem { symbol: "BBCA.JK".into(), name: "Bank Central Asia".into() },
+            WatchItem { symbol: "^JKSE".into(), name: "".into() },
+        ];
+        let text = apply(DEFAULT_TOML, &form.edits().unwrap());
+        let (c, w) = Config::parse(&text);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(c.modules.ordered()[0], ModuleId::Finance);
+        assert_eq!(c.calendar.feeds.len(), 2);
+        assert_eq!(c.calendar.feeds[0].name, "Work \"team\"");
+        assert_eq!(c.calendar.feeds[1].name, "Calendar 2");
+        assert_eq!(c.calendar.feeds[1].color, "#4CC3D9");
+        assert!(c.calendar.feeds[1].url.ends_with("#frag"));
+        assert_eq!(c.calendar.days, 10);
+        assert_eq!(c.finance.watchlist[0].symbol, "BBCA.JK");
+        assert_eq!(c.finance.watchlist.len(), 2);
+        // Saving again keeps the file valid (no '#' mistaken for a comment).
+        let again = apply(&text, &Form::from_config(&c, false).edits().unwrap());
+        assert_eq!(Config::parse(&again).0, c);
+        let bad = Form { calendar_feeds: vec![CalendarFeed { name: "x".into(), url: "ftp://nope".into(), color: String::new() }], ..form };
+        assert!(bad.edits().unwrap_err().contains("Calendar address"));
     }
 
     #[test]

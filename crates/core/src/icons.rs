@@ -196,6 +196,17 @@ pub fn icon_prims(icon: Icon, rect: Rect, color: Color) -> Vec<Prim> {
             },
             circle(12.0, 9.5, 2.3),
         ],
+        Icon::Calendar => vec![
+            rr(3.5, 5.0, 17.0, 15.5, 2.5),
+            line(&[(3.5, 10.0), (20.5, 10.0)]),
+            line(&[(8.0, 3.0), (8.0, 7.0)]),
+            line(&[(16.0, 3.0), (16.0, 7.0)]),
+            dot(8.5, 14.5, 1.3),
+            dot(12.0, 14.5, 1.3),
+            dot(15.5, 14.5, 1.3),
+        ],
+        Icon::Chart => vec![line(&[(3.0, 17.0), (9.0, 11.0), (13.0, 14.5), (21.0, 6.0)]), line(&[(16.0, 6.0), (21.0, 6.0), (21.0, 11.0)])],
+        Icon::Refresh => vec![arc(12.0, 12.0, 7.5, -60.0, 230.0), fill(&[(17.5, 3.5), (19.6, 9.0), (14.0, 8.0)])],
         Icon::Grid => {
             vec![rr(3.5, 3.5, 7.0, 7.0, 1.5), rr(13.5, 3.5, 7.0, 7.0, 1.5), rr(3.5, 13.5, 7.0, 7.0, 1.5), rr(13.5, 13.5, 7.0, 7.0, 1.5)]
         }
@@ -213,7 +224,7 @@ pub fn icon_prims(icon: Icon, rect: Rect, color: Color) -> Vec<Prim> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 36] = [
+    const ALL: [Icon; 39] = [
         Icon::Note,
         Icon::Play,
         Icon::Pause,
@@ -250,6 +261,9 @@ mod tests {
         Icon::Gear,
         Icon::Pin,
         Icon::Grid,
+        Icon::Calendar,
+        Icon::Chart,
+        Icon::Refresh,
     ];
 
     #[test]

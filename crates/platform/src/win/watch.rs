@@ -8,13 +8,14 @@ use std::time::Duration;
 use ngambang_core::config::Config;
 use ngambang_core::model::{Capture, CaptureKind, Device, Event};
 use windows::core::{w, Result, HSTRING, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{HANDLE, WAIT_FAILED, WAIT_OBJECT_0};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, ReadDirectoryChangesW, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED, FILE_ACTION_RENAMED_NEW_NAME, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_INFORMATION,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects, INFINITE};
 use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
@@ -305,10 +306,17 @@ pub fn privacy(bus: Bus) -> Result<Stopper> {
         sources.push((Device::Camera, open_key(hive, &HSTRING::from(format!("{root}\\webcam")))));
     }
     let _ = std::thread::Builder::new().name("ngambang-privacy".into()).spawn(move || {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
         let keys: Vec<(Device, RegKey, OwnedHandle)> = sources
             .into_iter()
             .filter_map(|(d, k)| Some((d, k?, OwnedHandle(unsafe { CreateEventW(None, false, false, None).ok()? }))))
             .collect();
+        // The camera itself reports who streams from it; the registry is the fallback.
+        let Ok(camera_event) = (unsafe { CreateEventW(None, false, false, None) }).map(OwnedHandle) else { return };
+        let camera = super::sensors::CameraMonitor::start(camera_event.0);
+        let name = |pid: u32| super::util::process_path(pid).map(|p| super::util::process_display_name(&p));
         let mut last: Vec<(Device, String)> = Vec::new();
         loop {
             for (_, k, ev) in &keys {
@@ -316,9 +324,14 @@ pub fn privacy(bus: Bus) -> Result<Stopper> {
                     let _ = RegNotifyChangeKeyValue(k.0, true, REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME, Some(ev.0), true);
                 }
             }
+            let registry =
+                |device: Device| -> Vec<String> { keys.iter().filter(|(d, _, _)| *d == device).flat_map(|(_, k, _)| scan(k.0)).collect() };
+            let direct_mic: Vec<String> = super::sensors::mic_pids().into_iter().filter_map(name).collect();
+            let direct_cam: Vec<String> = camera.as_ref().map(|c| c.pids()).unwrap_or_default().into_iter().filter_map(name).collect();
             let mut now: Vec<(Device, String)> = Vec::new();
-            for (d, k, _) in &keys {
-                now.extend(scan(k.0).into_iter().map(|a| (*d, a)));
+            for (device, direct) in [(Device::Microphone, direct_mic), (Device::Camera, direct_cam)] {
+                let apps = if direct.is_empty() { registry(device) } else { direct };
+                now.extend(apps.into_iter().map(|a| (device, a)));
             }
             now.sort();
             now.dedup();
@@ -327,22 +340,57 @@ pub fn privacy(bus: Bus) -> Result<Stopper> {
                 bus.send(Event::Privacy(now));
             }
             let mut handles: Vec<HANDLE> = keys.iter().map(|(_, _, e)| e.0).collect();
+            handles.push(camera_event.0);
             handles.push(stop_handle.0);
-            let r = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
-            if r.0.wrapping_sub(WAIT_OBJECT_0.0) as usize >= keys.len() {
+            // Also look again every few seconds: microphones have no change
+            // event of their own, and registry notifications can be missed.
+            let r = unsafe { WaitForMultipleObjects(&handles, false, 3000) };
+            let index = r.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
+            if r == WAIT_FAILED || index == handles.len() - 1 {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            if index < handles.len() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
     });
     Ok(stop)
 }
 
 /// Every app Windows has recorded for the microphone and camera, with the
-/// raw start/stop stamps (for `ngambang doctor`).
+/// raw start/stop stamps, plus what the devices report right now (for
+/// `ngambang doctor`).
 pub fn privacy_report() -> Vec<String> {
     let root = unsafe { CONSENT.to_string().unwrap_or_default() };
     let mut out = Vec::new();
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+    let describe = |pids: Vec<u32>| -> String {
+        if pids.is_empty() {
+            return "nobody".into();
+        }
+        pids.iter()
+            .map(|p| {
+                format!(
+                    "{} (pid {p})",
+                    super::util::process_path(*p).map(|x| super::util::process_display_name(&x)).unwrap_or_else(|| "?".into())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    out.push(format!("Microphone now (capture sessions): {}", describe(super::sensors::mic_pids())));
+    if let Some(ev) = unsafe { CreateEventW(None, false, false, None) }.ok().map(OwnedHandle) {
+        match super::sensors::CameraMonitor::start(ev.0) {
+            Some(monitor) => {
+                // The first report arrives shortly after starting.
+                std::thread::sleep(Duration::from_millis(1500));
+                out.push(format!("Camera now (sensor monitor): {}", describe(monitor.pids())));
+            }
+            None => out.push("Camera now (sensor monitor): not available on this Windows".into()),
+        }
+    }
     for (hive, hive_name) in [(HKEY_CURRENT_USER, "HKCU"), (HKEY_LOCAL_MACHINE, "HKLM")] {
         for device in ["microphone", "webcam"] {
             let Some(k) = open_key(hive, &HSTRING::from(format!("{root}\\{device}"))) else {

@@ -38,6 +38,8 @@ thread, registers no callback and allocates nothing.
 | 16 | Jadwal sholat: offline prayer times and reminders | `prayer` | Added in 0.1.1, off by default |
 | 17 | Automatic updates from GitHub Releases | *(always on, can be disabled)* | Added in 0.1.1 |
 | 18 | To-do list (add from the slip, tick off, clear done; saved in `state.json`) | `todo` | Added in 0.1.2 |
+| 19 | Calendar from iCal feeds (Google secret address, Outlook, iCloud) | `calendar` | Added in 0.1.3 |
+| 20 | Markets watchlist (Yahoo Finance chart and search endpoints) | `finance` | Added in 0.1.3 |
 
 **0.1.1 notes.** Network work runs on one worker thread (`net.rs`): WinHTTP
 GETs with 10–15 s timeouts, preceded by Windows' `INetworkListManager`
@@ -725,3 +727,20 @@ on hover and press — all run in DWM. With a top or bottom dock the slip tabs
 form a row under the slip; the window box is 520 × 640 DIPs. The executables
 carry an icon group, `VS_VERSIONINFO` and a manifest (Common Controls 6,
 Per-Monitor V2), written as a `.res` by `crates/app/build.rs`.
+
+**0.1.3 notes.** Calendars are parsed in `core::calendar`: line unfolding,
+escaped text, `VTIMEZONE` rules (with yearly `BYMONTH`/`BYDAY` onsets), a fixed
+table for common zones a feed names without defining, `RRULE` with
+`FREQ`/`INTERVAL`/`COUNT`/`UNTIL`/`BYDAY`/`BYMONTHDAY`/`BYMONTH`, `EXDATE`,
+`RECURRENCE-ID` overrides and cancelled events; events are expanded for the
+next `days` + 1 days and cached in `state.json`. Markets use
+`/v8/finance/chart/{symbol}?range=1d&interval=15m` (price, previous close,
+up to 48 points) and `/v1/finance/search`; quotes are fetched only while
+`Sampler::Finance` runs (the slip is open). The island's look is neumorphic,
+built from plain primitives in `core::soft` (layered low-alpha shadows; inset
+wells), so the renderer needs nothing new. Tabs are always a rail under the
+slip (up to ten per row). The wheel sets the front player's session volume
+(matched like the mixer's "controls" rows) and falls back to the endpoint.
+Camera use comes from `MFCreateSensorActivityMonitor`, microphone use from
+active capture sessions on every capture endpoint, with the ConsentStore as a
+fallback re-read every 3 s.

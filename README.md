@@ -34,7 +34,7 @@ Specification: [docs/SPEC.md](docs/SPEC.md)
 |-------|--------|
 | Hover the orb | Show what is running; while music plays, the tag has the cover, artist and ⏮ ⏯ ⏭ |
 | Click | Open the slips; click again or move away to close |
-| Mouse wheel on the orb | System volume |
+| Mouse wheel on the orb or a tag | Volume of the player that is playing (the system volume when nothing plays); the level shows as you scroll |
 | Shift + wheel on the orb | Next / previous track |
 | Middle-click the orb | Play / pause |
 | Wheel on the slips, or ↑ / ↓ | Flip between slips |
@@ -61,7 +61,9 @@ config file; a module that is off costs nothing.
 | `privacy` | Mic & camera beacon | Alerts when an app uses the microphone or camera — even during games — with a button to mute the mic. |
 | `weather` | Weather & early warnings | Current weather and the next hours from [Open-Meteo](https://open-meteo.com), plus early warnings from [GDACS](https://www.gdacs.org) (the UN/EU Global Disaster Alert and Coordination System: earthquakes, tsunamis, cyclones, floods, volcanoes, droughts, wildfires) and [USGS](https://earthquake.usgs.gov) earthquake reports. Disasters near your location raise a tag; tsunami and Red alerts come through even during games. |
 | `prayer` | Jadwal sholat | Prayer times for your location, calculated offline (Kemenag RI by default; MWL, ISNA, Egypt, Umm al-Qura, JAKIM, Karachi), with a reminder before each prayer and a tag at the time. Off by default. |
-| `todo` | To-do list | A short list of tasks: add one from the slip, tick it off, clear finished ones. Saved between restarts. |
+| `todo` | To-do list | A short list of tasks: type one straight into the slip, tick it off, clear finished ones. Saved between restarts. |
+| `calendar` | Calendar | This week and your upcoming events from Google Calendar or any iCal calendar (link as many as you like in Settings ▸ Calendar), with a reminder before each event. |
+| `finance` | Markets watchlist | Prices, today's change and a sparkline for shares, indices, crypto and currencies (Yahoo Finance). Add symbols in Settings ▸ Markets by typing a name. Loads only while the slip is open. |
 
 ### What "control all apps" means
 
@@ -119,12 +121,14 @@ listed in the sidebar (`Ctrl+Tab` moves to the next one):
 | Page | Options |
 |------|---------|
 | General | Start with Windows · reduce motion · hide from screenshots and screen sharing · sink to a thin line in fullscreen apps · hotkey · screen edge · monitor · position along the edge |
-| Modules | Turn each of the twelve modules on or off |
+| Modules | Turn each of the fourteen modules on or off and set the order of their tabs |
 | Media & clipboard | Pop-up for new tracks · volume step · clipboard tags |
 | Focus & commands | Timer presets · custom round length · long-command threshold |
 | Games | Break reminder · ping host · power plan to use while gaming (picked from your plans) |
 | Location & prayer | A city from the list (about 240 places: Indonesia in depth, Malaysia, Singapore, Brunei, the Middle East and large cities worldwide; Jakarta by default), your own coordinates, or **Use my location** · calculation method · Asr (standard or Hanafi) · reminder minutes |
 | Weather & updates | Disaster pop-ups on/off · earthquake radius · automatic update checks · **Check for updates now** |
+| Calendar | Link calendars by their secret iCal address (Google Calendar ▸ Settings ▸ your calendar ▸ Integrate calendar), name and colour · reminder minutes · days ahead |
+| Markets | Search box with live matches (shares, indices, crypto, currency pairs) · your watchlist with Move up / Move down / Remove |
 
 Everything applies as soon as you press **Save**; nothing needs a restart.
 The tray menu also has quick toggles for modules, dock edge, pause and
@@ -164,6 +168,9 @@ State (dock position, today's play time) lives in
   - weather from Open-Meteo for your location's coordinates (every 30 min),
   - early warnings from GDACS and USGS (every 5 min),
   - one update check per day to GitHub Releases,
+  - your linked calendars' iCal addresses (every 15 min, Calendar module),
+  - prices for your watchlist from Yahoo Finance (every minute, only while
+    the Markets slip is open), and symbol search while you type in Settings,
   - ICMP ping to your gateway while game stats are on screen.
 
   Turn off the Weather module and automatic update checks and none of these

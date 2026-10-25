@@ -73,6 +73,8 @@ struct SavedState {
     weather: Option<ngambang_core::weather::Weather>,
     alerts: Vec<ngambang_core::weather::Alert>,
     todos: Vec<ngambang_core::model::TodoItem>,
+    /// Upcoming events from linked calendars, shown while offline.
+    calendar: Vec<ngambang_core::calendar::CalEvent>,
 }
 
 fn load_state() -> SavedState {
@@ -168,6 +170,8 @@ struct App {
     hotkey: bool,
     /// What the last tag said, to animate a change of content.
     last_tag: Option<String>,
+    /// First half of a character outside the Basic Multilingual Plane (emoji).
+    high_surrogate: Option<u16>,
 }
 
 pub fn run(opts: RunOptions) -> i32 {
@@ -243,8 +247,8 @@ fn run_inner(opts: RunOptions) -> Result<i32> {
             if super::settings::pre_translate(&msg) {
                 continue;
             }
-            let dialogs = [super::settings::SETTINGS_HWND.load(Ordering::SeqCst), super::prompt::PROMPT_HWND.load(Ordering::SeqCst)];
-            if dialogs.iter().any(|h| *h != 0 && IsDialogMessageW(HWND(*h as *mut _), &msg).as_bool()) {
+            let settings = super::settings::SETTINGS_HWND.load(Ordering::SeqCst);
+            if settings != 0 && IsDialogMessageW(HWND(settings as *mut _), &msg).as_bool() {
                 continue;
             }
             let _ = TranslateMessage(&msg);
@@ -405,6 +409,7 @@ impl App {
             hook: HWINEVENTHOOK::default(),
             hotkey: false,
             last_tag: None,
+            high_surrogate: None,
         })
     }
 
@@ -456,6 +461,9 @@ impl App {
         }
         if !self.state.todos.is_empty() {
             self.dispatch(Event::Todos(self.state.todos.clone()));
+        }
+        if !self.state.calendar.is_empty() && !self.model.config.calendar.feeds.is_empty() {
+            self.dispatch(Event::Calendar(self.state.calendar.clone()));
         }
         self.dispatch(Event::Day(today()));
         self.dispatch(clock_event());
@@ -670,13 +678,15 @@ impl App {
         }
         // Master volume (orb wheel) and mic mute need the audio worker too.
         let want_audio = on(ModuleId::Mixer) || on(ModuleId::Media) || on(ModuleId::Privacy);
+        // Per-app sessions: the Mixer shows them, and the wheel turns the player's own volume.
+        let sessions = on(ModuleId::Mixer) || on(ModuleId::Media);
         if want_audio != self.workers.audio.is_some() {
-            self.workers.audio = want_audio.then(|| AudioWorker::start(self.bus.clone(), on(ModuleId::Mixer)));
-            self.workers.audio_mixer = on(ModuleId::Mixer);
+            self.workers.audio = want_audio.then(|| AudioWorker::start(self.bus.clone(), sessions));
+            self.workers.audio_mixer = sessions;
         } else if let Some(a) = &self.workers.audio {
-            if self.workers.audio_mixer != on(ModuleId::Mixer) {
-                a.mixer(on(ModuleId::Mixer));
-                self.workers.audio_mixer = on(ModuleId::Mixer);
+            if self.workers.audio_mixer != sessions {
+                a.mixer(sessions);
+                self.workers.audio_mixer = sessions;
             }
         }
         if on(ModuleId::Clipboard) != self.workers.clipboard {
@@ -708,6 +718,9 @@ impl App {
             lat: c.location.latitude,
             lon: c.location.longitude,
             auto_update: c.update.auto_check,
+            calendars: if on(ModuleId::Calendar) { c.calendar.feeds.iter().map(|f| f.url.clone()).collect() } else { Vec::new() },
+            calendar_days: c.calendar.days,
+            symbols: if on(ModuleId::Finance) { c.finance.watchlist.iter().map(|w| w.symbol.clone()).collect() } else { Vec::new() },
         };
         match &self.workers.net {
             Some(n) => n.configure(net),
@@ -753,6 +766,11 @@ impl App {
                     },
                     Sampler::Gpu => self.stats().gpu(start),
                     Sampler::Ping => self.stats().ping(start),
+                    Sampler::Finance => {
+                        if let Some(n) = &self.workers.net {
+                            n.finance(start);
+                        }
+                    }
                     Sampler::Peaks => {
                         if let Some(a) = &self.workers.audio {
                             a.peaks(start);
@@ -833,17 +851,7 @@ impl App {
                     n.refresh();
                 }
             }
-            Effect::PromptTodo => {
-                let s = self.scale;
-                let island = self.scene_rect.translate(self.bx.x, self.bx.y);
-                let near = RECT {
-                    left: (island.x * s) as i32,
-                    top: (island.y * s) as i32,
-                    right: (island.right() * s) as i32,
-                    bottom: (island.bottom() * s) as i32,
-                };
-                super::prompt::open(self.hwnd, near, self.bus.clone());
-            }
+            Effect::OpenSettings(m) => super::settings::open(self.hwnd, &self.model.config, super::settings::page_for(m)),
             Effect::SaveTodos => {
                 self.state.todos = self.model.todos.clone();
                 save_state(&self.state);
@@ -1051,7 +1059,7 @@ impl App {
                 cfg.dock.edge = edge;
                 self.dispatch(Event::Config(cfg));
             }
-            tray::CMD_SETTINGS => super::settings::open(self.hwnd, &self.model.config),
+            tray::CMD_SETTINGS => super::settings::open(self.hwnd, &self.model.config, 0),
             tray::CMD_UPDATE => {
                 if self.model.update.is_some() {
                     self.exec(Effect::InstallUpdate);
@@ -1092,6 +1100,10 @@ impl App {
                         }
                         Event::Alerts(a) => {
                             self.state.alerts = a.clone();
+                            save_state(&self.state);
+                        }
+                        Event::Calendar(c) => {
+                            self.state.calendar = c.clone();
                             save_state(&self.state);
                         }
                         _ => {}
@@ -1270,6 +1282,36 @@ impl App {
             WM_HOTKEY => {
                 if wp.0 as i32 == HOTKEY_ID {
                     self.dispatch(Event::Hotkey);
+                }
+                zero
+            }
+            WM_KEYDOWN if self.model.todo_input.is_some() => {
+                // Typing a task: editing keys go to the field.
+                let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+                match VIRTUAL_KEY(wp.0 as u16) {
+                    VK_RETURN => self.dispatch(Event::Key(Key::Enter)),
+                    VK_ESCAPE => self.dispatch(Event::Key(Key::Escape)),
+                    VK_BACK => self.dispatch(Event::Key(Key::Backspace)),
+                    VK_V if ctrl => {
+                        if let Some(text) = clipboard::read_text(self.hwnd) {
+                            self.dispatch(Event::Text(text.lines().next().unwrap_or("").to_string()));
+                        }
+                    }
+                    _ => return None,
+                }
+                zero
+            }
+            WM_CHAR if self.model.todo_input.is_some() => {
+                // UTF-16 units; a surrogate pair arrives as two messages.
+                let unit = wp.0 as u16;
+                if (0xD800..0xDC00).contains(&unit) {
+                    self.high_surrogate = Some(unit);
+                } else {
+                    let units: Vec<u16> = self.high_surrogate.take().into_iter().chain(std::iter::once(unit)).collect();
+                    let text = String::from_utf16_lossy(&units);
+                    if text.chars().all(|c| !c.is_control()) {
+                        self.dispatch(Event::Text(text));
+                    }
                 }
                 zero
             }
