@@ -19,6 +19,19 @@ use windows_numerics::{Matrix3x2, Vector2, Vector3};
 
 use super::gfx::Gfx;
 
+/// How a new scene replaces the one on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Anim {
+    /// Redraw in place.
+    None,
+    /// Morph the shape from the old scene to the new one.
+    Morph,
+    /// Morph, and the new scene springs in from slightly smaller (pop-ups).
+    Pop,
+    /// Same shape, new content: crossfade with a short slide.
+    Swap,
+}
+
 /// One scene on screen.
 struct Layer {
     sprite: SpriteVisual,
@@ -46,6 +59,8 @@ pub struct Renderer {
     outgoing: Vec<Layer>,
     ring: Ring,
     scale: f32,
+    /// Scale the current scene is animating towards (hover and press feedback).
+    target_scale: f32,
 }
 
 fn ts(ms: u64) -> TimeSpan {
@@ -91,6 +106,7 @@ impl Renderer {
             outgoing: Vec::new(),
             ring: Ring { visual, geometry, shape, last: None },
             scale: 1.0,
+            target_scale: 1.0,
         })
     }
 
@@ -143,13 +159,48 @@ impl Renderer {
         Ok(a)
     }
 
-    /// Show `scene` at `rect` (window-local DIPs). `animate` morphs from the
-    /// previous scene; otherwise the scene is redrawn in place.
-    pub fn show(&mut self, gfx: &Gfx, scene: &Scene, rect: Rect, animate: bool, reduce_motion: bool) -> Result<()> {
+    /// Scale from `from` to `to` (both axes), overshooting a little when growing.
+    fn scale_anim(&self, from: Option<f32>, to: f32, ms: u64) -> Result<Vector3KeyFrameAnimation> {
+        let a = self.compositor.CreateVector3KeyFrameAnimation()?;
+        let ease = self.compositor.CreateCubicBezierEasingFunction(Vector2 { X: 0.34, Y: 1.4 }, Vector2 { X: 0.64, Y: 1.0 })?;
+        if let Some(f) = from {
+            a.InsertKeyFrame(0.0, Vector3 { X: f, Y: f, Z: 1.0 })?;
+        }
+        a.InsertKeyFrameWithEasingFunction(1.0, Vector3 { X: to, Y: to, Z: 1.0 }, &ease)?;
+        a.SetDuration(ts(ms))?;
+        Ok(a)
+    }
+
+    fn slide(&self, from: Vector3, to: Vector3, ms: u64) -> Result<Vector3KeyFrameAnimation> {
+        let a = self.compositor.CreateVector3KeyFrameAnimation()?;
+        let ease = self.compositor.CreateCubicBezierEasingFunction(Vector2 { X: 0.22, Y: 1.0 }, Vector2 { X: 0.36, Y: 1.0 })?;
+        a.InsertKeyFrame(0.0, from)?;
+        a.InsertKeyFrameWithEasingFunction(1.0, to, &ease)?;
+        a.SetDuration(ts(ms))?;
+        Ok(a)
+    }
+
+    /// Grow or shrink the current scene a little around its centre: hover and
+    /// press feedback. Runs in the compositor; repeated calls are free.
+    pub fn feedback(&mut self, scale: f32, reduce_motion: bool) -> Result<()> {
+        if (self.target_scale - scale).abs() < 0.001 {
+            return Ok(());
+        }
+        self.target_scale = scale;
+        let Some(cur) = &self.current else { return Ok(()) };
+        if reduce_motion {
+            return cur.sprite.SetScale(Vector3 { X: scale, Y: scale, Z: 1.0 });
+        }
+        cur.sprite.StartAnimation(&HSTRING::from("Scale"), &self.scale_anim(None, scale, 180)?)
+    }
+
+    /// Show `scene` at `rect` (window-local DIPs), replacing the previous
+    /// scene as `anim` says.
+    pub fn show(&mut self, gfx: &Gfx, scene: &Scene, rect: Rect, anim: Anim, reduce_motion: bool) -> Result<()> {
         let px = ((rect.w * self.scale).ceil().max(1.0) as i32, (rect.h * self.scale).ceil().max(1.0) as i32);
-        let same_kind = !animate;
+        let animate = matches!(anim, Anim::Morph | Anim::Pop);
         if let Some(cur) = &mut self.current {
-            if same_kind && cur.px == px {
+            if anim == Anim::None && cur.px == px {
                 cur.sprite.SetOffset(Vector3 { X: rect.x, Y: rect.y, Z: 0.0 })?;
                 cur.rect = rect;
                 let surface = cur.surface.clone();
@@ -168,6 +219,9 @@ impl Renderer {
         sprite.SetBrush(&brush)?;
         sprite.SetSize(Vector2 { X: rect.w, Y: rect.h })?;
         sprite.SetOffset(Vector3 { X: rect.x, Y: rect.y, Z: 0.0 })?;
+        sprite.SetCenterPoint(Vector3 { X: rect.w / 2.0, Y: rect.h / 2.0, Z: 0.0 })?;
+        // A new scene starts without hover or press feedback.
+        self.target_scale = 1.0;
         let clip = self.compositor.CreateRoundedRectangleGeometry()?;
         clip.SetCornerRadius(Vector2 { X: scene.clip_radius, Y: scene.clip_radius })?;
         sprite.SetClip(&self.compositor.CreateGeometricClipWithGeometry(&clip)?)?;
@@ -194,11 +248,25 @@ impl Renderer {
                 prev.clip.StartAnimation(&HSTRING::from("Offset"), &self.spring(grow, to_off)?)?;
                 prev.clip.StartAnimation(&HSTRING::from("Size"), &self.spring(grow, full)?)?;
                 prev.sprite.StartAnimation(&HSTRING::from("Opacity"), &self.fade(0.0, 130)?)?;
+                if anim == Anim::Pop {
+                    sprite.StartAnimation(&HSTRING::from("Scale"), &self.scale_anim(Some(0.86), 1.0, 360)?)?;
+                }
+                self.outgoing.push(prev);
+            }
+            Some(prev) if anim == Anim::Swap && !reduce_motion => {
+                // Same place, new content: the new one slides in a few pixels while the old fades.
+                clip.SetSize(full)?;
+                let at = Vector3 { X: rect.x, Y: rect.y, Z: 0.0 };
+                sprite.SetOpacity(0.0)?;
+                sprite.StartAnimation(&HSTRING::from("Opacity"), &self.fade(1.0, 160)?)?;
+                sprite.StartAnimation(&HSTRING::from("Offset"), &self.slide(Vector3 { X: rect.x, Y: rect.y + 6.0, Z: 0.0 }, at, 240)?)?;
+                sprite.StartAnimation(&HSTRING::from("Scale"), &self.scale_anim(Some(0.97), 1.0, 260)?)?;
+                prev.sprite.StartAnimation(&HSTRING::from("Opacity"), &self.fade(0.0, 140)?)?;
                 self.outgoing.push(prev);
             }
             Some(prev) => {
                 clip.SetSize(full)?;
-                if animate {
+                if anim != Anim::None {
                     // Reduced motion: a short crossfade only.
                     sprite.SetOpacity(0.0)?;
                     sprite.StartAnimation(&HSTRING::from("Opacity"), &self.fade(1.0, 80)?)?;

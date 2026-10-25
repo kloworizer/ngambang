@@ -1,25 +1,45 @@
 //! Now playing from every app that publishes Windows media controls (SMTC).
 //! Runs on its own MTA thread; SMTC events only mark the snapshot dirty.
+//! Titles, artists and album art are read only when an app says they changed.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ngambang_core::format::friendly_app_name;
-use ngambang_core::model::{Event, MediaCmd, MediaSession};
-use windows::core::{Result, HSTRING};
+use ngambang_core::model::{Art, Event, MediaCmd, MediaSession};
+use windows::core::{Interface, Result, HSTRING};
 use windows::ApplicationModel::AppInfo;
 use windows::Foundation::TypedEventHandler;
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession as Session, GlobalSystemMediaTransportControlsSessionManager as Manager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
 };
+use windows::Storage::Streams::IRandomAccessStreamReference;
+use windows::Win32::Graphics::Imaging::*;
+use windows::Win32::System::Com::{CoCreateInstance, IStream, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
-use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+use windows::Win32::System::WinRT::{CreateStreamOverRandomAccessStream, RoInitialize, RO_INIT_MULTITHREADED};
 
 use super::util::{now_ms, Bus};
 
+/// Album art is decoded at this size (pixels, square).
+const ART_PX: u32 = 120;
+/// Apps often publish the title first and the artist and cover a moment
+/// later: read the properties once more after this.
+const RECHECK: Duration = Duration::from_millis(1200);
+
+static ART_IDS: AtomicU64 = AtomicU64::new(1);
+
 enum Msg {
+    /// Play state or position changed.
     Dirty,
+    /// Sessions came or went.
+    Sessions,
+    /// Title, artist or cover changed.
+    Props,
     Command(String, MediaCmd),
     Stop,
 }
@@ -44,19 +64,40 @@ impl MediaWorker {
                 }
             };
             state.publish(&bus);
+            let mut recheck: Option<Instant> = None;
             loop {
-                match rx.recv() {
-                    Ok(Msg::Stop) | Err(_) => break,
-                    Ok(Msg::Command(id, cmd)) => {
+                let msg = match recheck {
+                    Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                        Ok(m) => Some(m),
+                        Err(RecvTimeoutError::Timeout) => None,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    },
+                    None => match rx.recv() {
+                        Ok(m) => Some(m),
+                        Err(_) => break,
+                    },
+                };
+                match msg {
+                    Some(Msg::Stop) => break,
+                    Some(Msg::Command(id, cmd)) => {
                         if let Err(e) = state.command(&id, cmd) {
                             log_warn!("media: command failed: {e}");
                         }
                     }
-                    Ok(Msg::Dirty) => {
+                    None => {
+                        recheck = None;
+                        state.props_dirty = true;
+                        state.publish(&bus);
+                    }
+                    Some(first @ (Msg::Dirty | Msg::Sessions | Msg::Props)) => {
+                        let mut props = matches!(first, Msg::Props);
+                        let mut sessions = matches!(first, Msg::Sessions);
                         // Debounce bursts of SMTC events.
                         loop {
                             match rx.recv_timeout(Duration::from_millis(40)) {
-                                Ok(Msg::Dirty) => continue,
+                                Ok(Msg::Dirty) => {}
+                                Ok(Msg::Sessions) => sessions = true,
+                                Ok(Msg::Props) => props = true,
                                 Ok(Msg::Command(id, cmd)) => {
                                     let _ = state.command(&id, cmd);
                                 }
@@ -64,8 +105,14 @@ impl MediaWorker {
                                 Err(RecvTimeoutError::Timeout) => break,
                             }
                         }
-                        if let Err(e) = state.resubscribe() {
-                            log_warn!("media: resubscribe failed: {e}");
+                        if sessions {
+                            if let Err(e) = state.resubscribe() {
+                                log_warn!("media: resubscribe failed: {e}");
+                            }
+                        }
+                        if props || sessions {
+                            state.props_dirty = true;
+                            recheck = Some(Instant::now() + RECHECK);
                         }
                         state.publish(&bus);
                     }
@@ -92,11 +139,23 @@ struct Subscribed {
     tokens: [i64; 3],
 }
 
+/// What we last read from a session's media properties.
+struct Props {
+    title: String,
+    artist: String,
+    /// Title, artist and album: the art is decoded again only when this changes.
+    key: String,
+    art: Option<Art>,
+}
+
 struct State {
     manager: Manager,
     tx: Sender<Msg>,
     subs: Vec<Subscribed>,
-    names: std::collections::HashMap<String, String>,
+    names: HashMap<String, String>,
+    props: HashMap<String, Props>,
+    props_dirty: bool,
+    wic: Option<IWICImagingFactory>,
 }
 
 impl State {
@@ -104,15 +163,16 @@ impl State {
         let manager = Manager::RequestAsync()?.join()?;
         let t = tx.clone();
         manager.SessionsChanged(&TypedEventHandler::new(move |_, _| {
-            let _ = t.send(Msg::Dirty);
+            let _ = t.send(Msg::Sessions);
             Ok(())
         }))?;
         let t = tx.clone();
         manager.CurrentSessionChanged(&TypedEventHandler::new(move |_, _| {
-            let _ = t.send(Msg::Dirty);
+            let _ = t.send(Msg::Sessions);
             Ok(())
         }))?;
-        let mut s = State { manager, tx, subs: Vec::new(), names: Default::default() };
+        let wic = unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok() };
+        let mut s = State { manager, tx, subs: Vec::new(), names: Default::default(), props: HashMap::new(), props_dirty: true, wic };
         s.resubscribe()?;
         Ok(s)
     }
@@ -124,9 +184,9 @@ impl State {
             let _ = s.session.RemoveTimelinePropertiesChanged(s.tokens[2]);
         }
         for session in self.manager.GetSessions()? {
-            let a = session.MediaPropertiesChanged(&TypedEventHandler::new(dirty(&self.tx)))?;
-            let b = session.PlaybackInfoChanged(&TypedEventHandler::new(dirty(&self.tx)))?;
-            let c = session.TimelinePropertiesChanged(&TypedEventHandler::new(dirty(&self.tx)))?;
+            let a = session.MediaPropertiesChanged(&TypedEventHandler::new(notify(&self.tx, || Msg::Props)))?;
+            let b = session.PlaybackInfoChanged(&TypedEventHandler::new(notify(&self.tx, || Msg::Dirty)))?;
+            let c = session.TimelinePropertiesChanged(&TypedEventHandler::new(notify(&self.tx, || Msg::Dirty)))?;
             self.subs.push(Subscribed { session, tokens: [a, b, c] });
         }
         Ok(())
@@ -158,7 +218,11 @@ impl State {
         for (i, s) in sessions.iter().enumerate() {
             let read = |this: &mut State| -> Result<MediaSession> {
                 let raw_id = s.SourceAppUserModelId()?.to_string();
-                let props = s.TryGetMediaPropertiesAsync()?.join()?;
+                let slot = format!("{raw_id}#{i}");
+                if this.props_dirty || !this.props.contains_key(&slot) {
+                    let p = this.read_props(s, this.props.get(&slot))?;
+                    this.props.insert(slot.clone(), p);
+                }
                 let info = s.GetPlaybackInfo()?;
                 let controls = info.Controls()?;
                 let tl = s.GetTimelineProperties()?;
@@ -176,11 +240,14 @@ impl State {
                 let position_ms = ((pos.max(0)) / 10_000) as u64;
                 // Several sessions can share an app id; keep ids unique.
                 let id = if out_has(&out, &raw_id) { format!("{raw_id}#{i}") } else { raw_id.clone() };
+                let p = &this.props[&slot];
+                let (title, artist, art) = (p.title.clone(), p.artist.clone(), p.art.clone());
                 Ok(MediaSession {
                     app: this.app_name(&raw_id),
                     id,
-                    title: props.Title()?.to_string(),
-                    artist: props.Artist()?.to_string(),
+                    title,
+                    artist,
+                    art,
                     playing,
                     position_ms: position_ms.min(duration_ms.max(position_ms)),
                     duration_ms,
@@ -196,7 +263,66 @@ impl State {
                 Err(e) => log_warn!("media: session {i} unreadable: {e}"),
             }
         }
+        self.props_dirty = false;
+        // Forget sessions that went away (and their art).
+        let live: Vec<String> =
+            (0..sessions.len()).filter_map(|i| sessions[i].SourceAppUserModelId().ok().map(|id| format!("{id}#{i}"))).collect();
+        self.props.retain(|k, _| live.contains(k));
         out
+    }
+
+    fn read_props(&self, s: &Session, old: Option<&Props>) -> Result<Props> {
+        let props = s.TryGetMediaPropertiesAsync()?.join()?;
+        let title = props.Title()?.to_string();
+        // Players fill different fields: browsers often only set the album artist or a subtitle.
+        let artist = [props.Artist(), props.AlbumArtist(), props.Subtitle()]
+            .into_iter()
+            .filter_map(|f| f.ok().map(|h| h.to_string().trim().to_string()))
+            .find(|a| !a.is_empty())
+            .unwrap_or_default();
+        let album = props.AlbumTitle().map(|h| h.to_string()).unwrap_or_default();
+        let key = format!("{title}\u{1}{artist}\u{1}{album}");
+        // Same track with art already: keep it. New track, or art still missing: decode.
+        let art = match old {
+            Some(o) if o.key == key && o.art.is_some() => o.art.clone(),
+            _ => props.Thumbnail().ok().and_then(|t| self.decode_art(&t).map_err(|e| log_info!("media: no art: {e}")).ok()),
+        };
+        Ok(Props { title, artist, key, art })
+    }
+
+    /// Decode a thumbnail into a square, centre-cropped premultiplied BGRA picture.
+    fn decode_art(&self, thumb: &IRandomAccessStreamReference) -> Result<Art> {
+        let wic = self.wic.as_ref().ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_NOINTERFACE))?;
+        let stream = thumb.OpenReadAsync()?.join()?;
+        unsafe {
+            let istream: IStream = CreateStreamOverRandomAccessStream(&stream.cast::<windows::core::IUnknown>()?)?;
+            let decoder = wic.CreateDecoderFromStream(&istream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)?;
+            let frame = decoder.GetFrame(0)?;
+            let (mut w, mut h) = (0u32, 0u32);
+            frame.GetSize(&mut w, &mut h)?;
+            if w == 0 || h == 0 {
+                return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
+            }
+            let side = w.min(h);
+            let clipper = wic.CreateBitmapClipper()?;
+            let square = WICRect { X: ((w - side) / 2) as i32, Y: ((h - side) / 2) as i32, Width: side as i32, Height: side as i32 };
+            clipper.Initialize(&frame, &square)?;
+            let px = ART_PX.min(side);
+            let scaler = wic.CreateBitmapScaler()?;
+            scaler.Initialize(&clipper, px, px, WICBitmapInterpolationModeFant)?;
+            let converter = wic.CreateFormatConverter()?;
+            converter.Initialize(
+                &scaler,
+                &GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapDitherTypeNone,
+                None,
+                0.0,
+                WICBitmapPaletteTypeCustom,
+            )?;
+            let mut pixels = vec![0u8; (px * px * 4) as usize];
+            converter.CopyPixels(std::ptr::null(), px * 4, &mut pixels)?;
+            Ok(Art { id: ART_IDS.fetch_add(1, Ordering::Relaxed), w: px, h: px, pixels: Arc::new(pixels) })
+        }
     }
 
     fn publish(&mut self, bus: &Bus) {
@@ -232,12 +358,13 @@ fn out_has(out: &[MediaSession], id: &str) -> bool {
     out.iter().any(|m| m.id == id)
 }
 
-fn dirty<A: windows::core::RuntimeType + 'static>(
+fn notify<A: windows::core::RuntimeType + 'static>(
     tx: &Sender<Msg>,
+    msg: fn() -> Msg,
 ) -> impl Fn(windows::core::Ref<Session>, windows::core::Ref<A>) -> Result<()> + Send + 'static {
     let tx = tx.clone();
     move |_, _| {
-        let _ = tx.send(Msg::Dirty);
+        let _ = tx.send(msg());
         Ok(())
     }
 }

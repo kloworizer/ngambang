@@ -28,7 +28,7 @@ pub struct Tray {
     icon: HICON,
 }
 
-/// Draw the orb as a 32×32 icon (no resource files needed).
+/// Draw the orb as a 32×32 icon, for builds without the icon resource.
 fn make_icon() -> Result<HICON> {
     const S: i32 = 32;
     let mut pixels = vec![0u32; (S * S) as usize];
@@ -102,7 +102,12 @@ fn data(hwnd: HWND, icon: HICON) -> NOTIFYICONDATAW {
 
 impl Tray {
     pub fn new(hwnd: HWND) -> Result<Tray> {
-        let icon = make_icon()?;
+        // The icon from the executable; drawn by hand if resources are missing.
+        let small = unsafe { GetSystemMetrics(SM_CXSMICON) };
+        let icon = match super::app::app_icon(small) {
+            i if !i.is_invalid() => i,
+            _ => make_icon()?,
+        };
         let t = Tray { hwnd, icon };
         t.add();
         Ok(t)

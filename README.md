@@ -27,18 +27,18 @@ Specification: [docs/SPEC.md](docs/SPEC.md)
 |-------|--------------|------|
 | **Seam** | a 3 px line on the edge | a fullscreen app has focus |
 | **Orb** | a dot with the progress ring ("the tide") | resting |
-| **Tag** | a label sliding out of the orb | hover, or a new event |
-| **Slips** | a card with index tabs for every active module | click, or the hotkey |
+| **Tag** | a label that pops out of the orb | hover, or a new event (new song, weather change, a warning, prayer time …) |
+| **Slips** | a card with index tabs for every active module (tabs along the bottom when docked to the top or bottom) | click, or the hotkey |
 
 | Input | Action |
 |-------|--------|
-| Hover the orb | Show what is running |
+| Hover the orb | Show what is running; while music plays, the tag has the cover, artist and ⏮ ⏯ ⏭ |
 | Click | Open the slips; click again or move away to close |
 | Mouse wheel on the orb | System volume |
 | Shift + wheel on the orb | Next / previous track |
 | Middle-click the orb | Play / pause |
 | Wheel on the slips, or ↑ / ↓ | Flip between slips |
-| Drag the orb | Move it to another edge or monitor |
+| Drag the orb, a tag or a slip's background | Move it to another edge or monitor; it follows the pointer as you drag |
 | `Win+Alt+Space` | Open with the keyboard (`Tab`, `Enter`, `←`/`→` on sliders, `Esc`) |
 | Right-click the orb or tray icon | Settings, modules, dock edge, pause, start with Windows |
 
@@ -50,17 +50,18 @@ config file; a module that is off costs nothing.
 
 | Key | Module | What it does |
 |-----|--------|--------------|
-| `media` | Media player | Now playing from every app with Windows media controls (music apps, browsers, video players). Switch between sources; play, pause, skip, seek. |
+| `media` | Media player | Now playing from every app with Windows media controls (music apps, browsers, video players), with album art and artist. Switch between sources; play, pause, skip, seek. A new track pops up with its cover and controls. |
 | `mixer` | Volume mixer | Volume and mute for **every** app making sound, including games and voice chat. Rows say whether the app also has media controls. |
 | `commands` | Command tags | `ngambang notify / done / run` and shell hooks: ✓ or ✕ tags when long commands finish, with a button to jump back to the terminal. |
 | `ports` | Local ports | Servers listening on localhost; open in the browser or stop (with confirmation). |
 | `clipboard` | Dev clipboard | Recognises JWT, JSON, base64, Unix time, UUID, hex colours and tracking links, and offers one-tap transforms. Skips anything a password manager marks private. |
-| `timer` | Focus timer | 25 / 50-minute rounds on the ring; holds back minor tags while it runs. |
+| `timer` | Focus timer | 25 / 50-minute rounds, or a custom length set with − and +, on the ring; holds back minor tags while it runs. |
 | `game` | Game stats & sessions | Session time, GPU load, VRAM, NVIDIA temperature, ping, a break reminder, today's play time and an optional power-plan switch. |
 | `captures` | Screenshots & clips | Tags new files in `Videos\Captures`, `Pictures\Screenshots` and folders you add; copy or reveal them. |
 | `privacy` | Mic & camera beacon | Alerts when an app uses the microphone or camera — even during games — with a button to mute the mic. |
 | `weather` | Weather & early warnings | Current weather and the next hours from [Open-Meteo](https://open-meteo.com), plus early warnings from [GDACS](https://www.gdacs.org) (the UN/EU Global Disaster Alert and Coordination System: earthquakes, tsunamis, cyclones, floods, volcanoes, droughts, wildfires) and [USGS](https://earthquake.usgs.gov) earthquake reports. Disasters near your location raise a tag; tsunami and Red alerts come through even during games. |
 | `prayer` | Jadwal sholat | Prayer times for your location, calculated offline (Kemenag RI by default; MWL, ISNA, Egypt, Umm al-Qura, JAKIM, Karachi), with a reminder before each prayer and a tag at the time. Off by default. |
+| `todo` | To-do list | A short list of tasks: add one from the slip, tick it off, clear finished ones. Saved between restarts. |
 
 ### What "control all apps" means
 
@@ -112,19 +113,18 @@ More (git hooks, coding-agent hooks, the pipe protocol): [docs/integrations.md](
 
 ## Settings
 
-Right-click the orb or the tray icon and choose **Settings…**. The window
-covers everything you would normally change:
+Right-click the orb or the tray icon and choose **Settings…**. Pages are
+listed in the sidebar (`Ctrl+Tab` moves to the next one):
 
-| Section | Options |
-|---------|---------|
-| General | Start with Windows · sink to a thin line in fullscreen apps · reduce motion · hide from screenshots and screen sharing · hotkey |
-| Position | Screen edge · monitor · position along the edge |
-| Modules | Turn each of the eleven modules on or off |
-| Location | A city from the list (Indonesian cities and neighbours, Jakarta by default), your own coordinates, or **Use my location** |
-| Jadwal sholat | Calculation method · Asr (standard or Hanafi) · reminder minutes |
-| Weather & updates | Disaster tags on/off · earthquake radius · automatic update checks · **Check for updates now** |
-| Media & clipboard | Track-change tags · volume step · clipboard tags |
-| Commands, timer & games | Long-command threshold · timer presets · break reminder · ping host · power plan to use while gaming (picked from your plans) |
+| Page | Options |
+|------|---------|
+| General | Start with Windows · reduce motion · hide from screenshots and screen sharing · sink to a thin line in fullscreen apps · hotkey · screen edge · monitor · position along the edge |
+| Modules | Turn each of the twelve modules on or off |
+| Media & clipboard | Pop-up for new tracks · volume step · clipboard tags |
+| Focus & commands | Timer presets · custom round length · long-command threshold |
+| Games | Break reminder · ping host · power plan to use while gaming (picked from your plans) |
+| Location & prayer | A city from the list (about 240 places: Indonesia in depth, Malaysia, Singapore, Brunei, the Middle East and large cities worldwide; Jakarta by default), your own coordinates, or **Use my location** · calculation method · Asr (standard or Hanafi) · reminder minutes |
+| Weather & updates | Disaster pop-ups on/off · earthquake radius · automatic update checks · **Check for updates now** |
 
 Everything applies as soon as you press **Save**; nothing needs a restart.
 The tray menu also has quick toggles for modules, dock edge, pause and

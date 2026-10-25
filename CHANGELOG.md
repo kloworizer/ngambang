@@ -6,6 +6,37 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **To-do list** module (on by default): add tasks from the slip, tick them
+  off, clear finished ones; kept between restarts.
+- **Custom focus round**: − and + in the timer slip set your own length
+  (also in Settings), next to the preset buttons.
+- **Album art and artist** in the media slip and the now-playing tag, which
+  also has previous / play-pause / next buttons.
+- **Pop-ups** with a spring animation for a new song, a change in the
+  weather, early warnings and prayer reminders; a crossfade when a tag's
+  content changes; hover and press feedback on the orb.
+- **Settings** redesigned: a sidebar of pages with icons, page headers and
+  modern Windows controls.
+- **App icon** (the orb from the website) on both executables, the tray, the
+  taskbar and Explorer, plus version details shown in Task Manager.
+- About 240 places in the location list: more Indonesian cities, Malaysia,
+  Singapore, Brunei, the Middle East and large cities worldwide.
+
+### Changed
+- Docked to the top or bottom, the slip's tabs run along its bottom edge.
+- The weather loads as soon as the island starts and refreshes every 30
+  minutes; a failed fetch retries after 20 s, 1, 2, 5 and then 10 minutes, and
+  opening the weather slip refreshes data older than half an hour.
+
+### Fixed
+- Dragging the island now follows the pointer in real time, and works from a
+  tag or an open slip (drag its background), not only from the orb.
+- No more busy loop while Windows reports no internet connection: the network
+  worker waits a minute between checks.
+- Lower memory: idle working set is returned to Windows 30 s after the island
+  settles; track info and album art are read only when a player changes them.
+
 ## [0.1.1] - 2026-10-24
 
 ### Added

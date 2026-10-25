@@ -30,7 +30,7 @@ use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_NEW, ABM_REMOVE, ABN_FULLSC
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::audio::AudioWorker;
-use super::comp::Renderer;
+use super::comp::{Anim, Renderer};
 use super::gfx::Gfx;
 use super::media::MediaWorker;
 use super::system::{self, StatsSampler};
@@ -49,6 +49,9 @@ const TIMER_SECOND: usize = 200;
 const TIMER_PORTS: usize = 201;
 const TIMER_CLEANUP: usize = 300;
 const TIMER_MIDNIGHT: usize = 301;
+/// Trims the working set once the island has been at rest for a while.
+const TIMER_TRIM: usize = 302;
+const TRIM_AFTER_MS: u32 = 30_000;
 const HOTKEY_ID: i32 = 1;
 const DRAG_THRESHOLD: f32 = 8.0;
 /// Not exported by the WindowsAndMessaging module.
@@ -69,6 +72,7 @@ struct SavedState {
     /// Last weather and warnings, shown while offline.
     weather: Option<ngambang_core::weather::Weather>,
     alerts: Vec<ngambang_core::weather::Alert>,
+    todos: Vec<ngambang_core::model::TodoItem>,
 }
 
 fn load_state() -> SavedState {
@@ -113,10 +117,11 @@ fn edit_config(edits: &[(&str, &str, String)]) {
 }
 
 struct Press {
-    action: Action,
+    /// None: pressed on the background, which only drags.
+    action: Option<Action>,
     /// Screen pixels where the button went down (the scene can change while dragging).
     screen: POINT,
-    /// Pressed on the orb or its tag: a drag moves the island.
+    /// Pressed on the orb, its tag or a slip's background: a drag moves the island.
     draggable: bool,
 }
 
@@ -161,6 +166,8 @@ struct App {
     reduce_motion: bool,
     hook: HWINEVENTHOOK,
     hotkey: bool,
+    /// What the last tag said, to animate a change of content.
+    last_tag: Option<String>,
 }
 
 pub fn run(opts: RunOptions) -> i32 {
@@ -199,6 +206,7 @@ fn run_inner(opts: RunOptions) -> Result<i32> {
         hInstance: hinstance.into(),
         lpszClassName: class,
         hCursor: unsafe { LoadCursorW(None, IDC_ARROW)? },
+        hIcon: app_icon(32),
         ..Default::default()
     };
     unsafe { RegisterClassExW(&wc) };
@@ -232,8 +240,11 @@ fn run_inner(opts: RunOptions) -> Result<i32> {
     unsafe {
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             // Tab, Enter and Esc inside the Settings window.
-            let settings = super::settings::SETTINGS_HWND.load(Ordering::SeqCst);
-            if settings != 0 && IsDialogMessageW(HWND(settings as *mut _), &msg).as_bool() {
+            if super::settings::pre_translate(&msg) {
+                continue;
+            }
+            let dialogs = [super::settings::SETTINGS_HWND.load(Ordering::SeqCst), super::prompt::PROMPT_HWND.load(Ordering::SeqCst)];
+            if dialogs.iter().any(|h| *h != 0 && IsDialogMessageW(HWND(*h as *mut _), &msg).as_bool()) {
                 continue;
             }
             let _ = TranslateMessage(&msg);
@@ -270,6 +281,16 @@ unsafe extern "system" fn win_event(_: HWINEVENTHOOK, _: u32, _: HWND, _: i32, _
     let h = HOOK_HWND.load(Ordering::SeqCst);
     if h != 0 {
         let _ = PostMessageW(Some(HWND(h as *mut _)), WM_APP_FOREGROUND, WPARAM(0), LPARAM(0));
+    }
+}
+
+/// The app icon from the executable's resources, at `size` pixels.
+pub(crate) fn app_icon(size: i32) -> HICON {
+    unsafe {
+        let Ok(module) = GetModuleHandleW(None) else { return HICON::default() };
+        LoadImageW(Some(module.into()), windows::core::PCWSTR(std::ptr::without_provenance(1)), IMAGE_ICON, size, size, LR_DEFAULTCOLOR)
+            .map(|h| HICON(h.0))
+            .unwrap_or_default()
     }
 }
 
@@ -383,6 +404,7 @@ impl App {
             reduce_motion: system::reduce_motion(),
             hook: HWINEVENTHOOK::default(),
             hotkey: false,
+            last_tag: None,
         })
     }
 
@@ -432,11 +454,15 @@ impl App {
         if let Some(w) = self.state.weather.clone() {
             self.dispatch(Event::Weather(w));
         }
+        if !self.state.todos.is_empty() {
+            self.dispatch(Event::Todos(self.state.todos.clone()));
+        }
         self.dispatch(Event::Day(today()));
         self.dispatch(clock_event());
         self.check_fullscreen();
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            SetTimer(Some(self.hwnd), TIMER_TRIM, TRIM_AFTER_MS, None);
         }
     }
 
@@ -445,6 +471,7 @@ impl App {
             system::set_power_plan(&g);
         }
         self.state.playlog = self.model.playlog.clone();
+        self.state.todos = self.model.todos.clone();
         save_state(&self.state);
         unsafe {
             let mut abd = APPBARDATA { cbSize: std::mem::size_of::<APPBARDATA>() as u32, hWnd: self.hwnd, ..Default::default() };
@@ -465,9 +492,12 @@ impl App {
         let dock = &self.model.config.dock;
         self.monitor = pick_monitor(&dock.monitor);
         let (scale, work) = monitor_metrics(self.monitor);
+        let bx = layout::window_box(dock.edge, dock.offset, work);
+        // Moving along the same edge keeps the drawn scene; only a new size or scale redraws.
+        let resized = scale != self.scale || bx.w != self.bx.w || bx.h != self.bx.h || self.scene.is_none();
         self.scale = scale;
         self.work = work;
-        self.bx = layout::window_box(dock.edge, dock.offset, work);
+        self.bx = bx;
         let s = scale;
         unsafe {
             let _ = SetWindowPos(
@@ -480,10 +510,12 @@ impl App {
                 SWP_NOACTIVATE,
             );
         }
-        let _ = self.renderer.set_scale(scale);
-        let _ = self.renderer.set_box(self.bx.w, self.bx.h);
-        self.renderer.reset_ring();
-        self.scene = None;
+        if resized {
+            let _ = self.renderer.set_scale(scale);
+            let _ = self.renderer.set_box(self.bx.w, self.bx.h);
+            self.renderer.reset_ring();
+            self.scene = None;
+        }
     }
 
     fn render(&mut self) {
@@ -497,17 +529,40 @@ impl App {
         let screen = layout::place(edge, self.model.config.dock.offset, self.work, self.bx, scene.size, scene.flush);
         let local = layout::local(screen, self.bx);
         let now = now_ms();
+        let reduce = self.reduce_motion || self.model.config.motion.reduce;
+        // Hover and press feedback on the orb.
+        let feedback = match scene.kind {
+            SceneKind::Orb if self.press.is_some() && !self.dragging => 0.92,
+            SceneKind::Orb if self.model.hover && !self.dragging => 1.1,
+            _ => 1.0,
+        };
         if self.scene.as_ref() == Some(&scene) && self.scene_rect == local {
             let _ = self.renderer.ring(scene.ring, local, now);
+            let _ = self.renderer.feedback(feedback, reduce);
             return;
         }
-        let animate = self.scene.as_ref().is_some_and(|s| s.kind != scene.kind);
-        let reduce = self.reduce_motion || self.model.config.motion.reduce;
-        if let Err(e) = self.renderer.show(&self.gfx, &scene, local, animate, reduce) {
+        let tag_text = (scene.kind == SceneKind::Tag).then(|| self.model.current_tag().map(|t| t.text.clone())).flatten();
+        let anim = match &self.scene {
+            None => Anim::None,
+            Some(_) if self.dragging => Anim::None,
+            // A tag arriving on its own (not a hover summary) pops up.
+            Some(prev) if prev.kind != scene.kind && scene.kind == SceneKind::Tag && !self.model.hover_tag => Anim::Pop,
+            Some(prev) if prev.kind != scene.kind => Anim::Morph,
+            Some(_) if scene.kind == SceneKind::Tag && tag_text.is_some() && tag_text != self.last_tag => Anim::Swap,
+            Some(_) => Anim::None,
+        };
+        self.last_tag = tag_text;
+        if let Err(e) = self.renderer.show(&self.gfx, &scene, local, anim, reduce) {
             log_warn!("render: {e}; recreating device");
-            if self.recreate_device().is_err() || self.renderer.show(&self.gfx, &scene, local, false, true).is_err() {
+            if self.recreate_device().is_err() || self.renderer.show(&self.gfx, &scene, local, Anim::None, true).is_err() {
                 return;
             }
+        }
+        let _ = self.renderer.feedback(feedback, reduce);
+        // Back at rest: give memory back after a while.
+        let at_rest = matches!(scene.kind, SceneKind::Orb | SceneKind::Seam | SceneKind::Hidden);
+        if at_rest && self.scene.as_ref().is_some_and(|s| s.kind != scene.kind) {
+            unsafe { SetTimer(Some(self.hwnd), TIMER_TRIM, TRIM_AFTER_MS, None) };
         }
         if self.renderer.has_outgoing() {
             unsafe { SetTimer(Some(self.hwnd), TIMER_CLEANUP, 450, None) };
@@ -778,6 +833,22 @@ impl App {
                     n.refresh();
                 }
             }
+            Effect::PromptTodo => {
+                let s = self.scale;
+                let island = self.scene_rect.translate(self.bx.x, self.bx.y);
+                let near = RECT {
+                    left: (island.x * s) as i32,
+                    top: (island.y * s) as i32,
+                    right: (island.right() * s) as i32,
+                    bottom: (island.bottom() * s) as i32,
+                };
+                super::prompt::open(self.hwnd, near, self.bus.clone());
+            }
+            Effect::SaveTodos => {
+                self.state.todos = self.model.todos.clone();
+                save_state(&self.state);
+            }
+            Effect::SaveValue(table, key, value) => edit_config(&[(table, key, value)]),
             Effect::TakeFocus => unsafe {
                 let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
                 SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex & !(WS_EX_NOACTIVATE.0 as isize));
@@ -872,7 +943,8 @@ impl App {
         ((x - r.x) / r.w.max(1.0)).clamp(0.0, 1.0)
     }
 
-    fn finish_drag(&mut self) {
+    /// Where the cursor would dock the island: edge, offset and monitor name.
+    fn dock_at_cursor() -> (Edge, f32, String) {
         let mut pt = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut pt);
@@ -881,16 +953,40 @@ impl App {
         let (scale, work) = monitor_metrics(mon);
         let (edge, offset) = layout::nearest_edge(work, pt.x as f32 / scale, pt.y as f32 / scale);
         let monitor = if is_primary(mon) { "primary".to_string() } else { monitor_name(mon).unwrap_or_else(|| "primary".into()) };
+        (edge, offset, monitor)
+    }
+
+    /// Follow the cursor while dragging: the island moves along the nearest edge as you go.
+    fn drag_to_cursor(&mut self) {
+        let (edge, offset, monitor) = Self::dock_at_cursor();
+        let d = &self.model.config.dock;
+        if d.edge == edge && d.offset == offset && d.monitor == monitor {
+            return;
+        }
+        let edge_changed = d.edge != edge;
+        let d = &mut self.model.config.dock;
+        d.edge = edge;
+        d.offset = offset;
+        d.monitor = monitor;
+        // Applied directly: no config reload or worker changes on every mouse move.
+        self.applied.dock = self.model.config.dock.clone();
+        if edge_changed {
+            // The orb sits on the other axis now; draw it again there.
+            self.scene = None;
+        }
+        self.place_window();
+        self.render();
+    }
+
+    fn finish_drag(&mut self) {
+        self.drag_to_cursor();
+        let d = self.model.config.dock.clone();
         edit_config(&[
-            ("dock", "edge", format!("\"{}\"", edge.name())),
-            ("dock", "offset", format!("{offset}")),
-            ("dock", "monitor", format!("\"{}\"", monitor.replace('\\', "\\\\"))),
+            ("dock", "edge", format!("\"{}\"", d.edge.name())),
+            ("dock", "offset", format!("{}", d.offset)),
+            ("dock", "monitor", format!("\"{}\"", d.monitor.replace('\\', "\\\\"))),
         ]);
-        let mut cfg = self.model.config.clone();
-        cfg.dock.edge = edge;
-        cfg.dock.offset = offset;
-        cfg.dock.monitor = monitor;
-        self.dispatch(Event::Config(cfg));
+        self.render();
     }
 
     fn activate_focused(&mut self) {
@@ -1020,6 +1116,13 @@ impl App {
                         let _ = KillTimer(Some(self.hwnd), id);
                     }
                     let _ = self.renderer.drop_outgoing();
+                } else if id == TIMER_TRIM {
+                    unsafe {
+                        let _ = KillTimer(Some(self.hwnd), id);
+                    }
+                    if matches!(self.model.state, IslandState::Orb | IslandState::Seam | IslandState::Hidden) {
+                        trim_memory();
+                    }
                 } else if id == TIMER_MIDNIGHT {
                     unsafe { SetTimer(Some(self.hwnd), TIMER_MIDNIGHT, ms_until_midnight() as u32, None) };
                     self.dispatch(Event::Day(today()));
@@ -1046,17 +1149,18 @@ impl App {
                 if let Some((target, r)) = self.slider {
                     let v = self.slider_value(r, x);
                     self.dispatch(Event::Slider(target, v));
+                } else if self.dragging {
+                    self.drag_to_cursor();
                 } else if let Some(p) = &self.press {
                     let mut pt = POINT::default();
                     unsafe {
                         let _ = GetCursorPos(&mut pt);
                     }
                     let moved = (((pt.x - p.screen.x).pow(2) + (pt.y - p.screen.y).pow(2)) as f32).sqrt();
-                    if p.draggable && !self.dragging && moved > DRAG_THRESHOLD * self.scale {
+                    if p.draggable && moved > DRAG_THRESHOLD * self.scale {
                         self.dragging = true;
-                        // Close any tag or slips so only the move is happening.
-                        self.dispatch(Event::Click(Action::Collapse));
                         unsafe { SetCursor(LoadCursorW(None, IDC_SIZEALL).ok()) };
+                        self.drag_to_cursor();
                     }
                 }
                 zero
@@ -1087,16 +1191,24 @@ impl App {
                         unsafe { SetCapture(self.hwnd) };
                         self.dispatch(Event::Slider(t, self.slider_value(r, x)));
                     }
-                    Some(HitKind::Click(action)) => {
-                        let draggable = matches!(self.model.state, IslandState::Orb | IslandState::Tag) && action == Action::ToggleSlips;
+                    hit => {
+                        // The orb, a tag's body and a slip's background all drag the island.
+                        let action = match hit {
+                            Some(HitKind::Click(a)) => Some(a),
+                            _ => None,
+                        };
+                        let draggable = match &action {
+                            None => matches!(self.model.state, IslandState::Slips | IslandState::Tag),
+                            Some(a) => *a == Action::ToggleSlips,
+                        };
                         let mut screen = POINT::default();
                         unsafe {
                             let _ = GetCursorPos(&mut screen);
                         }
                         self.press = Some(Press { action, screen, draggable });
                         unsafe { SetCapture(self.hwnd) };
+                        self.render();
                     }
-                    None => {}
                 }
                 zero
             }
@@ -1113,12 +1225,13 @@ impl App {
                 } else if self.slider.take().is_some() {
                 } else if let Some(p) = self.press.take() {
                     if let Some(HitKind::Click(a)) = self.hit(x, y) {
-                        if a == p.action {
+                        if Some(&a) == p.action.as_ref() {
                             self.dispatch(Event::Click(a));
                         }
                     }
                 }
                 self.after_capture();
+                self.render();
                 zero
             }
             WM_MBUTTONUP => {
@@ -1278,6 +1391,15 @@ impl App {
             }
             _ => None,
         }
+    }
+}
+
+/// Hand unused memory back to Windows (what Task Manager shows drops to the
+/// few megabytes the island really needs while idle).
+fn trim_memory() {
+    use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+    unsafe {
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
     }
 }
 

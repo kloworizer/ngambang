@@ -72,8 +72,8 @@ pub fn nearest_edge(work: Rect, x: f32, y: f32) -> (Edge, f32) {
     ];
     let edge = d.iter().min_by(|a, b| a.1.total_cmp(&b.1)).map(|e| e.0).unwrap_or(Edge::Left);
     let offset = if edge.is_vertical() { (y - work.y) / work.h.max(1.0) } else { (x - work.x) / work.w.max(1.0) };
-    // Round to 2 decimals so the config file stays readable.
-    (edge, (offset.clamp(0.0, 1.0) * 100.0).round() / 100.0)
+    // Round to 3 decimals (about a pixel) so the config file stays readable.
+    (edge, (offset.clamp(0.0, 1.0) * 1000.0).round() / 1000.0)
 }
 
 #[cfg(test)]

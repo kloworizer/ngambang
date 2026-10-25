@@ -20,7 +20,14 @@ use super::util::{unix_now, Bus};
 /// The release found by the last update check, for the installer.
 pub static PENDING_RELEASE: Mutex<Option<Release>> = Mutex::new(None);
 
-const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(10 * 60);
+/// Retries after a failed request: quick at first, then every ten minutes.
+const RETRY: [Duration; 5] = [
+    Duration::from_secs(20),
+    Duration::from_secs(60),
+    Duration::from_secs(2 * 60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(10 * 60),
+];
 const OFFLINE_POLL: Duration = Duration::from_secs(60);
 const MAX_BODY: usize = 4 * 1024 * 1024;
 
@@ -147,17 +154,21 @@ impl NetWorker {
             let mut gdacs: Vec<weather::Alert> = Vec::new();
             let mut usgs: Vec<weather::Alert> = Vec::new();
             let mut manual_update = false;
+            let (mut weather_fails, mut alert_fails) = (0usize, 0usize);
+            let retry = |fails: usize| RETRY[fails.min(RETRY.len() - 1)];
             loop {
                 let now = Instant::now();
                 let mut due = next_update;
                 if cfg.weather {
                     due = due.min(next_weather).min(next_alerts);
                 }
-                let wait = due.saturating_duration_since(now).min(if last_online == Some(false) {
+                // Offline, due work waits for the next connectivity check
+                // instead of spinning on a deadline that has already passed.
+                let wait = if last_online == Some(false) {
                     OFFLINE_POLL
                 } else {
-                    Duration::from_secs(3600)
-                });
+                    due.saturating_duration_since(now).min(Duration::from_secs(3600))
+                };
                 match rx.recv_timeout(wait) {
                     Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => return,
                     Ok(Msg::Config(c)) => {
@@ -170,6 +181,8 @@ impl NetWorker {
                     Ok(Msg::Refresh) => {
                         next_weather = Instant::now();
                         next_alerts = Instant::now();
+                        // A manual refresh also re-checks a connection Windows called offline.
+                        last_online = None;
                     }
                     Ok(Msg::CheckUpdate) => {
                         manual_update = true;
@@ -178,7 +191,19 @@ impl NetWorker {
                     Err(RecvTimeoutError::Timeout) => {}
                 }
 
-                let is_online = online().unwrap_or(true);
+                // Windows' answer is a hint: with a VPN or a captive proxy it can say
+                // "offline" while requests work, so try anyway once in a while.
+                let mut is_online = online().unwrap_or(true);
+                if !is_online && cfg.weather && Instant::now() >= next_weather {
+                    is_online = http_get(&weather::open_meteo_url(cfg.lat, cfg.lon))
+                        .ok()
+                        .and_then(|j| weather::parse_open_meteo(&j, &cfg.city, unix_now()))
+                        .map(|w| bus.send(Event::Weather(w)))
+                        .is_some();
+                    if is_online {
+                        next_weather = Instant::now() + Duration::from_millis(weather::WEATHER_EVERY_MS);
+                    }
+                }
                 if last_online != Some(is_online) {
                     last_online = Some(is_online);
                     bus.send(Event::Online(is_online));
@@ -200,9 +225,13 @@ impl NetWorker {
                     {
                         Some(w) => {
                             bus.send(Event::Weather(w));
+                            weather_fails = 0;
                             next_weather = now + Duration::from_millis(weather::WEATHER_EVERY_MS);
                         }
-                        None => next_weather = now + RETRY_AFTER_FAILURE,
+                        None => {
+                            next_weather = now + retry(weather_fails);
+                            weather_fails += 1;
+                        }
                     }
                 }
                 if cfg.weather && now >= next_alerts {
@@ -218,7 +247,13 @@ impl NetWorker {
                     if ok {
                         bus.send(Event::Alerts(gdacs.iter().chain(usgs.iter()).cloned().collect()));
                     }
-                    next_alerts = now + if ok { Duration::from_millis(weather::ALERTS_EVERY_MS) } else { RETRY_AFTER_FAILURE };
+                    next_alerts = if ok {
+                        alert_fails = 0;
+                        now + Duration::from_millis(weather::ALERTS_EVERY_MS)
+                    } else {
+                        alert_fails += 1;
+                        now + retry(alert_fails - 1)
+                    };
                 }
                 if now >= next_update && (cfg.auto_update || manual_update) {
                     match check_update() {

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Ngambang</title>
+<link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="apple-touch-icon" href="favicon.svg">
 <meta name="theme-color" content="#15171a">
@@ -539,17 +540,18 @@ ngambang.exe notify <span class="k">"backup finished"</span> --level ok</pre>
 
   // ---- Module picker -> [modules] block ----
   var modules = [
-    ["media", "Media player", "--accent", "Now playing from every app with Windows media controls. Switch sources; play, pause, skip, seek."],
+    ["media", "Media player", "--accent", "Now playing from every app with Windows media controls, with cover art. Play, pause, skip and seek, right from the tag."],
     ["mixer", "Volume mixer", "--text", "Volume and mute for every app making sound, games and voice chat included."],
     ["commands", "Command tags", "--coder", "✓ or ✕ when long commands finish, from ngambang run or your shell hook."],
     ["ports", "Local ports", "--ports", "What is listening on localhost. Open it in the browser, or stop it."],
     ["clipboard", "Dev clipboard", "--coder", "JWT, JSON, base64, Unix time, UUID, colours and tracking links, with one-tap fixes."],
-    ["timer", "Focus timer", "--game", "25 or 50-minute rounds on the ring. Minor tags wait until the break."],
+    ["timer", "Focus timer", "--game", "25 or 50-minute rounds, or your own length, on the ring. Minor tags wait until the break."],
     ["game", "Game stats", "--game", "Session time, GPU load, VRAM, temperature, ping and a break reminder."],
     ["captures", "Screenshots & clips", "--ports", "New captures get a tag; copy them or show them in their folder."],
     ["privacy", "Mic & camera", "--privacy", "Tells you when an app uses the microphone or camera, even mid-game."],
     ["weather", "Weather & warnings", "--ports", "Weather for your location, plus earthquake, tsunami, cyclone and flood warnings from GDACS and USGS."],
-    ["prayer", "Jadwal sholat", "--ok", "Prayer times calculated on your device, with a reminder before each prayer. Off by default."]
+    ["prayer", "Jadwal sholat", "--ok", "Prayer times calculated on your device, with a reminder before each prayer. Off by default."],
+    ["todo", "To-do list", "--ok", "A short task list: add, tick off, clear. Kept between restarts."]
   ];
   var state = {};
   var grid = document.getElementById("mod-grid");

@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ngambang_core::geometry::{Color, Point};
+use ngambang_core::model::Art;
 use ngambang_core::view::{Align, Prim, TextMeasure, TextStyle, Weight};
 use windows::core::BOOL;
 use windows::core::{Interface, Result, HSTRING, PCWSTR};
@@ -20,14 +21,22 @@ pub struct Gfx {
     /// Kept alive for the Direct2D device built on it.
     #[allow(dead_code)]
     pub d3d: ID3D11Device,
-    pub d2d_factory: ID2D1Factory1,
     pub d2d: ID2D1Device,
-    pub dwrite: IDWriteFactory,
     pub warp: bool,
+    pub paint: Painter,
+}
+
+/// Draws primitives on any Direct2D device context. Brushes and bitmaps
+/// belong to one render target's device, so each window has its own painter.
+pub struct Painter {
+    pub d2d_factory: ID2D1Factory1,
+    pub dwrite: IDWriteFactory,
     sans: HSTRING,
     mono: HSTRING,
     formats: RefCell<HashMap<(u32, Weight, bool, u8), IDWriteTextFormat>>,
     brushes: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
+    /// The last few album arts as bitmaps, newest last.
+    images: RefCell<Vec<(u64, ID2D1Bitmap1)>>,
     stroke: ID2D1StrokeStyle,
 }
 
@@ -59,6 +68,19 @@ impl Gfx {
             let d2d_factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&D2D1_FACTORY_OPTIONS::default()))?;
             let dxgi: IDXGIDevice = d3d.cast()?;
             let d2d = d2d_factory.CreateDevice(&dxgi)?;
+            Ok(Gfx { d3d, d2d, warp, paint: Painter::new(d2d_factory)? })
+        }
+    }
+
+    /// Draw primitives in DIPs. The caller has set DPI and transform.
+    pub fn draw(&self, dc: &ID2D1DeviceContext, prims: &[Prim]) -> Result<()> {
+        self.paint.draw(dc, prims)
+    }
+}
+
+impl Painter {
+    pub fn new(d2d_factory: ID2D1Factory1) -> Result<Painter> {
+        unsafe {
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let sans = pick_family(&dwrite, &["Segoe UI Variable Text", "Segoe UI"]);
             let mono = pick_family(&dwrite, &["Cascadia Mono", "Consolas", "Courier New"]);
@@ -75,16 +97,14 @@ impl Gfx {
                 },
                 None,
             )?;
-            Ok(Gfx {
-                d3d,
+            Ok(Painter {
                 d2d_factory,
-                d2d,
                 dwrite,
-                warp,
                 sans,
                 mono,
                 formats: RefCell::new(HashMap::new()),
                 brushes: RefCell::new(HashMap::new()),
+                images: RefCell::new(Vec::new()),
                 stroke: stroke.cast()?,
             })
         }
@@ -132,6 +152,30 @@ impl Gfx {
         let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r, g, b, a }, None)? };
         self.brushes.borrow_mut().insert(c.0, brush.clone());
         Ok(brush)
+    }
+
+    fn image(&self, dc: &ID2D1DeviceContext, art: &Art) -> Result<ID2D1Bitmap1> {
+        if let Some((_, b)) = self.images.borrow().iter().find(|(id, _)| *id == art.id) {
+            return Ok(b.clone());
+        }
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            colorContext: std::mem::ManuallyDrop::new(None),
+        };
+        let bmp =
+            unsafe { dc.CreateBitmap(D2D_SIZE_U { width: art.w, height: art.h }, Some(art.pixels.as_ptr().cast()), art.w * 4, &props)? };
+        let mut images = self.images.borrow_mut();
+        images.push((art.id, bmp.clone()));
+        if images.len() > 4 {
+            images.remove(0);
+        }
+        Ok(bmp)
     }
 
     fn path(&self, points: &[Point], closed: bool, filled: bool) -> Result<ID2D1PathGeometry1> {
@@ -190,6 +234,27 @@ impl Gfx {
                             dc.FillGeometry(&geo, &self.brush(dc, *fill)?, None);
                         }
                     }
+                    Prim::Image { rect, art, radius } => {
+                        if art.w == 0 || art.h == 0 || art.pixels.len() < (art.w * art.h * 4) as usize {
+                            continue;
+                        }
+                        let bmp = self.image(dc, art)?;
+                        let brush = dc.CreateBitmapBrush(
+                            &bmp,
+                            Some(&D2D1_BITMAP_BRUSH_PROPERTIES1 {
+                                extendModeX: D2D1_EXTEND_MODE_CLAMP,
+                                extendModeY: D2D1_EXTEND_MODE_CLAMP,
+                                interpolationMode: D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                            }),
+                            None,
+                        )?;
+                        // Map the bitmap's pixels onto the rect.
+                        let t = windows_numerics::Matrix3x2::scale(rect.w / art.w as f32, rect.h / art.h as f32)
+                            * windows_numerics::Matrix3x2::translation(rect.x, rect.y);
+                        brush.SetTransform(&t);
+                        let rr = D2D1_ROUNDED_RECT { rect: rf(rect.x, rect.y, rect.w, rect.h), radiusX: *radius, radiusY: *radius };
+                        dc.FillRoundedRectangle(&rr, &brush);
+                    }
                     Prim::Text { rect, text, style, color, align, wrap } => {
                         if text.is_empty() || rect.w <= 1.0 || rect.h <= 1.0 {
                             continue;
@@ -218,6 +283,12 @@ impl Gfx {
 }
 
 impl TextMeasure for Gfx {
+    fn width(&self, text: &str, style: TextStyle) -> f32 {
+        self.paint.width(text, style)
+    }
+}
+
+impl TextMeasure for Painter {
     fn width(&self, text: &str, style: TextStyle) -> f32 {
         let measure = || -> Result<f32> {
             let format = self.format(style, Align::Start)?;

@@ -20,10 +20,11 @@ pub enum ModuleId {
     Privacy,
     Prayer,
     Weather,
+    Todo,
 }
 
 impl ModuleId {
-    pub const ALL: [ModuleId; 11] = [
+    pub const ALL: [ModuleId; 12] = [
         ModuleId::Media,
         ModuleId::Mixer,
         ModuleId::Commands,
@@ -35,6 +36,7 @@ impl ModuleId {
         ModuleId::Privacy,
         ModuleId::Prayer,
         ModuleId::Weather,
+        ModuleId::Todo,
     ];
 
     /// Key used in the `[modules]` table.
@@ -51,6 +53,7 @@ impl ModuleId {
             ModuleId::Privacy => "privacy",
             ModuleId::Prayer => "prayer",
             ModuleId::Weather => "weather",
+            ModuleId::Todo => "todo",
         }
     }
 
@@ -68,6 +71,7 @@ impl ModuleId {
             ModuleId::Privacy => "Mic & camera beacon",
             ModuleId::Prayer => "Jadwal sholat (prayer times)",
             ModuleId::Weather => "Weather & early warnings",
+            ModuleId::Todo => "To-do list",
         }
     }
 
@@ -129,6 +133,7 @@ pub struct Modules {
     pub privacy: bool,
     pub prayer: bool,
     pub weather: bool,
+    pub todo: bool,
 }
 
 impl Default for Modules {
@@ -145,6 +150,7 @@ impl Default for Modules {
             privacy: true,
             prayer: false,
             weather: true,
+            todo: true,
         }
     }
 }
@@ -163,6 +169,7 @@ impl Modules {
             ModuleId::Privacy => self.privacy,
             ModuleId::Prayer => self.prayer,
             ModuleId::Weather => self.weather,
+            ModuleId::Todo => self.todo,
         }
     }
 
@@ -179,6 +186,7 @@ impl Modules {
             ModuleId::Privacy => &mut self.privacy,
             ModuleId::Prayer => &mut self.prayer,
             ModuleId::Weather => &mut self.weather,
+            ModuleId::Todo => &mut self.todo,
         };
         *slot = on;
     }
@@ -254,13 +262,15 @@ impl Default for ClipboardConfig {
 #[serde(default)]
 pub struct TimerConfig {
     pub presets_min: Vec<u32>,
+    /// The length of the "Custom" round, changed with − and + in the slip.
+    pub custom_min: u32,
     /// Hold back lower-priority tags while a round runs.
     pub quiet_while_running: bool,
 }
 
 impl Default for TimerConfig {
     fn default() -> Self {
-        TimerConfig { presets_min: vec![25, 50], quiet_while_running: true }
+        TimerConfig { presets_min: vec![25, 50], custom_min: 15, quiet_while_running: true }
     }
 }
 
@@ -388,6 +398,7 @@ captures = true    # new screenshots and clips
 privacy = true     # mic / camera in use
 prayer = false     # jadwal sholat: prayer times and reminders
 weather = true     # weather and early warnings (GDACS, USGS)
+todo = true        # a small to-do list
 
 [media]
 track_tags = true
@@ -407,6 +418,7 @@ tags = true
 
 [timer]
 presets_min = [25, 50]
+custom_min = 15            # the "Custom" round; − and + in the slip change it
 quiet_while_running = true
 
 [game]
@@ -519,6 +531,10 @@ impl Config {
             self.timer.presets_min = TimerConfig::default().presets_min;
         }
         self.timer.presets_min.truncate(3);
+        if !(1..=240).contains(&self.timer.custom_min) {
+            warnings.push("timer.custom_min must be 1–240".into());
+            self.timer.custom_min = self.timer.custom_min.clamp(1, 240);
+        }
         if !(-90.0..=90.0).contains(&self.location.latitude) || !(-180.0..=180.0).contains(&self.location.longitude) {
             warnings.push("location.latitude/longitude are out of range".into());
             self.location = LocationConfig::default();

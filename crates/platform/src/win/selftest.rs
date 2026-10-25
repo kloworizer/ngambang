@@ -200,7 +200,7 @@ fn strict_window() -> windows::core::Result<String> {
         let mut r = super::comp::Renderer::new(hwnd, &gfx)?;
         let m = sample_model();
         let scene = view::build(&m, Edge::Left, &gfx);
-        r.show(&gfx, &scene, ngambang_core::geometry::Rect::new(8.0, 8.0, scene.size.w, scene.size.h), false, true)?;
+        r.show(&gfx, &scene, ngambang_core::geometry::Rect::new(8.0, 8.0, scene.size.w, scene.size.h), super::comp::Anim::None, true)?;
         let _ = DestroyWindow(hwnd);
         Ok(format!("{:?}", scene.kind))
     }

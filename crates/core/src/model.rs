@@ -78,6 +78,28 @@ pub enum Sampler {
     Ports,
 }
 
+/// Album art, already scaled and converted to premultiplied BGRA by the platform.
+#[derive(Clone)]
+pub struct Art {
+    /// Changes whenever the picture does; equality compares only this.
+    pub id: u64,
+    pub w: u32,
+    pub h: u32,
+    pub pixels: std::sync::Arc<Vec<u8>>,
+}
+
+impl PartialEq for Art {
+    fn eq(&self, other: &Art) -> bool {
+        self.id == other.id
+    }
+}
+
+impl std::fmt::Debug for Art {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Art({:x}, {}×{})", self.id, self.w, self.h)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MediaSession {
     pub id: String,
@@ -93,6 +115,7 @@ pub struct MediaSession {
     pub can_next: bool,
     pub can_prev: bool,
     pub can_seek: bool,
+    pub art: Option<Art>,
 }
 
 impl MediaSession {
@@ -169,6 +192,15 @@ pub struct ClipState {
     pub kind: ClipKind,
     pub unix_at: i64,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub id: u64,
+    pub text: String,
+    pub done: bool,
+}
+
+pub const MAX_TODOS: usize = 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FocusTimer {
@@ -322,6 +354,13 @@ pub enum Icon {
     Rain,
     Storm,
     Warning,
+    Todo,
+    Plus,
+    Minus,
+    Trash,
+    Gear,
+    Pin,
+    Grid,
 }
 
 /// Something the user clicked.
@@ -346,6 +385,8 @@ pub enum Action {
     TimerResume,
     TimerAdd(u32),
     TimerStop,
+    /// Make the custom round shorter (-1) or longer (+1).
+    TimerCustom(i32),
     BreakSnooze,
     CaptureOpen(usize),
     CaptureCopy(usize),
@@ -355,6 +396,10 @@ pub enum Action {
     InstallUpdate,
     OpenUrl(String),
     RefreshWeather,
+    TodoAdd,
+    TodoToggle(u64),
+    TodoRemove(u64),
+    TodoClearDone,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -374,6 +419,8 @@ pub struct Tag {
     pub priority: u8,
     pub until_ms: u64,
     pub action: Option<(String, Action)>,
+    /// A now-playing tag: drawn live from the front media session, with controls.
+    pub media: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -451,6 +498,10 @@ pub enum Event {
     Pause(bool),
     /// A message from the island itself (config warnings and the like).
     Notice(String),
+    /// The saved to-do list, at start.
+    Todos(Vec<TodoItem>),
+    /// Text typed into the "Add task" box.
+    TodoAdded(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -496,6 +547,11 @@ pub enum Effect {
     InstallUpdate,
     /// Fetch weather and warnings now.
     RefreshWeather,
+    /// Ask the user for a new task (a small text box near the island).
+    PromptTodo,
+    SaveTodos,
+    /// Write one value to config.toml: table, key, TOML literal.
+    SaveValue(&'static str, &'static str, String),
 }
 
 /// The local wall clock, anchored to the monotonic clock.
@@ -550,6 +606,7 @@ pub struct Model {
     alerts_seen: BTreeSet<String>,
     /// None until Windows has told us.
     pub online: Option<bool>,
+    pub todos: Vec<TodoItem>,
 
     samplers: BTreeSet<Sampler>,
     rng: u64,
@@ -590,6 +647,7 @@ impl Model {
             alerts: Vec::new(),
             alerts_seen: BTreeSet::new(),
             online: None,
+            todos: Vec::new(),
             samplers: BTreeSet::new(),
             rng: seed | 1,
         };
@@ -646,6 +704,8 @@ impl Model {
                     ModuleId::Weather if self.urgent_alert() => 0,
                     ModuleId::Weather if self.weather.is_some() || !self.alerts.is_empty() || self.online == Some(false) => 10,
                     ModuleId::Weather => return None,
+                    ModuleId::Todo if self.todos.iter().any(|t| !t.done) => 8,
+                    ModuleId::Todo => 13,
                     ModuleId::Game if self.playlog.total() > 0 => 12,
                     ModuleId::Game => return None,
                     // Always available: mixer, ports, timer.
@@ -723,9 +783,7 @@ impl Model {
             if self.front.is_none_or(|f| !avail.contains(&f)) {
                 self.front = avail.first().copied();
             }
-            if self.front == Some(ModuleId::Ports) {
-                fx.push(Effect::RefreshPorts);
-            }
+            self.front_opened(fx);
             // Opened from the tray or a click that left: don't stay open forever.
             if !self.hover && !self.keyboard_open {
                 fx.push(Effect::SetTimer(TimerId::Collapse, UNATTENDED_MS));
@@ -763,7 +821,7 @@ impl Model {
             return;
         }
         // One tag per text: a repeated event refreshes instead of stacking.
-        self.tags.retain(|t| t.text != tag.text);
+        self.tags.retain(|t| t.text != tag.text && !(t.media && tag.media));
         self.tags.push(tag);
         self.tags.sort_by_key(|t| t.priority);
         self.tags.truncate(6);
@@ -775,7 +833,7 @@ impl Model {
     }
 
     fn tag(&self, text: String, color: crate::geometry::Color, icon: Icon, priority: u8, ms: u64) -> Tag {
-        Tag { text, detail: None, color, icon, priority, until_ms: self.now_ms + ms, action: None }
+        Tag { text, detail: None, color, icon, priority, until_ms: self.now_ms + ms, action: None, media: false }
     }
 
     fn handle(&mut self, event: Event, fx: &mut Vec<Effect>) {
@@ -927,6 +985,13 @@ impl Model {
             }
             Event::Weather(w) => {
                 if self.enabled(ModuleId::Weather) {
+                    // A change of sky (not the first reading) gets a short pop-up.
+                    let changed = self.weather.as_ref().is_some_and(|old| old.condition != w.condition && old.place == w.place);
+                    if changed {
+                        let text = format!("{} · {:.0}°", w.description, w.temp_c);
+                        let t = self.tag(text, theme::PORTS, crate::view::condition_icon(w.condition), 6, TAG_MS + 1000);
+                        self.push_tag(t, fx);
+                    }
                     self.weather = Some(w);
                 }
             }
@@ -969,7 +1034,8 @@ impl Model {
                     let changed = before.as_ref().is_none_or(|(bid, bt)| *bid != id || *bt != title);
                     if changed && self.config.media.track_tags && self.state != IslandState::Slips {
                         let text = if artist.is_empty() { title } else { format!("{title} · {artist}") };
-                        let t = self.tag(crate::format::ellipsize(&text, 48), theme::MEDIA, Icon::Note, 6, TAG_MS);
+                        let mut t = self.tag(crate::format::ellipsize(&text, 48), theme::MEDIA, Icon::Note, 6, TAG_MS + 1000);
+                        t.media = true;
                         self.push_tag(t, fx);
                     }
                 }
@@ -1089,6 +1155,19 @@ impl Model {
                 let t = self.tag(crate::format::ellipsize(&text, 60), theme::MEDIA, Icon::Terminal, 4, TAG_FAIL_MS);
                 self.push_tag(t, fx);
             }
+            Event::Todos(list) => self.todos = list,
+            Event::TodoAdded(text) => {
+                let text: String = text.trim().chars().take(200).collect();
+                if !text.is_empty() && self.enabled(ModuleId::Todo) {
+                    let id = self.todos.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+                    self.todos.insert(0, TodoItem { id, text, done: false });
+                    self.todos.truncate(MAX_TODOS);
+                    fx.push(Effect::SaveTodos);
+                    if self.state == IslandState::Slips {
+                        self.front = Some(ModuleId::Todo);
+                    }
+                }
+            }
             Event::Pause(p) => {
                 self.paused = p;
                 self.tags.clear();
@@ -1112,8 +1191,23 @@ impl Model {
         let i = self.front.and_then(|f| avail.iter().position(|m| *m == f)).unwrap_or(0) as i32;
         let n = avail.len() as i32;
         self.front = Some(avail[((i + dir) % n + n) as usize % n as usize]);
-        if self.front == Some(ModuleId::Ports) {
-            fx.push(Effect::RefreshPorts);
+        self.front_opened(fx);
+    }
+
+    /// The slip in front changed: fetch what it shows if that is old.
+    fn front_opened(&self, fx: &mut Vec<Effect>) {
+        match self.front {
+            Some(ModuleId::Ports) => fx.push(Effect::RefreshPorts),
+            Some(ModuleId::Weather) => {
+                let stale = match (&self.weather, self.unix_now()) {
+                    (Some(w), Some(now)) => now - w.fetched > crate::weather::WEATHER_EVERY_MS as i64 / 1000,
+                    _ => true,
+                };
+                if stale && self.online != Some(false) {
+                    fx.push(Effect::RefreshWeather);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1147,6 +1241,8 @@ impl Model {
                 self.weather = None;
                 self.alerts.clear();
             }
+            // The list itself stays saved for when the module comes back.
+            ModuleId::Todo => {}
         }
         if self.front == Some(m) {
             self.front = None;
@@ -1187,11 +1283,9 @@ impl Model {
             }
             Action::Collapse => self.settle(fx),
             Action::SelectSlip(m) => {
-                if self.available_slips().contains(&m) {
+                if self.available_slips().contains(&m) && self.front != Some(m) {
                     self.front = Some(m);
-                    if m == ModuleId::Ports {
-                        fx.push(Effect::RefreshPorts);
-                    }
+                    self.front_opened(fx);
                 }
             }
             Action::MediaSource(i) => {
@@ -1296,6 +1390,16 @@ impl Model {
                 self.timer = FocusTimer::Idle;
                 fx.push(Effect::KillTimer(TimerId::FocusDone));
             }
+            Action::TimerCustom(dir) => {
+                let cur = self.config.timer.custom_min as i32;
+                // One-minute steps up to ten minutes, five-minute steps above.
+                let step = if cur > 10 || (cur == 10 && dir > 0) { 5 } else { 1 };
+                let next = (cur + dir.signum() * step).clamp(1, 240) as u32;
+                if next != self.config.timer.custom_min {
+                    self.config.timer.custom_min = next;
+                    fx.push(Effect::SaveValue("timer", "custom_min", next.to_string()));
+                }
+            }
             Action::BreakSnooze => {
                 if self.game.is_some() {
                     self.break_due_ms = Some(now + SNOOZE_MS);
@@ -1308,6 +1412,21 @@ impl Model {
             Action::InstallUpdate => fx.push(Effect::InstallUpdate),
             Action::OpenUrl(url) => fx.push(Effect::Open(url)),
             Action::RefreshWeather => fx.push(Effect::RefreshWeather),
+            Action::TodoAdd => fx.push(Effect::PromptTodo),
+            Action::TodoToggle(id) => {
+                if let Some(t) = self.todos.iter_mut().find(|t| t.id == id) {
+                    t.done = !t.done;
+                    fx.push(Effect::SaveTodos);
+                }
+            }
+            Action::TodoRemove(id) => {
+                self.todos.retain(|t| t.id != id);
+                fx.push(Effect::SaveTodos);
+            }
+            Action::TodoClearDone => {
+                self.todos.retain(|t| !t.done);
+                fx.push(Effect::SaveTodos);
+            }
             Action::CaptureOpen(i) | Action::CaptureCopy(i) | Action::CaptureFolder(i) => {
                 if let Some(c) = self.captures.get(i) {
                     let p = c.path.clone();
@@ -1675,6 +1794,76 @@ mod tests {
         assert!(has_timer(&fx, TimerId::Collapse));
         m.update(5900, Event::Timer(TimerId::Collapse));
         assert_eq!(m.state, IslandState::Orb);
+    }
+
+    #[test]
+    fn todo_add_toggle_remove() {
+        let mut m = model();
+        assert!(m.enabled(ModuleId::Todo), "on by default");
+        let fx = m.update(0, Event::Click(Action::TodoAdd));
+        assert!(fx.contains(&Effect::PromptTodo));
+        let fx = m.update(0, Event::TodoAdded("  write release notes  ".into()));
+        assert!(fx.contains(&Effect::SaveTodos));
+        m.update(0, Event::TodoAdded("".into()));
+        m.update(0, Event::TodoAdded("review PR".into()));
+        assert_eq!(m.todos.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["review PR", "write release notes"]);
+        let id = m.todos[1].id;
+        m.update(0, Event::Click(Action::TodoToggle(id)));
+        assert!(m.todos[1].done);
+        m.update(0, Event::Click(Action::TodoClearDone));
+        assert_eq!(m.todos.len(), 1);
+        let id = m.todos[0].id;
+        m.update(0, Event::Click(Action::TodoRemove(id)));
+        assert!(m.todos.is_empty());
+        assert!(m.available_slips().contains(&ModuleId::Todo), "always there to add tasks");
+    }
+
+    #[test]
+    fn custom_timer_steps_and_saves() {
+        let mut m = model();
+        assert_eq!(m.config.timer.custom_min, 15);
+        let fx = m.update(0, Event::Click(Action::TimerCustom(1)));
+        assert_eq!(m.config.timer.custom_min, 20);
+        assert!(fx.contains(&Effect::SaveValue("timer", "custom_min", "20".into())));
+        for _ in 0..3 {
+            m.update(0, Event::Click(Action::TimerCustom(-1)));
+        }
+        assert_eq!(m.config.timer.custom_min, 9, "20 → 15 → 10 → 9");
+        for _ in 0..20 {
+            m.update(0, Event::Click(Action::TimerCustom(-1)));
+        }
+        assert_eq!(m.config.timer.custom_min, 1);
+        let fx = m.update(0, Event::Click(Action::TimerStart(m.config.timer.custom_min)));
+        assert!(has_timer(&fx, TimerId::FocusDone));
+    }
+
+    #[test]
+    fn one_media_tag_at_a_time() {
+        let mut m = model();
+        m.update(0, Event::Media(vec![session("a", "One", true)]));
+        m.update(100, Event::Media(vec![session("a", "Two", true)]));
+        assert_eq!(m.tags.iter().filter(|t| t.media).count(), 1);
+        assert!(m.current_tag().unwrap().text.starts_with("Two"));
+    }
+
+    #[test]
+    fn weather_change_pops_up_and_stale_weather_refreshes_on_open() {
+        let mut m = model();
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 600.0, utc_offset_min: 420, unix: 1_800_000_000 });
+        let mut w = crate::weather::parse_open_meteo(include_str!("../testdata/openmeteo.json"), "Jakarta", 1_800_000_000).unwrap();
+        m.update(0, Event::Weather(w.clone()));
+        assert!(m.tags.is_empty(), "the first reading is quiet");
+        w.condition =
+            if w.condition == crate::weather::Condition::Rain { crate::weather::Condition::Clear } else { crate::weather::Condition::Rain };
+        w.description = "Hujan".into();
+        m.update(1000, Event::Weather(w));
+        assert!(m.current_tag().unwrap().text.starts_with("Hujan ·"));
+        m.tags.clear();
+        m.update(2000, Event::Timer(TimerId::TagHide));
+        // Forty minutes later the slip asks for fresh data when it opens.
+        m.update(40 * 60_000, Event::Click(Action::ToggleSlips));
+        let fx = m.update(40 * 60_000, Event::Click(Action::SelectSlip(ModuleId::Weather)));
+        assert!(fx.contains(&Effect::RefreshWeather));
     }
 
     #[test]

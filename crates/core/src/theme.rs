@@ -30,10 +30,14 @@ pub const TAG_MAX_W: f32 = 360.0;
 pub const SLIP_W: f32 = 372.0;
 pub const TAB_W: f32 = 44.0;
 pub const TAB_H: f32 = 48.0;
+/// Height of the tab row under the slip on top and bottom docks.
+pub const TAB_ROW_H: f32 = 40.0;
+/// A now-playing tag is wider: it carries the player controls.
+pub const MEDIA_TAG_MAX_W: f32 = 420.0;
 pub const SEAM_T: f32 = 3.0;
 pub const SEAM_L: f32 = 92.0;
 /// The fixed window box around the anchor (SPEC §4.2): every state fits inside.
-pub const BOX_DEPTH: f32 = 460.0;
+pub const BOX_DEPTH: f32 = 520.0;
 pub const BOX_SPAN: f32 = 640.0;
 
 #[cfg(test)]

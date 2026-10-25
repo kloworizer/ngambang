@@ -166,6 +166,46 @@ pub fn icon_prims(icon: Icon, rect: Rect, color: Color) -> Vec<Prim> {
             fill(&[(13.0, 17.5), (9.5, 22.5), (12.0, 22.5), (10.5, 24.0), (15.0, 19.5), (12.5, 19.5), (14.0, 17.5)]),
         ],
         Icon::Warning => vec![closed(&[(12.0, 3.0), (22.0, 20.5), (2.0, 20.5)]), line(&[(12.0, 9.5), (12.0, 14.0)]), dot(12.0, 17.0, 1.3)],
+        Icon::Todo => vec![
+            rr(3.0, 4.0, 6.0, 6.0, 1.5),
+            line(&[(4.5, 7.0), (5.8, 8.3), (7.8, 5.6)]),
+            line(&[(12.0, 7.0), (21.0, 7.0)]),
+            rr(3.0, 14.0, 6.0, 6.0, 1.5),
+            line(&[(12.0, 17.0), (21.0, 17.0)]),
+        ],
+        Icon::Plus => vec![line(&[(12.0, 5.0), (12.0, 19.0)]), line(&[(5.0, 12.0), (19.0, 12.0)])],
+        Icon::Minus => vec![line(&[(5.0, 12.0), (19.0, 12.0)])],
+        Icon::Gear => {
+            // Eight teeth around a ring.
+            let mut v = vec![circle(12.0, 12.0, 5.5), circle(12.0, 12.0, 2.0)];
+            for i in 0..8 {
+                let a = (i as f32 * 45.0).to_radians();
+                v.push(line(&[(12.0 + 6.5 * a.cos(), 12.0 + 6.5 * a.sin()), (12.0 + 9.0 * a.cos(), 12.0 + 9.0 * a.sin())]));
+            }
+            v
+        }
+        Icon::Pin => vec![
+            Prim::Polyline {
+                points: arc_points(ox + 12.0 * s, oy + 9.5 * s, 6.5 * s, 150.0, 390.0, 20)
+                    .into_iter()
+                    .chain(std::iter::once(p(12.0, 21.0)))
+                    .collect(),
+                width: w,
+                color,
+                closed: true,
+            },
+            circle(12.0, 9.5, 2.3),
+        ],
+        Icon::Grid => {
+            vec![rr(3.5, 3.5, 7.0, 7.0, 1.5), rr(13.5, 3.5, 7.0, 7.0, 1.5), rr(3.5, 13.5, 7.0, 7.0, 1.5), rr(13.5, 13.5, 7.0, 7.0, 1.5)]
+        }
+        Icon::Trash => vec![
+            line(&[(4.0, 6.5), (20.0, 6.5)]),
+            line(&[(9.5, 6.5), (9.5, 3.5), (14.5, 3.5), (14.5, 6.5)]),
+            closed(&[(6.0, 6.5), (7.0, 20.5), (17.0, 20.5), (18.0, 6.5)]),
+            line(&[(10.0, 10.5), (10.0, 16.5)]),
+            line(&[(14.0, 10.5), (14.0, 16.5)]),
+        ],
     }
 }
 
@@ -173,7 +213,7 @@ pub fn icon_prims(icon: Icon, rect: Rect, color: Color) -> Vec<Prim> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 29] = [
+    const ALL: [Icon; 36] = [
         Icon::Note,
         Icon::Play,
         Icon::Pause,
@@ -203,6 +243,13 @@ mod tests {
         Icon::Rain,
         Icon::Storm,
         Icon::Warning,
+        Icon::Todo,
+        Icon::Plus,
+        Icon::Minus,
+        Icon::Trash,
+        Icon::Gear,
+        Icon::Pin,
+        Icon::Grid,
     ];
 
     #[test]

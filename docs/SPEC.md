@@ -37,6 +37,7 @@ thread, registers no callback and allocates nothing.
 | 15 | Weather + early warnings (Open-Meteo; GDACS and USGS), offline-safe | `weather` | Added in 0.1.1 |
 | 16 | Jadwal sholat: offline prayer times and reminders | `prayer` | Added in 0.1.1, off by default |
 | 17 | Automatic updates from GitHub Releases | *(always on, can be disabled)* | Added in 0.1.1 |
+| 18 | To-do list (add from the slip, tick off, clear done; saved in `state.json`) | `todo` | Added in 0.1.2 |
 
 **0.1.1 notes.** Network work runs on one worker thread (`net.rs`): WinHTTP
 GETs with 10–15 s timeouts, preceded by Windows' `INetworkListManager`
@@ -711,3 +712,16 @@ in §12.
 - v0.2: FPS via PresentMon (opt-in, elevated helper), AMD temps (ADLX), Harbor, colour picker, Docker slip, UI Automation provider, output-device switch (flagged), light theme.
 - v0.3: MSIX/sparse package → chat & notification stack (VIP mode, hide message text while screen-sharing), meeting countdown, CI status.
 - Later: Waktu Sholat, social screen-time limits, community slip API over the same pipe protocol.
+
+**0.1.2 notes.** Album art comes from SMTC thumbnails, decoded with WIC to a
+120 px premultiplied square (centre-cropped) and drawn as a Direct2D bitmap
+brush; properties are re-read only on `MediaPropertiesChanged` (plus one
+re-read 1.2 s later, as players fill artist and cover late). Dragging moves
+the window on every mouse move along the nearest edge (offset rounded to
+0.001) and writes `[dock]` once on release; a press on a slip's background
+or a tag also drags. New compositor animations: a scale spring for pop-up
+tags, a crossfade-and-slide when a tag's content changes, and scale feedback
+on hover and press — all run in DWM. With a top or bottom dock the slip tabs
+form a row under the slip; the window box is 520 × 640 DIPs. The executables
+carry an icon group, `VS_VERSIONINFO` and a manifest (Common Controls 6,
+Per-Monitor V2), written as a `.res` by `crates/app/build.rs`.

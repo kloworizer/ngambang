@@ -22,6 +22,7 @@ pub struct Form {
     pub long_command_s: String,
     pub clipboard_tags: bool,
     pub timer_presets: String,
+    pub timer_custom: String,
     pub break_after_min: String,
     pub ping_host: String,
     /// Power plan GUID, or empty for "don't switch".
@@ -69,6 +70,7 @@ impl Form {
             long_command_s: c.commands.long_command_s.to_string(),
             clipboard_tags: c.clipboard.tags,
             timer_presets: c.timer.presets_min.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(", "),
+            timer_custom: c.timer.custom_min.to_string(),
             break_after_min: c.game.break_after_min.to_string(),
             ping_host: c.game.ping_host.clone(),
             power_plan: c.game.power_plan.clone(),
@@ -104,6 +106,7 @@ impl Form {
         if presets.is_empty() || presets.len() > 3 {
             return Err("Timer presets: enter one to three lengths in minutes, like 25, 50".into());
         }
+        let custom = number("Custom round", &self.timer_custom, 1, 240)?;
         let host = self.ping_host.trim();
         if host.is_empty() || host.contains(char::is_whitespace) {
             return Err("Ping host: enter \"gateway\", an IP address or a host name".into());
@@ -137,6 +140,7 @@ impl Form {
             ("commands", "long_command_s", long.to_string()),
             ("clipboard", "tags", b(self.clipboard_tags)),
             ("timer", "presets_min", format!("[{}]", presets.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "))),
+            ("timer", "custom_min", custom.to_string()),
             ("game", "break_after_min", brk.to_string()),
             ("game", "ping_host", toml_str(host)),
             ("game", "power_plan", toml_str(&self.power_plan)),
@@ -186,6 +190,7 @@ mod tests {
         form.monitor = r"\\.\DISPLAY2".into();
         form.modules.set(ModuleId::Ports, false);
         form.timer_presets = "15 45 90".into();
+        form.timer_custom = "35".into();
         form.ping_host = "1.1.1.1".into();
         form.power_plan = "{8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c}".into();
         form.modules.set(ModuleId::Prayer, true);
@@ -204,6 +209,7 @@ mod tests {
         assert_eq!(c.dock.monitor, r"\\.\DISPLAY2");
         assert!(!c.modules.ports);
         assert_eq!(c.timer.presets_min, vec![15, 45, 90]);
+        assert_eq!(c.timer.custom_min, 35);
         assert_eq!(c.game.ping_host, "1.1.1.1");
         assert!(!c.game.power_plan.is_empty());
         assert!(c.modules.prayer);
@@ -230,6 +236,7 @@ mod tests {
         check(Form { timer_presets: "".into(), ..base.clone() }, "Timer");
         check(Form { timer_presets: "1,2,3,4".into(), ..base.clone() }, "Timer");
         check(Form { ping_host: "a b".into(), ..base.clone() }, "Ping");
+        check(Form { timer_custom: "0".into(), ..base.clone() }, "Custom round");
         check(Form { power_plan: "nope".into(), ..base.clone() }, "Power plan");
         check(Form { prayer_lat: "95".into(), ..base.clone() }, "Latitude");
         check(Form { prayer_lon: "east".into(), ..base.clone() }, "Longitude");

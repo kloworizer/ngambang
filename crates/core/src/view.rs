@@ -67,6 +67,12 @@ pub enum Prim {
         points: Vec<Point>,
         fill: Color,
     },
+    /// A picture (album art) filling `rect` with rounded corners.
+    Image {
+        rect: Rect,
+        art: Art,
+        radius: f32,
+    },
     /// Single line unless `wrap`; overflow is trimmed with an ellipsis and clipped to `rect`.
     Text {
         rect: Rect,
@@ -81,7 +87,7 @@ pub enum Prim {
 impl Prim {
     pub fn bounds(&self) -> Rect {
         match self {
-            Prim::RoundRect { rect, .. } | Prim::Text { rect, .. } => *rect,
+            Prim::RoundRect { rect, .. } | Prim::Text { rect, .. } | Prim::Image { rect, .. } => *rect,
             Prim::Circle { cx, cy, r, .. } => Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r),
             Prim::Polyline { points, .. } | Prim::Polygon { points, .. } => {
                 let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
@@ -262,6 +268,11 @@ pub fn summary(m: &Model) -> Option<Summary> {
             wave: false,
         });
     }
+    let open_todos = m.todos.iter().filter(|t| !t.done).count();
+    if m.jobs.is_empty() && open_todos > 0 && m.enabled(ModuleId::Todo) {
+        let first = m.todos.iter().find(|t| !t.done).map(|t| t.text.clone()).unwrap_or_default();
+        return Some(Summary { icon: Icon::Todo, color: OK, text: first, detail: Some(format!("{open_todos} left")), wave: false });
+    }
     m.jobs.first().map(|j| {
         let (icon, color, detail) = match &j.status {
             JobStatus::Done { ok: true, duration_s, .. } => (Icon::Check, OK, duration_s.map(|d| format::duration_short(d.round() as u64))),
@@ -386,7 +397,110 @@ fn orb(m: &Model) -> Scene {
     Scene { kind: SceneKind::Orb, size: Size::new(ORB_BOX, ORB_BOX), flush: false, clip_radius: ORB_BOX / 2.0, prims, hits, ring }
 }
 
+/// A now-playing tag: art, title and artist, and the player controls.
+fn media_tag(m: &Model, s: &MediaSession, edge: Edge, tm: &dyn TextMeasure) -> Scene {
+    let h = TAG_H;
+    let lead = 28.0;
+    let mut prims = Vec::new();
+    let mut hits = Vec::new();
+    let title = if s.title.is_empty() { s.app.clone() } else { s.title.clone() };
+    let sub = if s.artist.is_empty() { s.app.clone() } else { s.artist.clone() };
+    let title_style = TextStyle { size: 13.0, weight: Weight::Medium, mono: false };
+    let sub_style = TextStyle { size: 11.5, weight: Weight::Regular, mono: false };
+    let text_w = tm.width(&title, title_style).max(tm.width(&sub, sub_style)).ceil();
+    let btn = 32.0;
+    let controls_w = 3.0 * btn + 2.0 * 2.0;
+    let x0 = 6.0 + lead + 10.0;
+    let fixed = x0 + 10.0 + controls_w + 6.0;
+    let w = (fixed + text_w).clamp(fixed + 80.0, MEDIA_TAG_MAX_W);
+    let text_room = w - fixed;
+
+    let (inner_r, outer_r) = (12.0, 20.0);
+    prims.push(Prim::RoundRect { rect: Rect::new(0.0, 0.0, w, h), radius: outer_r, fill: Some(SURFACE), stroke: Some((HAIRLINE, 1.0)) });
+    let patch = if edge == Edge::Right { Rect::new(w / 2.0, 0.0, w / 2.0, h) } else { Rect::new(0.0, 0.0, w / 2.0, h) };
+    prims.push(Prim::RoundRect { rect: patch, radius: inner_r, fill: Some(SURFACE), stroke: None });
+
+    let art = Rect::new(6.0, (h - lead) / 2.0, lead, lead);
+    match &s.art {
+        Some(a) => prims.push(Prim::Image { rect: art, art: a.clone(), radius: 7.0 }),
+        None => {
+            prims.push(Prim::RoundRect { rect: art, radius: 7.0, fill: Some(Color::rgb(0x3A2E1C)), stroke: None });
+            prims.extend(icon_prims(Icon::Note, art.inset(7.0), MEDIA));
+        }
+    }
+    prims.push(Prim::Text {
+        rect: Rect::new(x0, 3.0, text_room, 19.0),
+        text: title,
+        style: title_style,
+        color: TEXT,
+        align: Align::Start,
+        wrap: false,
+    });
+    prims.push(Prim::Text {
+        rect: Rect::new(x0, 20.0, text_room, 16.0),
+        text: sub,
+        style: sub_style,
+        color: TEXT_2,
+        align: Align::Start,
+        wrap: false,
+    });
+    // Progress along the bottom edge.
+    if let Some(p) = s.progress_at(m.now_ms) {
+        let track = Rect::new(x0, h - 3.5, text_room, 2.0);
+        prims.push(Prim::RoundRect { rect: track, radius: 1.0, fill: Some(TRACK), stroke: None });
+        if p > 0.01 {
+            prims.push(Prim::RoundRect {
+                rect: Rect::new(track.x, track.y, track.w * p, 2.0),
+                radius: 1.0,
+                fill: Some(MEDIA),
+                stroke: None,
+            });
+        }
+    }
+    hits.push(Hit { rect: Rect::new(0.0, 0.0, w, h), kind: HitKind::Click(Action::ToggleSlips), label: "Open Ngambang".into() });
+    let mut bx = w - 6.0 - controls_w;
+    let (play_icon, play_label) = if s.playing { (Icon::Pause, "Pause") } else { (Icon::Play, "Play") };
+    for (icon, label, action, on) in [
+        (Icon::Prev, "Previous track", Action::MediaPrev, s.can_prev),
+        (play_icon, play_label, Action::MediaPlayPause, s.can_play_pause),
+        (Icon::Next, "Next track", Action::MediaNext, s.can_next),
+    ] {
+        let r = Rect::new(bx, (h - btn) / 2.0, btn, btn);
+        let main = action == Action::MediaPlayPause;
+        if main {
+            prims.push(Prim::Circle {
+                cx: r.x + btn / 2.0,
+                cy: r.y + btn / 2.0,
+                r: 14.0,
+                fill: Some(if on { MEDIA } else { TRACK }),
+                stroke: None,
+            });
+        }
+        let fg = if main {
+            SURFACE
+        } else if on {
+            TEXT
+        } else {
+            TEXT.with_alpha(0x55)
+        };
+        let size = if main { 12.0 } else { 14.0 };
+        prims.extend(icon_prims(icon, Rect::new(r.x + (btn - size) / 2.0, r.y + (btn - size) / 2.0, size, size), fg));
+        if on {
+            hits.push(Hit { rect: r, kind: HitKind::Click(action), label: label.into() });
+        }
+        bx += btn + 2.0;
+    }
+    Scene { kind: SceneKind::Tag, size: Size::new(w, h), flush: false, clip_radius: inner_r, prims, hits, ring: None }
+}
+
 fn tag(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
+    let media_shown = match (m.hover_tag, m.current_tag()) {
+        (false, Some(t)) => t.media,
+        _ => summary(m).is_some_and(|s| s.icon == Icon::Note),
+    };
+    if let Some(s) = m.front_media().filter(|_| media_shown) {
+        return media_tag(m, s, edge, tm);
+    }
     let (icon, color, text, detail, wave, action) = match (m.hover_tag, m.current_tag()) {
         (false, Some(t)) => (t.icon, t.color, t.text.clone(), t.detail.clone(), false, t.action.clone()),
         _ => match summary(m) {
@@ -463,6 +577,51 @@ fn tag(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
         hits.push(Hit { rect: r, kind: HitKind::Click(act), label });
     }
     Scene { kind: SceneKind::Tag, size: Size::new(w, h), flush: false, clip_radius: inner_r, prims, hits, ring }
+}
+
+/// The slip with its tabs in a row underneath (top and bottom docks).
+fn slips_with_tab_row(m: &Model, mut b: B, content: Vec<Prim>, slip_h: f32, tabs: &[ModuleId], front: ModuleId) -> Scene {
+    let _ = m;
+    b.prims.push(Prim::RoundRect {
+        rect: Rect::new(0.0, 0.0, SLIP_W, slip_h),
+        radius: 14.0,
+        fill: Some(SURFACE),
+        stroke: Some((HAIRLINE, 1.0)),
+    });
+    let n = tabs.len().max(1) as f32;
+    let gap = 4.0;
+    let tab_w = ((SLIP_W - 24.0 - gap * (n - 1.0)) / n).min(56.0).floor();
+    let row_w = n * tab_w + gap * (n - 1.0);
+    let mut x = ((SLIP_W - row_w) / 2.0).floor();
+    let y = slip_h - 1.0;
+    for t in tabs {
+        let r = Rect::new(x, y, tab_w, TAB_ROW_H);
+        let active = *t == front;
+        let (icon, color) = module_icon(*t);
+        let fill = if active { SURFACE } else { SURFACE_2 };
+        b.prims.push(Prim::RoundRect {
+            rect: r,
+            radius: 10.0,
+            fill: Some(fill),
+            stroke: if active { Some((HAIRLINE, 1.0)) } else { None },
+        });
+        // Square off the side that joins the slip.
+        b.prims.push(Prim::RoundRect { rect: Rect::new(r.x, r.y, r.w, 12.0), radius: 0.0, fill: Some(fill), stroke: None });
+        let ix = r.x + (r.w - 16.0) / 2.0;
+        b.icon(icon, Rect::new(ix, r.y + 12.0, 16.0, 16.0), if active { color } else { color.with_alpha(0xB0) });
+        b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::SelectSlip(*t)), label: t.label().into() });
+        x += tab_w + gap;
+    }
+    b.prims.extend(content);
+    Scene {
+        kind: SceneKind::Slip(front),
+        size: Size::new(SLIP_W, slip_h + TAB_ROW_H - 1.0),
+        flush: false,
+        clip_radius: 14.0,
+        prims: b.prims,
+        hits: b.hits,
+        ring: None,
+    }
 }
 
 /// Small drawing helper for slips.
@@ -602,11 +761,14 @@ fn module_icon(m: ModuleId) -> (Icon, Color) {
         ModuleId::Privacy => (Icon::Mic, PRIVACY),
         ModuleId::Prayer => (Icon::Moon, OK),
         ModuleId::Weather => (Icon::Cloud, PORTS),
+        ModuleId::Todo => (Icon::Todo, OK),
     }
 }
 
 fn slips(m: &Model, edge: Edge, front: ModuleId, tm: &dyn TextMeasure) -> Scene {
     let tabs = m.available_slips();
+    // Docked to the top or bottom: the tabs run along the bottom of the slip.
+    let horizontal = !edge.is_vertical();
     let tabs_on_left = edge == Edge::Right;
     let slip_x = if tabs_on_left { TAB_W } else { 0.0 };
     let pad = 18.0;
@@ -626,10 +788,17 @@ fn slips(m: &Model, edge: Edge, front: ModuleId, tm: &dyn TextMeasure) -> Scene 
         ModuleId::Privacy => privacy_slip(m, &mut b, pad),
         ModuleId::Prayer => prayer_slip(m, &mut b, pad),
         ModuleId::Weather => weather_slip(m, &mut b, pad),
+        ModuleId::Todo => todo_slip(m, &mut b, pad),
     };
     let content: Vec<Prim> = b.prims.drain(body_start..).collect();
     let slip_h = (bottom + pad).ceil();
-    let tabs_h = 10.0 + tabs.len() as f32 * (TAB_H + 6.0);
+    if horizontal {
+        return slips_with_tab_row(m, b, content, slip_h, &tabs, front);
+    }
+    // Many modules: the tabs get a little shorter so the column still fits.
+    let pitch = (TAB_H + 6.0).min(((BOX_SPAN - 2.0 * EDGE_GAP - 10.0) / tabs.len().max(1) as f32).floor());
+    let tab_h = pitch - 6.0;
+    let tabs_h = 10.0 + tabs.len() as f32 * pitch;
     let h = slip_h.max(tabs_h);
 
     // Slip body. The corner where tabs attach is tighter.
@@ -645,7 +814,7 @@ fn slips(m: &Model, edge: Edge, front: ModuleId, tm: &dyn TextMeasure) -> Scene 
     // Index tabs on the outer side.
     let tab_x = if tabs_on_left { 0.0 } else { SLIP_W - 1.0 };
     for (i, t) in tabs.iter().enumerate() {
-        let r = Rect::new(tab_x, 10.0 + i as f32 * (TAB_H + 6.0), TAB_W + 1.0, TAB_H);
+        let r = Rect::new(tab_x, 10.0 + i as f32 * pitch, TAB_W + 1.0, tab_h);
         let active = *t == front;
         let (icon, color) = module_icon(*t);
         b.prims.push(Prim::RoundRect {
@@ -658,7 +827,7 @@ fn slips(m: &Model, edge: Edge, front: ModuleId, tm: &dyn TextMeasure) -> Scene 
         let join = if tabs_on_left { Rect::new(r.right() - 12.0, r.y, 12.0, r.h) } else { Rect::new(r.x, r.y, 12.0, r.h) };
         b.prims.push(Prim::RoundRect { rect: join, radius: 0.0, fill: Some(if active { SURFACE } else { SURFACE_2 }), stroke: None });
         let ix = r.x + if tabs_on_left { 14.0 } else { 15.0 };
-        b.icon(icon, Rect::new(ix, r.y + 16.0, 16.0, 16.0), if active { color } else { color.with_alpha(0xB0) });
+        b.icon(icon, Rect::new(ix, r.y + (tab_h - 16.0) / 2.0, 16.0, 16.0), if active { color } else { color.with_alpha(0xB0) });
         b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::SelectSlip(*t)), label: t.label().into() });
     }
     // Content above the body.
@@ -695,12 +864,18 @@ fn media_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             .collect();
         y = b.chips(y, chips) + 14.0;
     }
-    b.rect(Rect::new(b.x, y, 60.0, 60.0), 8.0, Color::rgb(0x3A2E1C));
-    b.icon(Icon::Note, Rect::new(b.x + 19.0, y + 19.0, 22.0, 22.0), MEDIA);
+    match &s.art {
+        Some(a) => b.prims.push(Prim::Image { rect: Rect::new(b.x, y, 60.0, 60.0), art: a.clone(), radius: 8.0 }),
+        None => {
+            b.rect(Rect::new(b.x, y, 60.0, 60.0), 8.0, Color::rgb(0x3A2E1C));
+            b.icon(Icon::Note, Rect::new(b.x + 19.0, y + 19.0, 22.0, 22.0), MEDIA);
+        }
+    }
     let tx = b.x + 74.0;
     let tw = b.w - 74.0;
     b.text(Rect::new(tx, y + 8.0, tw, 24.0), if s.title.is_empty() { s.app.clone() } else { s.title.clone() }, TextStyle::TITLE, TEXT);
-    b.text(Rect::new(tx, y + 32.0, tw, 20.0), s.artist.clone(), TextStyle::SMALL, TEXT_2);
+    let artist = if s.artist.is_empty() { s.app.clone() } else { s.artist.clone() };
+    b.text(Rect::new(tx, y + 32.0, tw, 20.0), artist, TextStyle::SMALL, TEXT_2);
     y += 74.0;
 
     let pos = s.position_at(now);
@@ -981,7 +1156,22 @@ fn timer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             y += 60.0;
             let buttons =
                 m.config.timer.presets_min.iter().map(|p| (format!("{p} min"), Btn::Primary(GAME), Action::TimerStart(*p))).collect();
-            b.button_row(y, buttons)
+            y = b.button_row(y, buttons) + 10.0;
+            // Custom length: − 15 min + and its own start button.
+            let custom = m.config.timer.custom_min;
+            b.icon_button(Rect::new(b.x, y, 44.0, 44.0), Icon::Minus, TEXT, Some(SURFACE_3), Some(Action::TimerCustom(-1)), "Shorter");
+            b.prims.push(Prim::Text {
+                rect: Rect::new(b.x + 50.0, y, 96.0, 44.0),
+                text: format!("{custom} min"),
+                style: TextStyle { size: 17.0, weight: Weight::Medium, mono: true },
+                color: TEXT,
+                align: Align::Center,
+                wrap: false,
+            });
+            b.icon_button(Rect::new(b.x + 152.0, y, 44.0, 44.0), Icon::Plus, TEXT, Some(SURFACE_3), Some(Action::TimerCustom(1)), "Longer");
+            let sx = b.x + 204.0;
+            b.button(Rect::new(sx, y, b.x + b.w - sx, 44.0), "Start custom", Btn::Ghost, Action::TimerStart(custom));
+            y + 44.0
         }
         _ => {
             let rem = m.timer.remaining(now).unwrap_or(0);
@@ -1204,6 +1394,58 @@ fn prayer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     y + 2.0 * 52.0 + gap
 }
 
+fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let open = m.todos.iter().filter(|t| !t.done).count();
+    let right = (!m.todos.is_empty()).then(|| (format!("{open} left"), if open > 0 { OK } else { TEXT_2 }));
+    let mut y = b.header(top, OK, "To-do", right) + 10.0;
+    if m.todos.is_empty() {
+        y = b.empty(y + 4.0, "Nothing to do. Add a task below.") + 14.0;
+    }
+    let shown = 6;
+    // Open tasks first, then the finished ones.
+    let mut list: Vec<&TodoItem> = m.todos.iter().filter(|t| !t.done).collect();
+    list.extend(m.todos.iter().filter(|t| t.done));
+    for t in list.iter().take(shown) {
+        let check = Rect::new(b.x - 4.0, y + 2.0, 36.0, 36.0);
+        let c = Point::new(check.x + 18.0, check.y + 18.0);
+        if t.done {
+            b.prims.push(Prim::Circle { cx: c.x, cy: c.y, r: 9.0, fill: Some(OK), stroke: None });
+            b.icon(Icon::Check, Rect::new(c.x - 6.0, c.y - 6.0, 12.0, 12.0), SURFACE);
+        } else {
+            b.prims.push(Prim::Circle { cx: c.x, cy: c.y, r: 9.0, fill: None, stroke: Some((TRACK, 2.0)) });
+        }
+        let label = if t.done { format!("Mark \"{}\" as not done", t.text) } else { format!("Mark \"{}\" as done", t.text) };
+        b.hits.push(Hit { rect: check, kind: HitKind::Click(Action::TodoToggle(t.id)), label });
+        let tx = b.x + 40.0;
+        let tw = b.w - 40.0 - 44.0;
+        let color = if t.done { LABEL } else { TEXT };
+        b.text(Rect::new(tx, y, tw, 40.0), t.text.clone(), TextStyle::BODY, color);
+        if t.done {
+            let lw = b.tm.width(&t.text, TextStyle::BODY).min(tw);
+            b.rect(Rect::new(tx, y + 20.0, lw, 1.0), 0.0, LABEL);
+        }
+        b.icon_button(
+            Rect::new(b.x + b.w - 36.0, y + 2.0, 36.0, 36.0),
+            Icon::Trash,
+            TEXT_2,
+            None,
+            Some(Action::TodoRemove(t.id)),
+            &format!("Delete \"{}\"", t.text),
+        );
+        y += 40.0;
+    }
+    if list.len() > shown {
+        b.text(Rect::new(b.x, y, b.w, 20.0), format!("+{} more", list.len() - shown), TextStyle::MONO_SMALL, LABEL);
+        y += 22.0;
+    }
+    y += 8.0;
+    let mut buttons = vec![("Add task".to_string(), Btn::Primary(OK), Action::TodoAdd)];
+    if m.todos.iter().any(|t| t.done) {
+        buttons.push(("Clear done".to_string(), Btn::Secondary, Action::TodoClearDone));
+    }
+    b.button_row(y, buttons)
+}
+
 pub fn condition_icon(c: crate::weather::Condition) -> Icon {
     use crate::weather::Condition::*;
     match c {
@@ -1364,6 +1606,7 @@ mod tests {
                     can_next: true,
                     can_prev: true,
                     can_seek: true,
+                    art: None,
                 },
                 MediaSession { id: "Chrome".into(), app: "Chrome".into(), title: "Video".into(), playing: false, ..Default::default() },
             ]),
@@ -1444,6 +1687,10 @@ mod tests {
         m.update(now, Event::Alerts(alerts));
         m.update(now, Event::Online(false));
         m.update(now, Event::Clock { year: 2026, month: 10, day: 24, minutes: 14.0 * 60.0, utc_offset_min: 420, unix: 1_792_825_200 });
+        for i in 0..9 {
+            m.update(now, Event::TodoAdded(format!("Task number {i} with a fairly long description to trim")));
+        }
+        m.update(now, Event::Click(Action::TodoToggle(2)));
         for edge in Edge::ALL {
             m.state = IslandState::Orb;
             out.push((format!("orb {edge:?}"), build(&m, edge, &ApproxMeasure)));
@@ -1475,9 +1722,11 @@ mod tests {
                 assert!(!h.label.is_empty(), "{name}: unlabeled hit");
             }
             assert!(s.size.w <= BOX_DEPTH.max(BOX_SPAN) && s.size.h <= BOX_SPAN, "{name}: {:?} too big", s.size);
-            if s.kind != SceneKind::Seam && s.kind != SceneKind::Hidden && matches!(s.kind, SceneKind::Slip(_)) {
-                assert!(s.size.w + EDGE_GAP <= BOX_DEPTH, "{name}");
-                assert!(s.size.h <= BOX_SPAN, "{name}: {}", s.size.h);
+            if matches!(s.kind, SceneKind::Slip(_) | SceneKind::Tag) {
+                let horizontal = name.ends_with("Top") || name.ends_with("Bottom");
+                let (depth, span) = if horizontal { (s.size.h, s.size.w) } else { (s.size.w, s.size.h) };
+                assert!(depth + EDGE_GAP <= BOX_DEPTH, "{name}: depth {depth}");
+                assert!(span <= BOX_SPAN, "{name}: span {span}");
             }
         }
     }
@@ -1548,6 +1797,58 @@ mod tests {
         let c = (action_hit.rect.x + 2.0, action_hit.rect.y + 2.0);
         assert!(matches!(s.hit_at(c.0, c.1).unwrap().kind, HitKind::Click(Action::JobOpenTerminal(_))));
         assert!(matches!(s.hit_at(3.0, 3.0).unwrap().kind, HitKind::Click(Action::ToggleSlips)));
+    }
+
+    #[test]
+    fn tabs_run_under_the_slip_on_top_and_bottom_docks() {
+        let mut m = Model::new(Config::default(), 3, 0);
+        m.update(0, Event::Click(Action::ToggleSlips));
+        for edge in [Edge::Top, Edge::Bottom] {
+            let s = build(&m, edge, &ApproxMeasure);
+            let tabs: Vec<&Hit> = s.hits.iter().filter(|h| matches!(h.kind, HitKind::Click(Action::SelectSlip(_)))).collect();
+            assert!(tabs.len() > 1);
+            assert!(tabs.iter().all(|t| t.rect.y == tabs[0].rect.y && t.rect.bottom() <= s.size.h + 0.01), "{edge:?}");
+            assert!(tabs[0].rect.y > s.size.h / 2.0, "{edge:?}: tabs at the bottom");
+        }
+        let s = build(&m, Edge::Left, &ApproxMeasure);
+        let tabs: Vec<&Hit> = s.hits.iter().filter(|h| matches!(h.kind, HitKind::Click(Action::SelectSlip(_)))).collect();
+        assert!(tabs.iter().all(|t| t.rect.x == tabs[0].rect.x), "a column on side docks");
+    }
+
+    #[test]
+    fn media_tag_has_player_controls() {
+        let mut m = Model::new(Config::default(), 3, 0);
+        let art = Art { id: 7, w: 2, h: 2, pixels: std::sync::Arc::new(vec![0; 16]) };
+        m.update(
+            0,
+            Event::Media(vec![MediaSession {
+                id: "a".into(),
+                app: "Spotify".into(),
+                title: "Song".into(),
+                artist: "Band".into(),
+                playing: true,
+                duration_ms: 100_000,
+                can_play_pause: true,
+                can_next: true,
+                can_prev: true,
+                art: Some(art),
+                ..Default::default()
+            }]),
+        );
+        assert_eq!(m.state, IslandState::Tag);
+        let s = build(&m, Edge::Left, &ApproxMeasure);
+        for want in [Action::MediaPrev, Action::MediaPlayPause, Action::MediaNext] {
+            assert!(s.hits.iter().any(|h| h.kind == HitKind::Click(want.clone())), "{want:?}");
+        }
+        assert!(s.prims.iter().any(|p| matches!(p, Prim::Image { .. })), "album art");
+        assert!(s.prims.iter().any(|p| matches!(p, Prim::Text { text, .. } if text == "Band")));
+        // The hover summary for media shows the same controls.
+        m.update(10_000, Event::Timer(TimerId::TagHide));
+        m.update(10_000, Event::PointerEnter);
+        m.update(10_200, Event::Timer(TimerId::HoverDelay));
+        assert!(m.hover_tag);
+        let s = build(&m, Edge::Right, &ApproxMeasure);
+        assert!(s.hits.iter().any(|h| h.kind == HitKind::Click(Action::MediaNext)));
     }
 
     #[test]
