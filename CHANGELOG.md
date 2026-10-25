@@ -6,6 +6,31 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **A fresh look.** Every slip leads with its most important thing, large: the
+  next prayer, the session clock, the focus time, today's date, the
+  temperature. In two columns both sides now carry about the same weight.
+- **Icons first, words short.** Buttons carry icons ("▶ 25 min", "+ Add task",
+  "✓ Clear done"), weather readings are an icon and a value, and labels are
+  trimmed.
+- **New icons**, drawn duotone (a soft fill under a crisp line), plus drop,
+  wind and thermometer for the weather.
+- **Gradients**: the island's surface has a soft sheen, and buttons, the
+  active tab, meters, sliders and hero cards glow in their accent.
+- **Motion**: slips slide out of the docked edge like a drawer and back in;
+  flipping with the wheel slides the next slip in from its side; buttons dim
+  while pressed and ripple when clicked.
+
+### Performance
+- Text is laid out and measured once and reused, so redrawing an open slip
+  every second costs far less.
+- The mixer's level meters update only when a level visibly changes, at most
+  20 times a second.
+- Cached text and pictures are let go when the island rests.
+
+### Fixed
+- The site's footer showed version 0.1.0; releases now update it.
+
 ## [0.1.5] - 2026-10-25
 
 ### Changed

@@ -53,6 +53,21 @@ fn svg(scene: &Scene) -> String {
                 let pts: Vec<String> = points.iter().map(|p| format!("{},{}", p.x, p.y)).collect();
                 out += &format!("<polygon points='{}' fill='{}'/>", pts.join(" "), css(*fill));
             }
+            Prim::Gradient { rect, radius, from, to, diagonal } => {
+                let id = format!("g{}", out.len());
+                let (x2, y2) = if *diagonal { (1, 1) } else { (0, 1) };
+                out += &format!(
+                    "<defs><linearGradient id='{id}' x1='0' y1='0' x2='{x2}' y2='{y2}'><stop offset='0' stop-color='{}'/><stop offset='1' stop-color='{}'/></linearGradient></defs>\
+                     <rect x='{}' y='{}' width='{}' height='{}' rx='{}' fill='url(#{id})'/>",
+                    css(*from),
+                    css(*to),
+                    rect.x,
+                    rect.y,
+                    rect.w,
+                    rect.h,
+                    radius.min(rect.w / 2.0).min(rect.h / 2.0)
+                );
+            }
             Prim::Image { rect, radius, .. } => {
                 out +=
                     &format!("<rect x='{}' y='{}' width='{}' height='{}' rx='{radius}' fill='url(#art)'/>", rect.x, rect.y, rect.w, rect.h);

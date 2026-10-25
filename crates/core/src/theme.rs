@@ -8,6 +8,9 @@ pub const SURFACE: Color = Color::rgb(0x212428);
 pub const SURFACE_2: Color = Color::rgb(0x1B1D21);
 /// A raised control's face.
 pub const SURFACE_3: Color = Color::rgb(0x25292E);
+/// The slip's sheen: a little lighter at the top, a little deeper below.
+pub const SURFACE_TOP: Color = Color::rgb(0x282C31);
+pub const SURFACE_BOTTOM: Color = Color::rgb(0x1D2023);
 /// Soft shadows: dark falls bottom-right, light top-left (neumorphism).
 pub const SHADOW_DARK: Color = Color::rgb(0x0E1012);
 pub const SHADOW_LIGHT: Color = Color::rgb(0x363B42);
@@ -24,6 +27,20 @@ pub const GAME: Color = Color::rgb(0xB7E04A);
 pub const OK: Color = Color::rgb(0x7FD1AE);
 pub const CODER: Color = Color::rgb(0xA99BFF);
 pub const PORTS: Color = Color::rgb(0x4CC3D9);
+
+/// The two ends of an accent's gradient: lit at the top-left, deeper below.
+pub fn accent_light(c: Color) -> Color {
+    c.mix(Color::rgb(0xFFFFFF), 0.22)
+}
+
+pub fn accent_deep(c: Color) -> Color {
+    c.mix(Color::rgb(0x000000), 0.12)
+}
+
+/// A faint wash of an accent over the surface, for hero cards and tiles.
+pub fn tint(c: Color, strength: f32) -> Color {
+    SURFACE.mix(c, strength)
+}
 
 /// Gap between the screen edge and the orb / tag / slip.
 pub const EDGE_GAP: f32 = 8.0;

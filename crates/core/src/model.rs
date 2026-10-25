@@ -368,6 +368,9 @@ pub enum Icon {
     Calendar,
     Chart,
     Refresh,
+    Drop,
+    Wind,
+    Thermo,
 }
 
 /// Something the user clicked.

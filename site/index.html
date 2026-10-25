@@ -173,7 +173,7 @@ nav.links a:hover { color: var(--text); }
   position: absolute; left: 10px; top: 50%;
   width: 30px; height: 30px; border-radius: 15px;
   transform: translateY(-50%);
-  background: #15171a; border: 1px solid rgba(255, 255, 255, 0.09);
+  background: linear-gradient(180deg, #282c31, #1d2023); border: 1px solid rgba(255, 255, 255, 0.09);
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4);
   padding: 0; cursor: pointer; overflow: hidden; color: var(--i-text);
   font: inherit; text-align: left;
@@ -190,20 +190,23 @@ nav.links a:hover { color: var(--text); }
 @keyframes tide { from { stroke-dashoffset: 55; } to { stroke-dashoffset: 0; } }
 .island .layer { position: absolute; inset: 0; opacity: 0; pointer-events: none; transition: opacity 0.18s; }
 .island[data-state="tag"] .tag-layer { opacity: 1; transition-delay: 0.12s; }
-.island[data-state="slips"] .slip-layer { opacity: 1; transition-delay: 0.14s; }
+.island[data-state="slips"] .slip-layer { opacity: 1; transform: none; transition-delay: 0.14s; }
+/* The slip slides out of the docked edge like a drawer. */
+.island .slip-layer { transform: translateX(-18px); transition: opacity 0.18s, transform 0.38s cubic-bezier(0.16, 1, 0.3, 1); }
 .tag-layer { display: flex; align-items: center; gap: 10px; padding-left: 44px; white-space: nowrap; }
 .tag-layer .t { font: 500 14px/1 var(--font-body); }
 .tag-layer .d { font: 400 12px/1 var(--font-mono); color: var(--i-text-2); }
 .slip-layer { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
 .slip-layer .lbl { font: 500 11px/1 var(--font-mono); letter-spacing: 0.08em; color: var(--i-label); }
 .slip-layer .row { display: flex; gap: 12px; align-items: center; }
-.slip-layer .art { width: 52px; height: 52px; border-radius: 8px; background: #3a2e1c; display: grid; place-items: center; flex: none; }
+.slip-layer .art { width: 52px; height: 52px; border-radius: 10px; background: linear-gradient(135deg, #e0584f, #f2a93b); box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35); display: grid; place-items: center; flex: none; }
 .slip-layer .tt { font: 600 16px/1.2 var(--font-body); }
 .slip-layer .ar { font: 400 13px/1.3 var(--font-body); color: var(--i-text-2); }
 .slip-layer .times { display: flex; justify-content: space-between; font: 400 11px/1 var(--font-mono); color: var(--i-label); }
 .slip-layer .ctrls { display: flex; justify-content: center; gap: 10px; }
 .slip-layer .ctrls span { width: 44px; height: 36px; border-radius: 10px; display: grid; place-items: center; }
-.slip-layer .ctrls .pp { width: 54px; background: var(--i-amber); }
+.slip-layer .ctrls .pp { width: 54px; border-radius: 18px; background: linear-gradient(135deg, #f6c071, #d6952f); box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35); transition: transform 0.12s; }
+.slip-layer .ctrls .pp:active { transform: scale(0.94); }
 .tabs-col { position: absolute; right: 8px; top: 12px; display: flex; flex-direction: column; gap: 6px; }
 .tabs-col i { width: 6px; height: 6px; border-radius: 3px; display: block; }
 
@@ -220,7 +223,7 @@ nav.links a:hover { color: var(--text); }
 .state h3 { font-size: 18px; display: flex; gap: 10px; align-items: baseline; }
 .state h3 span { font: 500 12px/1 var(--font-mono); color: var(--accent); letter-spacing: 0.08em; }
 .state p { color: var(--text-2); font-size: 15px; }
-.mini { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); background: #15171a; border: 1px solid rgba(255, 255, 255, 0.09); }
+.mini { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); background: linear-gradient(180deg, #282c31, #1d2023); border: 1px solid rgba(255, 255, 255, 0.09); }
 .mini.seam { left: 0; width: 3px; height: 70px; border: 0; border-radius: 0 2px 2px 0; background: #f2a93b; }
 .mini.orb { width: 30px; height: 30px; border-radius: 15px; }
 .mini.tag { width: 150px; height: 34px; border-radius: 10px 17px 17px 10px; }
@@ -335,7 +338,7 @@ footer { padding-block: 40px; border-top: 1px solid var(--line); }
           </a>
           <a class="btn ghost" href="https://github.com/kloworizer/ngambang">Source on GitHub</a>
         </div>
-        <p class="meta">v0.1.5 · x64 &amp; ARM64 · Windows 10 1903+ · MIT + Commons Clause</p>
+        <p class="meta">v0.1.6 · x64 &amp; ARM64 · Windows 10 1903+ · MIT + Commons Clause</p>
       </div>
 
       <div class="demo">
@@ -385,7 +388,7 @@ footer { padding-block: 40px; border-top: 1px solid var(--line); }
         <div class="state"><div class="stage"><span class="mini seam"></span></div><h3><span>SEAM</span>Out of the way</h3><p>A 3&nbsp;px line while a fullscreen app has focus. Only mic/camera alerts and your break reminder come through.</p></div>
         <div class="state"><div class="stage"><span class="mini orb"></span></div><h3><span>ORB</span>Resting</h3><p>The ring is the tide: progress of the track, timer or build that is running. Scroll on it to turn the player up or down; the level shows as you go.</p></div>
         <div class="state"><div class="stage"><span class="mini tag"></span></div><h3><span>TAG</span>A glance</h3><p>Hover, or a new event, and a label pops out: the next track with its cover and controls, a meeting in ten minutes, a change in the weather, a finished build.</p></div>
-        <div class="state"><div class="stage"><span class="mini slip"></span></div><h3><span>SLIPS</span>Everything</h3><p>Click and it unfolds into a card sized to the module: one column, or two side by side for tall ones when docked top or bottom. Each active module gets a tab in the rail along the bottom, in the order you choose; scroll to flip.</p></div>
+        <div class="state"><div class="stage"><span class="mini slip"></span></div><h3><span>SLIPS</span>Everything</h3><p>Click and it slides out like a drawer: a card sized to the module, with the most important thing largest, in one column or two side by side for tall ones docked top or bottom. Each module gets a tab in the rail along the bottom; scroll to flip and it slides to the next.</p></div>
       </div>
     </div>
   </section>
@@ -514,7 +517,7 @@ ngambang.exe notify <span class="k">"backup finished"</span> --level ok</pre>
 
 <footer>
   <div class="wrap foot">
-    <span>Ngambang 0.1.0 · MIT + Commons Clause · no telemetry</span>
+    <span>Ngambang 0.1.6 · MIT + Commons Clause · no telemetry</span>
     <span><a href="https://github.com/kloworizer/ngambang/blob/main/CHANGELOG.md">Changelog</a> · <a href="https://github.com/kloworizer/ngambang/blob/main/docs/integrations.md">Integrations</a> · <a href="https://github.com/kloworizer/ngambang/releases">Releases</a></span>
   </div>
 </footer>

@@ -20,7 +20,7 @@ use windows_numerics::{Matrix3x2, Vector2, Vector3};
 use super::gfx::Gfx;
 
 /// How a new scene replaces the one on screen.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Anim {
     /// Redraw in place.
     None,
@@ -30,6 +30,12 @@ pub enum Anim {
     Pop,
     /// Same shape, new content: crossfade with a short slide.
     Swap,
+    /// The slips slide out of the docked edge like a drawer (`open`), or
+    /// back into it. `from` points from the island towards the edge.
+    Drawer { open: bool, from: (f32, f32) },
+    /// Flipping between slips: the new one slides in from the side it
+    /// comes from (`dir` +1 = from the right, −1 = from the left).
+    Flip { dir: f32 },
 }
 
 /// One scene on screen.
@@ -58,6 +64,14 @@ pub struct Renderer {
     current: Option<Layer>,
     outgoing: Vec<Layer>,
     ring: Ring,
+    /// Click feedback above everything: a dimmer while pressed and a ripple
+    /// on release. Made once and reused.
+    fx: ContainerVisual,
+    press: SpriteVisual,
+    press_clip: CompositionRoundedRectangleGeometry,
+    ripple: ShapeVisual,
+    ripple_clip: CompositionRoundedRectangleGeometry,
+    ripple_dot: CompositionEllipseGeometry,
     scale: f32,
     /// Scale the current scene is animating towards (hover and press feedback).
     target_scale: f32,
@@ -96,6 +110,24 @@ impl Renderer {
         visual.SetIsVisible(false)?;
         root.Children()?.InsertAtTop(&visual)?;
 
+        let fx = compositor.CreateContainerVisual()?;
+        root.Children()?.InsertAtTop(&fx)?;
+        let press = compositor.CreateSpriteVisual()?;
+        press.SetBrush(&compositor.CreateColorBrushWithColor(ui_color(Color(0x000000FF)))?)?;
+        let press_clip = compositor.CreateRoundedRectangleGeometry()?;
+        press.SetClip(&compositor.CreateGeometricClipWithGeometry(&press_clip)?)?;
+        press.SetOpacity(0.0)?;
+        fx.Children()?.InsertAtTop(&press)?;
+        let ripple = compositor.CreateShapeVisual()?;
+        let ripple_dot = compositor.CreateEllipseGeometry()?;
+        let dot = compositor.CreateSpriteShapeWithGeometry(&ripple_dot)?;
+        dot.SetFillBrush(&compositor.CreateColorBrushWithColor(ui_color(Color(0xFFFFFF55)))?)?;
+        ripple.Shapes()?.Append(&dot)?;
+        let ripple_clip = compositor.CreateRoundedRectangleGeometry()?;
+        ripple.SetClip(&compositor.CreateGeometricClipWithGeometry(&ripple_clip)?)?;
+        ripple.SetOpacity(0.0)?;
+        fx.Children()?.InsertAtTop(&ripple)?;
+
         Ok(Renderer {
             _queue: queue,
             compositor,
@@ -105,6 +137,12 @@ impl Renderer {
             current: None,
             outgoing: Vec::new(),
             ring: Ring { visual, geometry, shape, last: None },
+            fx,
+            press,
+            press_clip,
+            ripple,
+            ripple_clip,
+            ripple_dot,
             scale: 1.0,
             target_scale: 1.0,
         })
@@ -180,6 +218,59 @@ impl Renderer {
         Ok(a)
     }
 
+    /// Dim the control under the pointer while it is held (`Some`), or let go.
+    /// `rect` is window-local; `radius` its corner.
+    pub fn press(&self, at: Option<(Rect, f32)>, reduce_motion: bool) -> Result<()> {
+        match at {
+            Some((r, radius)) => {
+                self.press.SetOffset(Vector3 { X: r.x, Y: r.y, Z: 0.0 })?;
+                self.press.SetSize(Vector2 { X: r.w, Y: r.h })?;
+                self.press_clip.SetSize(Vector2 { X: r.w, Y: r.h })?;
+                self.press_clip.SetCornerRadius(Vector2 { X: radius, Y: radius })?;
+                if reduce_motion {
+                    return self.press.SetOpacity(0.22);
+                }
+                self.press.StartAnimation(&HSTRING::from("Opacity"), &self.fade(0.22, 70)?)
+            }
+            None if reduce_motion => self.press.SetOpacity(0.0),
+            None => self.press.StartAnimation(&HSTRING::from("Opacity"), &self.fade(0.0, 220)?),
+        }
+    }
+
+    /// A ripple spreading from `point` inside `rect` (window-local) after a click.
+    pub fn ripple(&self, rect: Rect, radius: f32, point: (f32, f32), reduce_motion: bool) -> Result<()> {
+        if reduce_motion {
+            return Ok(());
+        }
+        self.ripple.SetOffset(Vector3 { X: rect.x, Y: rect.y, Z: 0.0 })?;
+        self.ripple.SetSize(Vector2 { X: rect.w, Y: rect.h })?;
+        self.ripple_clip.SetSize(Vector2 { X: rect.w, Y: rect.h })?;
+        self.ripple_clip.SetCornerRadius(Vector2 { X: radius, Y: radius })?;
+        self.ripple_dot.SetCenter(Vector2 { X: point.0 - rect.x, Y: point.1 - rect.y })?;
+        let reach = (rect.w * rect.w + rect.h * rect.h).sqrt();
+        let grow = self.compositor.CreateVector2KeyFrameAnimation()?;
+        let ease = self.compositor.CreateCubicBezierEasingFunction(Vector2 { X: 0.2, Y: 0.8 }, Vector2 { X: 0.3, Y: 1.0 })?;
+        grow.InsertKeyFrame(0.0, Vector2 { X: 4.0, Y: 4.0 })?;
+        grow.InsertKeyFrameWithEasingFunction(1.0, Vector2 { X: reach, Y: reach }, &ease)?;
+        grow.SetDuration(ts(420))?;
+        self.ripple_dot.StartAnimation(&HSTRING::from("Radius"), &grow)?;
+        let fade = self.compositor.CreateScalarKeyFrameAnimation()?;
+        fade.InsertKeyFrame(0.0, 1.0)?;
+        fade.InsertKeyFrame(1.0, 0.0)?;
+        fade.SetDuration(ts(460))?;
+        self.ripple.StartAnimation(&HSTRING::from("Opacity"), &fade)
+    }
+
+    /// A calm ease-out move of a visual's offset.
+    fn glide(&self, from: Vector3, to: Vector3, ms: u64) -> Result<Vector3KeyFrameAnimation> {
+        let a = self.compositor.CreateVector3KeyFrameAnimation()?;
+        let ease = self.compositor.CreateCubicBezierEasingFunction(Vector2 { X: 0.16, Y: 1.0 }, Vector2 { X: 0.3, Y: 1.0 })?;
+        a.InsertKeyFrame(0.0, from)?;
+        a.InsertKeyFrameWithEasingFunction(1.0, to, &ease)?;
+        a.SetDuration(ts(ms))?;
+        Ok(a)
+    }
+
     /// Grow or shrink the current scene a little around its centre: hover and
     /// press feedback. Runs in the compositor; repeated calls are free.
     pub fn feedback(&mut self, scale: f32, reduce_motion: bool) -> Result<()> {
@@ -198,10 +289,13 @@ impl Renderer {
     /// scene as `anim` says.
     pub fn show(&mut self, gfx: &Gfx, scene: &Scene, rect: Rect, anim: Anim, reduce_motion: bool) -> Result<()> {
         let px = ((rect.w * self.scale).ceil().max(1.0) as i32, (rect.h * self.scale).ceil().max(1.0) as i32);
-        let animate = matches!(anim, Anim::Morph | Anim::Pop);
+        let animate = matches!(anim, Anim::Morph | Anim::Pop | Anim::Drawer { .. } | Anim::Flip { .. });
         if let Some(cur) = &mut self.current {
             if anim == Anim::None && cur.px == px {
-                cur.sprite.SetOffset(Vector3 { X: rect.x, Y: rect.y, Z: 0.0 })?;
+                // Only when it moved: setting the offset would cut a slide short.
+                if (cur.rect.x, cur.rect.y) != (rect.x, rect.y) {
+                    cur.sprite.SetOffset(Vector3 { X: rect.x, Y: rect.y, Z: 0.0 })?;
+                }
                 cur.rect = rect;
                 let surface = cur.surface.clone();
                 return self.draw(gfx, &surface, scene);
@@ -227,15 +321,18 @@ impl Renderer {
         sprite.SetClip(&self.compositor.CreateGeometricClipWithGeometry(&clip)?)?;
         let children = self.root.Children()?;
         children.InsertAtTop(&sprite)?;
-        // Keep the ring above the content.
+        // Keep the ring and the click feedback above the content.
         children.Remove(&self.ring.visual)?;
         children.InsertAtTop(&self.ring.visual)?;
+        children.Remove(&self.fx)?;
+        children.InsertAtTop(&self.fx)?;
 
         let full = Vector2 { X: rect.w, Y: rect.h };
         let prev = self.current.take();
         match prev {
             Some(prev) if animate && !reduce_motion => {
-                let grow = rect.w * rect.h > prev.rect.w * prev.rect.h;
+                // Flips and drawers move calmly; other morphs spring.
+                let grow = rect.w * rect.h > prev.rect.w * prev.rect.h && !matches!(anim, Anim::Flip { .. });
                 // New scene: the clip starts as the old shape and springs open.
                 clip.SetOffset(Vector2 { X: prev.rect.x - rect.x, Y: prev.rect.y - rect.y })?;
                 clip.SetSize(Vector2 { X: prev.rect.w, Y: prev.rect.h })?;
@@ -248,8 +345,31 @@ impl Renderer {
                 prev.clip.StartAnimation(&HSTRING::from("Offset"), &self.spring(grow, to_off)?)?;
                 prev.clip.StartAnimation(&HSTRING::from("Size"), &self.spring(grow, full)?)?;
                 prev.sprite.StartAnimation(&HSTRING::from("Opacity"), &self.fade(0.0, 130)?)?;
-                if anim == Anim::Pop {
-                    sprite.StartAnimation(&HSTRING::from("Scale"), &self.scale_anim(Some(0.86), 1.0, 360)?)?;
+                let at = Vector3 { X: rect.x, Y: rect.y, Z: 0.0 };
+                let was = Vector3 { X: prev.rect.x, Y: prev.rect.y, Z: 0.0 };
+                match anim {
+                    Anim::Pop => sprite.StartAnimation(&HSTRING::from("Scale"), &self.scale_anim(Some(0.86), 1.0, 360)?)?,
+                    // Out of the edge: the content follows the shape from the edge side.
+                    Anim::Drawer { open: true, from } => {
+                        let start = Vector3 { X: rect.x + from.0 * 28.0, Y: rect.y + from.1 * 28.0, Z: 0.0 };
+                        sprite.StartAnimation(&HSTRING::from("Offset"), &self.glide(start, at, 380)?)?;
+                    }
+                    // Back into the edge: the old content slides that way as it goes.
+                    Anim::Drawer { open: false, from } => {
+                        let end = Vector3 { X: prev.rect.x + from.0 * 28.0, Y: prev.rect.y + from.1 * 28.0, Z: 0.0 };
+                        prev.sprite.StartAnimation(&HSTRING::from("Offset"), &self.glide(was, end, 260)?)?;
+                    }
+                    // Wheel flips: in from one side, the old one out the other.
+                    Anim::Flip { dir } => {
+                        let d = 36.0 * dir;
+                        sprite.StartAnimation(
+                            &HSTRING::from("Offset"),
+                            &self.glide(Vector3 { X: rect.x + d, Y: rect.y, Z: 0.0 }, at, 300)?,
+                        )?;
+                        let end = Vector3 { X: prev.rect.x - d, Y: prev.rect.y, Z: 0.0 };
+                        prev.sprite.StartAnimation(&HSTRING::from("Offset"), &self.glide(was, end, 260)?)?;
+                    }
+                    _ => {}
                 }
                 self.outgoing.push(prev);
             }

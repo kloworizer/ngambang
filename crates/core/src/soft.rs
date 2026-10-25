@@ -37,6 +37,14 @@ pub fn raised_with(rect: Rect, radius: f32, face: Color, depth: f32, dark: Color
     v
 }
 
+/// A raised shape whose face is a gradient (lit top-left to deeper bottom-right).
+pub fn raised_grad(rect: Rect, radius: f32, from: Color, to: Color, depth: f32) -> Vec<Prim> {
+    let mut v = raised(rect, radius, from, depth);
+    v.pop();
+    v.push(Prim::Gradient { rect, radius: radius.max(0.0), from, to, diagonal: true });
+    v
+}
+
 /// A raised circle.
 pub fn raised_circle(cx: f32, cy: f32, r: f32, face: Color, depth: f32) -> Vec<Prim> {
     let o = depth * 0.5;

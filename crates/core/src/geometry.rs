@@ -103,6 +103,13 @@ impl Color {
         self.0 as u8
     }
 
+    /// `self` blended `t` of the way towards `other` (alpha too).
+    pub fn mix(self, other: Color, t: f32) -> Color {
+        let t = t.clamp(0.0, 1.0);
+        let f = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u32;
+        Color((f(self.r(), other.r()) << 24) | (f(self.g(), other.g()) << 16) | (f(self.b(), other.b()) << 8) | f(self.a(), other.a()))
+    }
+
     /// Components as floats in 0..=1 (straight alpha).
     pub fn to_f32(self) -> [f32; 4] {
         [self.r() as f32 / 255.0, self.g() as f32 / 255.0, self.b() as f32 / 255.0, self.a() as f32 / 255.0]

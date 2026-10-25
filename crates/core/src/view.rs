@@ -68,6 +68,15 @@ pub enum Prim {
         points: Vec<Point>,
         fill: Color,
     },
+    /// A rounded rect filled with a linear gradient from `from` (top, or
+    /// top-left when `diagonal`) to `to`.
+    Gradient {
+        rect: Rect,
+        radius: f32,
+        from: Color,
+        to: Color,
+        diagonal: bool,
+    },
     /// A picture (album art) filling `rect` with rounded corners.
     Image {
         rect: Rect,
@@ -88,7 +97,7 @@ pub enum Prim {
 impl Prim {
     pub fn bounds(&self) -> Rect {
         match self {
-            Prim::RoundRect { rect, .. } | Prim::Text { rect, .. } | Prim::Image { rect, .. } => *rect,
+            Prim::RoundRect { rect, .. } | Prim::Text { rect, .. } | Prim::Image { rect, .. } | Prim::Gradient { rect, .. } => *rect,
             Prim::Circle { cx, cy, r, .. } => Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r),
             Prim::Polyline { points, .. } | Prim::Polygon { points, .. } => {
                 let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
@@ -396,15 +405,33 @@ fn ring_spec(m: &Model, center: Point) -> Option<RingSpec> {
     })
 }
 
+/// The island's body: a soft vertical sheen with a hairline edge.
+fn surface(rect: Rect, radius: f32) -> [Prim; 2] {
+    [
+        Prim::Gradient { rect, radius, from: SURFACE_TOP, to: SURFACE_BOTTOM, diagonal: false },
+        Prim::RoundRect { rect, radius, fill: None, stroke: Some((HAIRLINE, 1.0)) },
+    ]
+}
+
+/// The tighter corners where a tag meets the edge, in the same sheen.
+fn surface_patch(rect: Rect, radius: f32) -> Prim {
+    Prim::Gradient { rect, radius, from: SURFACE_TOP, to: SURFACE_BOTTOM, diagonal: false }
+}
+
 fn orb(m: &Model) -> Scene {
     let c = ORB_BOX / 2.0;
     let ring = ring_spec(m, Point::new(c, c));
     let dot = ring.map(|r| r.color).unwrap_or(TRACK);
     // A soft disc with a groove for the tide ring and a raised button in the middle.
-    let mut prims = vec![Prim::Circle { cx: c, cy: c, r: c - 0.5, fill: Some(SURFACE), stroke: Some((HAIRLINE, 1.0)) }];
+    let mut prims = surface(Rect::new(0.5, 0.5, ORB_BOX - 1.0, ORB_BOX - 1.0), c - 0.5).to_vec();
     prims.extend(soft::well_circle(c, c, RING_R + 2.5));
-    prims.extend(soft::raised_circle(c, c, RING_R - 2.5, SURFACE, 1.5));
-    prims.push(Prim::Circle { cx: c, cy: c, r: 3.5, fill: Some(dot), stroke: None });
+    prims.extend(soft::raised_circle(c, c, RING_R - 2.5, SURFACE_3, 1.5));
+    // The status dot glows in its colour.
+    if ring.is_some() {
+        prims.push(Prim::Circle { cx: c, cy: c, r: 5.5, fill: Some(dot.with_alpha(0x40)), stroke: None });
+    }
+    let d = Rect::new(c - 3.5, c - 3.5, 7.0, 7.0);
+    prims.push(Prim::Gradient { rect: d, radius: 3.5, from: accent_light(dot), to: accent_deep(dot), diagonal: true });
     let hits =
         vec![Hit { rect: Rect::new(0.0, 0.0, ORB_BOX, ORB_BOX), kind: HitKind::Click(Action::ToggleSlips), label: "Ngambang".into() }];
     Scene { kind: SceneKind::Orb, size: Size::new(ORB_BOX, ORB_BOX), flush: false, clip_radius: ORB_BOX / 2.0, prims, hits, ring }
@@ -420,10 +447,9 @@ fn volume_tag(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
     let value_w = tm.width("100%", TextStyle::BODY_MEDIUM).ceil().max(36.0);
     let bar_w = 120.0;
     let w = 6.0 + 28.0 + 12.0 + name_w + 12.0 + bar_w + 12.0 + value_w + 16.0;
-    let mut prims =
-        vec![Prim::RoundRect { rect: Rect::new(0.0, 0.0, w, h), radius: 20.0, fill: Some(SURFACE), stroke: Some((HAIRLINE, 1.0)) }];
+    let mut prims = surface(Rect::new(0.0, 0.0, w, h), 20.0).to_vec();
     let patch = if edge == Edge::Right { Rect::new(w / 2.0, 0.0, w / 2.0, h) } else { Rect::new(0.0, 0.0, w / 2.0, h) };
-    prims.push(Prim::RoundRect { rect: patch, radius: 12.0, fill: Some(SURFACE), stroke: None });
+    prims.push(surface_patch(patch, 12.0));
     let c = Point::new(20.0, h / 2.0);
     prims.extend(soft::well_circle(c.x, c.y, RING_R + 2.5));
     let (icon, color) = if v.muted { (Icon::SpeakerMuted, PRIVACY) } else { (Icon::Speaker, MEDIA) };
@@ -440,7 +466,8 @@ fn volume_tag(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
     prims.extend(soft::well(bar, 5.0));
     if v.level > 0.005 {
         let fill = Rect::new(bar.x + 2.0, bar.y + 2.5, (bar.w - 4.0) * v.level.clamp(0.0, 1.0), 5.0);
-        prims.push(Prim::RoundRect { rect: fill, radius: 2.5, fill: Some(if v.muted { TRACK } else { MEDIA }), stroke: None });
+        let c = if v.muted { TRACK } else { MEDIA };
+        prims.push(Prim::Gradient { rect: fill, radius: 2.5, from: accent_deep(c), to: accent_light(c), diagonal: true });
     }
     prims.push(Prim::Text {
         rect: Rect::new(bar.right() + 12.0, 0.0, value_w, h),
@@ -473,9 +500,9 @@ fn media_tag(m: &Model, s: &MediaSession, edge: Edge, tm: &dyn TextMeasure) -> S
     let text_room = w - fixed;
 
     let (inner_r, outer_r) = (12.0, 20.0);
-    prims.push(Prim::RoundRect { rect: Rect::new(0.0, 0.0, w, h), radius: outer_r, fill: Some(SURFACE), stroke: Some((HAIRLINE, 1.0)) });
+    prims.extend(surface(Rect::new(0.0, 0.0, w, h), outer_r));
     let patch = if edge == Edge::Right { Rect::new(w / 2.0, 0.0, w / 2.0, h) } else { Rect::new(0.0, 0.0, w / 2.0, h) };
-    prims.push(Prim::RoundRect { rect: patch, radius: inner_r, fill: Some(SURFACE), stroke: None });
+    prims.push(surface_patch(patch, inner_r));
 
     let art = Rect::new(6.0, (h - lead) / 2.0, lead, lead);
     match &s.art {
@@ -506,11 +533,12 @@ fn media_tag(m: &Model, s: &MediaSession, edge: Edge, tm: &dyn TextMeasure) -> S
         let track = Rect::new(x0, h - 3.5, text_room, 2.0);
         prims.push(Prim::RoundRect { rect: track, radius: 1.0, fill: Some(SURFACE_2), stroke: None });
         if p > 0.01 {
-            prims.push(Prim::RoundRect {
+            prims.push(Prim::Gradient {
                 rect: Rect::new(track.x, track.y, track.w * p, 2.0),
                 radius: 1.0,
-                fill: Some(MEDIA),
-                stroke: None,
+                from: accent_deep(MEDIA),
+                to: accent_light(MEDIA),
+                diagonal: true,
             });
         }
     }
@@ -525,7 +553,9 @@ fn media_tag(m: &Model, s: &MediaSession, edge: Edge, tm: &dyn TextMeasure) -> S
         let r = Rect::new(bx, (h - btn) / 2.0, btn, btn);
         let main = action == Action::MediaPlayPause;
         if main {
-            prims.extend(soft::raised_circle(r.x + btn / 2.0, r.y + btn / 2.0, 13.0, if on { MEDIA } else { TRACK }, 1.5));
+            let c = if on { MEDIA } else { TRACK };
+            let face = Rect::new(r.x + btn / 2.0 - 13.0, r.y + btn / 2.0 - 13.0, 26.0, 26.0);
+            prims.extend(soft::raised_grad(face, 13.0, accent_light(c), accent_deep(c), 1.5));
         }
         let fg = if main {
             SURFACE
@@ -576,9 +606,9 @@ fn tag(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
 
     // Body: the large radius on the free end, a tighter one where it is tied to the edge.
     let (inner_r, outer_r) = (12.0, 20.0);
-    prims.push(Prim::RoundRect { rect: Rect::new(0.0, 0.0, w, h), radius: outer_r, fill: Some(SURFACE), stroke: Some((HAIRLINE, 1.0)) });
+    prims.extend(surface(Rect::new(0.0, 0.0, w, h), outer_r));
     let patch = if edge == Edge::Right { Rect::new(w / 2.0, 0.0, w / 2.0, h) } else { Rect::new(0.0, 0.0, w / 2.0, h) };
-    prims.push(Prim::RoundRect { rect: patch, radius: inner_r, fill: Some(SURFACE), stroke: None });
+    prims.push(surface_patch(patch, inner_r));
 
     // Lead: the ring (hover) or a ringed icon (event).
     let lc = Point::new(6.0 + lead / 2.0, h / 2.0);
@@ -699,21 +729,65 @@ impl B<'_> {
     }
 
     fn button(&mut self, r: Rect, label: &str, kind: Btn, action: Action) {
-        let (face, fg) = match kind {
-            Btn::Primary(c) => (c, SURFACE),
-            Btn::Secondary => (SURFACE, TEXT),
-            Btn::Danger => (PRIVACY, SURFACE),
-            Btn::Ghost => (SURFACE, TEXT_2),
+        self.ibutton(r, None, label, kind, action);
+    }
+
+    /// A button with an optional icon before its label (or alone when the
+    /// label is empty; the label still names it for screen readers via `name`).
+    fn ibutton(&mut self, r: Rect, icon: Option<Icon>, label: &str, kind: Btn, action: Action) {
+        let (fg, accent) = match kind {
+            Btn::Primary(c) => (SURFACE, Some(c)),
+            Btn::Danger => (SURFACE, Some(PRIVACY)),
+            Btn::Secondary => (TEXT, None),
+            Btn::Ghost => (TEXT_2, None),
         };
         let radius = if kind == Btn::Ghost { r.h / 2.0 } else { 12.0 };
-        self.raised(r, radius, face);
-        let style = if matches!(kind, Btn::Primary(_) | Btn::Danger) {
-            TextStyle { weight: Weight::Semibold, ..TextStyle::BODY }
-        } else {
-            TextStyle::BODY
-        };
-        self.prims.push(Prim::Text { rect: r, text: label.into(), style, color: fg, align: Align::Center, wrap: false });
+        match accent {
+            Some(c) => self.prims.extend(soft::raised_grad(r, radius, accent_light(c), accent_deep(c), 3.0)),
+            None => self.prims.extend(soft::raised_grad(r, radius, SURFACE_TOP, SURFACE, 3.0)),
+        }
+        let style = if accent.is_some() { TextStyle { weight: Weight::Semibold, ..TextStyle::BODY } } else { TextStyle::BODY };
+        let text_w = if label.is_empty() { 0.0 } else { self.tm.width(label, style).ceil().min(r.w - 16.0) };
+        let icon_w = if icon.is_some() { 18.0 } else { 0.0 };
+        let gap = if icon.is_some() && !label.is_empty() { 8.0 } else { 0.0 };
+        let x = r.x + (r.w - icon_w - gap - text_w) / 2.0;
+        if let Some(i) = icon {
+            self.icon(i, Rect::new(x, r.y + (r.h - 18.0) / 2.0, 18.0, 18.0), fg);
+        }
+        if !label.is_empty() {
+            let tr = Rect::new(x + icon_w + gap, r.y, text_w + 4.0, r.h);
+            self.prims.push(Prim::Text { rect: tr, text: label.into(), style, color: fg, align: Align::Start, wrap: false });
+        }
         self.hits.push(Hit { rect: r, kind: HitKind::Click(action), label: label.into() });
+    }
+
+    /// A row of buttons with icons that share the width.
+    fn ibutton_row(&mut self, y: f32, buttons: Vec<(Icon, &str, Btn, Action)>) -> f32 {
+        let n = buttons.len().max(1) as f32;
+        let gap = 8.0;
+        let bw = (self.w - gap * (n - 1.0)) / n;
+        for (i, (icon, label, kind, action)) in buttons.into_iter().enumerate() {
+            self.ibutton(Rect::new(self.x + i as f32 * (bw + gap), y, bw, 44.0), Some(icon), label, kind, action);
+        }
+        y + 44.0
+    }
+
+    /// A hero card: an accent wash, deeper at the bottom-right.
+    fn hero(&mut self, r: Rect, accent: Color) {
+        self.prims.extend(soft::raised_grad(r, 16.0, tint(accent, 0.20), tint(accent, 0.05), 3.0));
+    }
+
+    /// A small rounded tile in an accent wash with an icon in it.
+    fn icon_tile(&mut self, r: Rect, icon: Icon, accent: Color) {
+        self.prims.push(Prim::Gradient {
+            rect: r,
+            radius: r.h * 0.3,
+            from: accent.with_alpha(0x3A),
+            to: accent.with_alpha(0x12),
+            diagonal: true,
+        });
+        let s = (r.h * 0.55).round();
+        self.icon(icon, Rect::new(r.x + (r.w - s) / 2.0, r.y + (r.h - s) / 2.0, s, s), accent);
     }
 
     fn icon_button(&mut self, r: Rect, icon: Icon, fg: Color, bg: Option<Color>, action: Option<Action>, label: &str) {
@@ -727,17 +801,6 @@ impl B<'_> {
         if let Some(a) = action {
             self.hits.push(Hit { rect: r, kind: HitKind::Click(a), label: label.into() });
         }
-    }
-
-    /// A row of buttons that share the width.
-    fn button_row(&mut self, y: f32, buttons: Vec<(String, Btn, Action)>) -> f32 {
-        let n = buttons.len().max(1) as f32;
-        let gap = 8.0;
-        let bw = (self.w - gap * (n - 1.0)) / n;
-        for (i, (label, kind, action)) in buttons.into_iter().enumerate() {
-            self.button(Rect::new(self.x + i as f32 * (bw + gap), y, bw, 44.0), &label, kind, action);
-        }
-        y + 44.0
     }
 
     /// Pill chips that wrap to new lines.
@@ -767,7 +830,8 @@ impl B<'_> {
         let v = value.clamp(0.0, 1.0);
         self.prims.extend(soft::well(Rect::new(r.x - 2.0, cy - 4.0, r.w + 4.0, 8.0), 4.0));
         if v > 0.01 {
-            self.prims.push(Prim::RoundRect { rect: Rect::new(r.x, cy - 1.5, r.w * v, 3.0), radius: 1.5, fill: Some(color), stroke: None });
+            let fill = Rect::new(r.x, cy - 1.5, r.w * v, 3.0);
+            self.prims.push(Prim::Gradient { rect: fill, radius: 1.5, from: accent_deep(color), to: accent_light(color), diagonal: true });
         }
         let kx = (r.x + r.w * v).clamp(r.x + 4.0, r.right() - 4.0);
         self.prims.extend(soft::raised_circle(kx, cy, 8.0, SURFACE, 2.0));
@@ -778,7 +842,14 @@ impl B<'_> {
     fn meter(&mut self, r: Rect, value: f32, color: Color) {
         self.prims.push(Prim::RoundRect { rect: r, radius: r.h / 2.0, fill: Some(SURFACE_2), stroke: None });
         if value > 0.005 {
-            self.rect(Rect::new(r.x, r.y, r.w * value.clamp(0.0, 1.0), r.h), r.h / 2.0, color);
+            let fill = Rect::new(r.x, r.y, r.w * value.clamp(0.0, 1.0), r.h);
+            self.prims.push(Prim::Gradient {
+                rect: fill,
+                radius: r.h / 2.0,
+                from: accent_deep(color),
+                to: accent_light(color),
+                diagonal: true,
+            });
         }
     }
 
@@ -946,12 +1017,7 @@ fn slips(m: &Model, front: ModuleId, edge: Edge, tm: &dyn TextMeasure) -> Scene 
     let size = Size::new(slip_w, slip_h + rows as f32 * TAB_ROW_H + 8.0);
 
     // One soft surface for the slip and its tabs, with a groove between them.
-    b.prims.push(Prim::RoundRect {
-        rect: Rect::new(0.0, 0.0, size.w, size.h),
-        radius: 16.0,
-        fill: Some(SURFACE),
-        stroke: Some((HAIRLINE, 1.0)),
-    });
+    b.prims.extend(surface(Rect::new(0.0, 0.0, size.w, size.h), 16.0));
     let groove = Rect::new(18.0, slip_h - 1.0, slip_w - 36.0, 2.0);
     b.prims.push(Prim::RoundRect { rect: groove, radius: 1.0, fill: Some(SHADOW_DARK.with_alpha(0x90)), stroke: None });
     for (t, r) in tabs.iter().zip(rects) {
@@ -960,6 +1026,13 @@ fn slips(m: &Model, front: ModuleId, edge: Edge, tm: &dyn TextMeasure) -> Scene 
         // The open slip's tab is pressed in; the others stand out.
         if active {
             b.prims.extend(soft::well(r, 10.0));
+            b.prims.push(Prim::Gradient {
+                rect: r.inset(2.0),
+                radius: 8.0,
+                from: color.with_alpha(0x40),
+                to: color.with_alpha(0x0C),
+                diagonal: false,
+            });
         } else {
             b.prims.extend(soft::raised(r, 10.0, SURFACE, 2.5));
         }
@@ -1001,10 +1074,14 @@ fn media_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let y0 = b.header(top, MEDIA, &label, None) + 14.0;
     // The cover, large in a wide slip.
     b.full();
-    let side = if b.two { (b.limit - y0).min(214.0) } else { 132.0 };
+    let side = if b.two { (b.limit - y0).min(214.0) } else { 140.0 };
     let art = Rect::new(b.x, y0, side, side);
     match &s.art {
-        Some(a) => b.prims.push(Prim::Image { rect: art, art: a.clone(), radius: 14.0 }),
+        Some(a) => {
+            // The cover floats a little above the surface.
+            b.prims.extend(soft::raised(art, 14.0, SURFACE, 4.0));
+            b.prims.push(Prim::Image { rect: art, art: a.clone(), radius: 14.0 });
+        }
         None => {
             b.prims.extend(soft::well(art, 14.0));
             b.icon(Icon::Note, Rect::new(art.x + side / 2.0 - 24.0, art.y + side / 2.0 - 24.0, 48.0, 48.0), MEDIA);
@@ -1062,7 +1139,8 @@ fn media_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let next = s.can_next.then_some(Action::MediaNext);
     b.icon_button(Rect::new(cx - 28.0 - 52.0, y, 44.0, 44.0), Icon::Prev, TEXT, None, prev, "Previous track");
     let (icon, label) = if s.playing { (Icon::Pause, "Pause") } else { (Icon::Play, "Play") };
-    b.raised(Rect::new(cx - 28.0, y, 56.0, 44.0), 14.0, if s.can_play_pause { MEDIA } else { TRACK });
+    let pc = if s.can_play_pause { MEDIA } else { TRACK };
+    b.prims.extend(soft::raised_grad(Rect::new(cx - 28.0, y, 56.0, 44.0), 22.0, accent_light(pc), accent_deep(pc), 3.0));
     b.icon(icon, Rect::new(cx - 9.0, y + 13.0, 18.0, 18.0), SURFACE);
     if s.can_play_pause {
         b.hits.push(Hit { rect: Rect::new(cx - 28.0, y, 56.0, 44.0), kind: HitKind::Click(Action::MediaPlayPause), label: label.into() });
@@ -1086,10 +1164,16 @@ fn mixer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                mute: Action,
                accent: Color| {
         let name_w = b.w - 32.0 - 10.0 - slider_w - 10.0 - 44.0 - 10.0;
-        b.rect(Rect::new(b.x, y + 6.0, 32.0, 32.0), 8.0, SURFACE_3);
         if initial.is_empty() {
-            b.icon(Icon::Speaker, Rect::new(b.x + 8.0, y + 14.0, 16.0, 16.0), TEXT);
+            b.icon_tile(Rect::new(b.x, y + 6.0, 32.0, 32.0), Icon::Speaker, accent);
         } else {
+            b.prims.push(Prim::Gradient {
+                rect: Rect::new(b.x, y + 6.0, 32.0, 32.0),
+                radius: 10.0,
+                from: accent.with_alpha(0x3A),
+                to: accent.with_alpha(0x12),
+                diagonal: true,
+            });
             b.prims.push(Prim::Text {
                 rect: Rect::new(b.x, y + 6.0, 32.0, 32.0),
                 text: initial.into(),
@@ -1213,7 +1297,7 @@ fn commands_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     if any_done {
         b.col(1);
         let by = b.pin(bottom + 10.0, 44.0);
-        return b.button_row(by, vec![("Clear finished".into(), Btn::Secondary, Action::JobsClear)]);
+        return b.ibutton_row(by, vec![(Icon::Check, "Clear finished", Btn::Secondary, Action::JobsClear)]);
     }
     bottom
 }
@@ -1327,70 +1411,100 @@ fn timer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         FocusTimer::Paused { .. } => "paused",
     };
     let y0 = b.header(top, GAME, &format!("Focus · {state}"), None) + 14.0;
+    // The hero is as tall as the buttons beside it (two columns) or compact.
+    let stacked = |n: usize| n as f32 * 54.0 - 10.0;
     match m.timer {
         FocusTimer::Idle => {
-            // Left: what this is and the custom length.
-            b.col(0);
-            b.text(Rect::new(b.x, y0, b.w, 40.0), "Start a round", TextStyle { size: 22.0, weight: Weight::Semibold, mono: false }, TEXT);
-            b.text(Rect::new(b.x, y0 + 40.0, b.w, 20.0), "Minor tags wait until it ends.", TextStyle::SMALL, TEXT_2);
-            let y = y0 + 84.0;
-            b.text(Rect::new(b.x, y, b.w, 16.0), "CUSTOM", TextStyle::LABEL, LABEL);
-            let y = y + 24.0;
             let custom = m.config.timer.custom_min;
-            b.icon_button(Rect::new(b.x, y, 44.0, 44.0), Icon::Minus, TEXT, Some(SURFACE_3), Some(Action::TimerCustom(-1)), "Shorter");
+            let presets: Vec<u32> = m.config.timer.presets_min.iter().copied().take(3).collect();
+            let hero_h = if b.two { stacked(presets.len() + 1) } else { 104.0 };
+            // Hero: the custom length, large, between − and +.
+            b.col(0);
+            let card = Rect::new(b.x, y0, b.w, hero_h);
+            b.hero(card, GAME);
+            let mid = card.y + hero_h / 2.0;
+            b.icon_button(
+                Rect::new(card.x + 12.0, mid - 22.0, 44.0, 44.0),
+                Icon::Minus,
+                TEXT,
+                Some(SURFACE_3),
+                Some(Action::TimerCustom(-1)),
+                "Shorter",
+            );
+            b.icon_button(
+                Rect::new(card.right() - 56.0, mid - 22.0, 44.0, 44.0),
+                Icon::Plus,
+                TEXT,
+                Some(SURFACE_3),
+                Some(Action::TimerCustom(1)),
+                "Longer",
+            );
             b.prims.push(Prim::Text {
-                rect: Rect::new(b.x + 50.0, y, 96.0, 44.0),
-                text: format!("{custom} min"),
-                style: TextStyle { size: 17.0, weight: Weight::Medium, mono: true },
+                rect: Rect::new(card.x + 60.0, mid - 30.0, card.w - 120.0, 46.0),
+                text: format!("{custom}:00"),
+                style: TextStyle { size: 40.0, weight: Weight::Semibold, mono: true },
                 color: TEXT,
                 align: Align::Center,
                 wrap: false,
             });
-            b.icon_button(Rect::new(b.x + 152.0, y, 44.0, 44.0), Icon::Plus, TEXT, Some(SURFACE_3), Some(Action::TimerCustom(1)), "Longer");
-            // Then one button per preset and the custom round: stacked in
-            // the right column, or in one row below.
-            let mut y = b.side(y0, y + 44.0);
+            b.prims.push(Prim::Text {
+                rect: Rect::new(card.x + 60.0, mid + 16.0, card.w - 120.0, 16.0),
+                text: "custom".into(),
+                style: TextStyle::LABEL,
+                color: LABEL,
+                align: Align::Center,
+                wrap: false,
+            });
+            // Then the presets and the custom round.
+            let y = b.side(y0, y0 + hero_h);
+            let mut all: Vec<(Icon, String, Btn, Action)> =
+                presets.iter().map(|p| (Icon::Play, format!("{p} min"), Btn::Primary(GAME), Action::TimerStart(*p))).collect();
+            all.push((Icon::Play, format!("{custom} min"), Btn::Secondary, Action::TimerStart(custom)));
             if !b.two {
-                let mut row: Vec<_> =
-                    m.config.timer.presets_min.iter().map(|p| (format!("{p} min"), Btn::Primary(GAME), Action::TimerStart(*p))).collect();
-                row.push((format!("{custom} min"), Btn::Ghost, Action::TimerStart(custom)));
-                return b.button_row(y, row);
+                let row = all.iter().map(|(i, l, k, a)| (*i, l.as_str(), *k, a.clone())).collect();
+                return b.ibutton_row(y, row);
             }
-            for p in &m.config.timer.presets_min {
-                y = b.button_row(y, vec![(format!("{p} min"), Btn::Primary(GAME), Action::TimerStart(*p))]) + 10.0;
+            let mut y = y;
+            for (i, l, k, a) in &all {
+                y = b.ibutton_row(y, vec![(*i, l.as_str(), *k, a.clone())]) + 10.0;
             }
-            b.button_row(y, vec![(format!("Start {custom} min"), Btn::Ghost, Action::TimerStart(custom))]).max(y0 + 152.0)
+            (y - 10.0).max(y0 + hero_h)
         }
         _ => {
             let rem = m.timer.remaining(now).unwrap_or(0);
-            b.col(0);
-            b.text(
-                Rect::new(b.x, y0, b.w, 64.0),
-                format::clock(rem.div_ceil(1000)),
-                TextStyle { size: 52.0, weight: Weight::Medium, mono: true },
-                GAME,
-            );
             let frac = m.timer.progress(now).unwrap_or(0.0);
-            b.meter(Rect::new(b.x, y0 + 80.0, b.w, 6.0), frac, GAME);
-            b.text(Rect::new(b.x, y0 + 96.0, b.w, 20.0), format!("{:.0}% of the round", frac * 100.0), TextStyle::SMALL, TEXT_2);
-            let y = b.side(y0, y0 + 116.0);
+            let hero_h = if b.two { stacked(3) } else { 104.0 };
+            b.col(0);
+            let card = Rect::new(b.x, y0, b.w, hero_h);
+            b.hero(card, GAME);
+            let mid = card.y + hero_h / 2.0 - 8.0;
+            b.prims.push(Prim::Text {
+                rect: Rect::new(card.x, mid - 28.0, card.w, 56.0),
+                text: format::clock(rem.div_ceil(1000)),
+                style: TextStyle { size: 48.0, weight: Weight::Semibold, mono: true },
+                color: TEXT,
+                align: Align::Center,
+                wrap: false,
+            });
+            b.meter(Rect::new(card.x + 20.0, card.bottom() - 22.0, card.w - 40.0, 6.0), frac, GAME);
+            let y = b.side(y0, y0 + hero_h);
             let main = if m.timer.is_running() {
-                ("Pause".to_string(), Btn::Primary(GAME), Action::TimerPause)
+                (Icon::Pause, "Pause", Btn::Primary(GAME), Action::TimerPause)
             } else {
-                ("Resume".to_string(), Btn::Primary(GAME), Action::TimerResume)
+                (Icon::Play, "Resume", Btn::Primary(GAME), Action::TimerResume)
             };
+            let rest =
+                [(Icon::Plus, "5 min", Btn::Secondary, Action::TimerAdd(5)), (Icon::Stop, "Stop", Btn::Secondary, Action::TimerStop)];
             if !b.two {
-                return b.button_row(
-                    y,
-                    vec![main, ("+5 min".into(), Btn::Secondary, Action::TimerAdd(5)), ("Stop".into(), Btn::Secondary, Action::TimerStop)],
-                );
+                let mut row = vec![main];
+                row.extend(rest);
+                return b.ibutton_row(y, row);
             }
-            let y = b.button_row(y, vec![main]) + 10.0;
-            b.button_row(
-                y,
-                vec![("+5 min".into(), Btn::Secondary, Action::TimerAdd(5)), ("Stop".into(), Btn::Secondary, Action::TimerStop)],
-            )
-            .max(y0 + 116.0)
+            let mut y = b.ibutton_row(y, vec![main]) + 10.0;
+            for r in rest {
+                y = b.ibutton_row(y, vec![r]) + 10.0;
+            }
+            (y - 10.0).max(y0 + hero_h)
         }
     }
 }
@@ -1406,78 +1520,94 @@ fn game_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         None => "Games".into(),
     };
     let y0 = b.header(top, GAME, &label, Some((today, TEXT_2))) + 14.0;
-    match &m.game {
-        Some(g) => {
-            // Left: the session clock and the break reminder.
-            b.col(0);
-            b.text(Rect::new(b.x, y0, b.w, 50.0), format::clock(now.saturating_sub(g.started_ms) / 1000), TextStyle::BIG, GAME);
-            b.text(Rect::new(b.x, y0 + 50.0, b.w, 20.0), "this session", TextStyle::BODY, TEXT_2);
-            let mut left_end = y0 + 70.0;
-            if m.config.game.break_after_min > 0 {
-                left_end = y0 + 164.0;
-                let left = m.break_due_ms.map(|d| format::clock(d.saturating_sub(now).div_ceil(1000))).unwrap_or_else(|| "—".into());
-                b.text(Rect::new(b.x, y0 + 92.0, b.w, 20.0), format!("Next break reminder in {left}"), TextStyle::SMALL, TEXT_2);
-                b.button_row(y0 + 120.0, vec![("Snooze break 15 min".into(), Btn::Primary(GAME), Action::BreakSnooze)]);
-            }
-            // Then GPU, VRAM, temperature and ping, and the last capture.
-            let y0 = b.side(y0, left_end);
-            let tiles = [
-                ("GPU", m.stats.gpu_pct.map(|v| format!("{v:.0}%"))),
-                ("VRAM", m.stats.vram_mb.map(|v| if v >= 1024 { format!("{:.1}G", v as f32 / 1024.0) } else { format!("{v}M") })),
-                ("TEMP", m.stats.temp_c.map(|v| format!("{v}°"))),
-                ("PING", m.stats.ping_ms.map(|v| format!("{v}ms"))),
-            ];
-            let tw = (b.w - 8.0) / 2.0;
-            for (i, (k, v)) in tiles.iter().enumerate() {
-                let r = Rect::new(b.x + (i % 2) as f32 * (tw + 8.0), y0 + (i / 2) as f32 * 64.0, tw, 56.0);
-                b.rect(r, 8.0, SURFACE_2);
-                b.text(
-                    Rect::new(r.x + 12.0, r.y + 8.0, r.w - 14.0, 14.0),
-                    *k,
-                    TextStyle { size: 10.0, weight: Weight::Regular, mono: true },
-                    LABEL,
-                );
-                b.text(
-                    Rect::new(r.x + 12.0, r.y + 24.0, r.w - 14.0, 24.0),
-                    v.clone().unwrap_or_else(|| "—".into()),
-                    TextStyle { size: 17.0, weight: Weight::Regular, mono: true },
-                    TEXT,
-                );
-            }
-            let y = y0 + 132.0;
-            if let Some(c) = m.captures.first() {
-                b.rect(Rect::new(b.x, y, b.w, 56.0), 10.0, SURFACE_2);
-                b.icon(
-                    if c.kind == CaptureKind::Clip { Icon::Play } else { Icon::Image },
-                    Rect::new(b.x + 14.0, y + 18.0, 20.0, 20.0),
-                    TEXT,
-                );
-                let what = if c.kind == CaptureKind::Clip { "Clip saved" } else { "Screenshot saved" };
-                b.text(Rect::new(b.x + 46.0, y + 8.0, b.w - 46.0 - 80.0, 20.0), what, TextStyle::BODY, TEXT);
-                b.text(
-                    Rect::new(b.x + 46.0, y + 28.0, b.w - 46.0 - 80.0, 18.0),
-                    format::relative(-((now.saturating_sub(c.at_ms) / 1000) as i64)),
-                    TextStyle::MONO_SMALL,
-                    LABEL,
-                );
-                b.button(Rect::new(b.x + b.w - 74.0, y + 6.0, 66.0, 44.0), "Copy", Btn::Secondary, Action::CaptureCopy(0));
-                return (y + 56.0).max(left_end);
-            }
-            (y - 12.0).max(left_end)
+    let Some(g) = &m.game else {
+        let mut games: Vec<(&String, &u64)> = m.playlog.minutes.iter().collect();
+        games.sort_by(|a, b| b.1.cmp(a.1));
+        let mut y = y0;
+        for (i, (exe, mins)) in games.into_iter().enumerate() {
+            let Some(row_y) = b.flow(i, y0, 40.0, 0.0) else { break };
+            y = y.max(row_y + 40.0);
+            b.icon_tile(Rect::new(b.x, row_y + 4.0, 32.0, 32.0), Icon::Game, GAME);
+            b.text(Rect::new(b.x + 44.0, row_y, b.w - 44.0 - 90.0, 40.0), exe.clone(), TextStyle::BODY_MEDIUM, TEXT);
+            b.text_end(Rect::new(b.x + b.w - 90.0, row_y, 90.0, 40.0), format::hours_minutes(*mins), TextStyle::MONO_SMALL, TEXT_2);
         }
-        None => {
-            let mut games: Vec<(&String, &u64)> = m.playlog.minutes.iter().collect();
-            games.sort_by(|a, b| b.1.cmp(a.1));
-            let mut y = y0;
-            for (i, (exe, mins)) in games.into_iter().enumerate() {
-                let Some(row_y) = b.flow(i, y0, 32.0, 0.0) else { break };
-                y = y.max(row_y + 32.0);
-                b.text(Rect::new(b.x, row_y, b.w - 90.0, 32.0), exe.clone(), TextStyle::MONO, TEXT);
-                b.text_end(Rect::new(b.x + b.w - 90.0, row_y, 90.0, 32.0), format::hours_minutes(*mins), TextStyle::MONO_SMALL, TEXT_2);
-            }
-            y
-        }
+        return y;
+    };
+    let breaks = m.config.game.break_after_min > 0;
+    let tiles = [
+        (Icon::Chart, "GPU", m.stats.gpu_pct.map(|v| format!("{v:.0}%"))),
+        (Icon::Grid, "VRAM", m.stats.vram_mb.map(|v| if v >= 1024 { format!("{:.1}G", v as f32 / 1024.0) } else { format!("{v}M") })),
+        (Icon::Thermo, "TEMP", m.stats.temp_c.map(|v| format!("{v}°"))),
+        (Icon::Plug, "PING", m.stats.ping_ms.map(|v| format!("{v}ms"))),
+    ];
+    let capture = m.captures.first();
+    // The stats: 2×2 beside the hero, or one row of four under it.
+    let (per_row, tile_h) = if b.two { (2, 56.0) } else { (4, 56.0) };
+    let rows = tiles.len().div_ceil(per_row) as f32;
+    let tiles_h = rows * (tile_h + 8.0) - 8.0;
+    let right_h = tiles_h + if capture.is_some() { 12.0 + 56.0 } else { 0.0 };
+    let snooze_h = if breaks { 54.0 } else { 0.0 };
+    let hero_h = if b.two { (right_h - snooze_h).max(96.0) } else { 96.0 };
+
+    // Hero: the session clock.
+    b.col(0);
+    let card = Rect::new(b.x, y0, b.w, hero_h);
+    b.hero(card, GAME);
+    b.icon_tile(Rect::new(card.x + 14.0, card.y + 14.0, 30.0, 30.0), Icon::Game, GAME);
+    b.text(Rect::new(card.x + 54.0, card.y + 14.0, card.w - 64.0, 30.0), "this session", TextStyle::SMALL, TEXT_2);
+    b.text(
+        Rect::new(card.x + 16.0, card.bottom() - 56.0, card.w - 32.0, 48.0),
+        format::clock(now.saturating_sub(g.started_ms) / 1000),
+        TextStyle { size: 40.0, weight: Weight::Semibold, mono: true },
+        TEXT,
+    );
+    let mut left_end = card.bottom();
+    if breaks {
+        let left = m.break_due_ms.map(|d| format::clock(d.saturating_sub(now).div_ceil(1000))).unwrap_or_else(|| "—".into());
+        let r = Rect::new(b.x, card.bottom() + 10.0, b.w, 44.0);
+        b.ibutton(r, Some(Icon::Clock), &format!("Break in {left} · snooze"), Btn::Secondary, Action::BreakSnooze);
+        left_end = r.bottom();
     }
+    // Then GPU, VRAM, temperature and ping, and the last capture.
+    let y = b.side(y0, left_end);
+    let gap = 8.0;
+    let tw = (b.w - gap * (per_row as f32 - 1.0)) / per_row as f32;
+    for (i, (icon, k, v)) in tiles.iter().enumerate() {
+        let r = Rect::new(b.x + (i % per_row) as f32 * (tw + gap), y + (i / per_row) as f32 * (tile_h + gap), tw, tile_h);
+        b.rect(r, 12.0, SURFACE_2);
+        b.icon(*icon, Rect::new(r.x + 10.0, r.y + 9.0, 14.0, 14.0), GAME);
+        b.text(Rect::new(r.x + 28.0, r.y + 8.0, r.w - 32.0, 16.0), *k, TextStyle { size: 10.0, weight: Weight::Medium, mono: true }, LABEL);
+        b.text(
+            Rect::new(r.x + 10.0, r.y + 26.0, r.w - 14.0, 24.0),
+            v.clone().unwrap_or_else(|| "—".into()),
+            TextStyle { size: 17.0, weight: Weight::Medium, mono: true },
+            TEXT,
+        );
+    }
+    let mut end = y + tiles_h;
+    if let Some(c) = capture {
+        let y = end + 12.0;
+        b.rect(Rect::new(b.x, y, b.w, 56.0), 12.0, SURFACE_2);
+        b.icon_tile(Rect::new(b.x + 10.0, y + 10.0, 36.0, 36.0), if c.kind == CaptureKind::Clip { Icon::Play } else { Icon::Image }, PORTS);
+        let what = if c.kind == CaptureKind::Clip { "Clip saved" } else { "Screenshot" };
+        b.text(Rect::new(b.x + 56.0, y + 8.0, b.w - 56.0 - 64.0, 20.0), what, TextStyle::BODY, TEXT);
+        b.text(
+            Rect::new(b.x + 56.0, y + 28.0, b.w - 56.0 - 64.0, 18.0),
+            format::relative(-((now.saturating_sub(c.at_ms) / 1000) as i64)),
+            TextStyle::MONO_SMALL,
+            LABEL,
+        );
+        b.icon_button(
+            Rect::new(b.x + b.w - 52.0, y + 6.0, 44.0, 44.0),
+            Icon::Copy,
+            TEXT,
+            Some(SURFACE_3),
+            Some(Action::CaptureCopy(0)),
+            "Copy capture",
+        );
+        end = y + 56.0;
+    }
+    end.max(left_end)
 }
 
 fn captures_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -1528,35 +1658,36 @@ fn privacy_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let y0 = b.header(top, PRIVACY, "Mic & camera", None) + 12.0;
     b.col(0);
     let mut y = y0;
-    for p in m.privacy.iter().take(b.rows(y0, 34.0, 0.0)) {
+    for p in m.privacy.iter().take(b.rows(y0, 44.0, 0.0)) {
         let (icon, what) = match p.device {
-            Device::Microphone => (Icon::Mic, "Microphone"),
+            Device::Microphone => (Icon::Mic, "Mic"),
             Device::Camera => (Icon::Camera, "Camera"),
         };
-        b.icon(icon, Rect::new(b.x, y + 7.0, 18.0, 18.0), PRIVACY);
-        b.text(Rect::new(b.x + 28.0, y, b.w - 28.0 - 70.0, 32.0), format!("{what} · {}", p.app), TextStyle::BODY_MEDIUM, TEXT);
+        b.icon_tile(Rect::new(b.x, y + 2.0, 36.0, 36.0), icon, PRIVACY);
+        b.text(Rect::new(b.x + 48.0, y + 2.0, b.w - 48.0 - 70.0, 20.0), p.app.clone(), TextStyle::BODY_MEDIUM, TEXT);
+        b.text(Rect::new(b.x + 48.0, y + 22.0, b.w - 48.0 - 70.0, 16.0), what, TextStyle::MONO_SMALL, PRIVACY_TEXT);
         b.text_end(
-            Rect::new(b.x + b.w - 70.0, y, 70.0, 32.0),
+            Rect::new(b.x + b.w - 70.0, y, 70.0, 40.0),
             format::clock(now.saturating_sub(p.since_ms) / 1000),
             TextStyle::MONO_SMALL,
             TEXT_2,
         );
-        y += 34.0;
+        y += 44.0;
     }
-    let left_end = y - 2.0;
+    let left_end = y - 4.0;
     let y = b.side(y0, left_end);
     let mut buttons = Vec::new();
     if m.privacy.iter().any(|p| p.device == Device::Microphone) {
-        buttons.push(("Mute mic".to_string(), Btn::Danger, Action::MicMute));
+        buttons.push((Icon::SpeakerMuted, "Mute mic", Btn::Danger, Action::MicMute));
     }
     let dev = m.privacy.first().map(|p| p.device).unwrap_or(Device::Microphone);
-    buttons.push(("Privacy settings".to_string(), Btn::Secondary, Action::PrivacySettings(dev)));
+    buttons.push((Icon::Gear, "Settings", Btn::Secondary, Action::PrivacySettings(dev)));
     if !b.two {
-        return b.button_row(y, buttons);
+        return b.ibutton_row(y, buttons);
     }
     let mut y = y;
     for btn in buttons {
-        y = b.button_row(y, vec![btn]) + 10.0;
+        y = b.ibutton_row(y, vec![btn]) + 10.0;
     }
     (y - 10.0).max(left_end)
 }
@@ -1564,56 +1695,78 @@ fn privacy_slip(m: &Model, b: &mut B, top: f32) -> f32 {
 fn prayer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     use crate::prayer::{hhmm, Prayer};
     let city = format::ellipsize(&m.config.location.city, 28);
-    let y0 = b.header(top, OK, &format!("Jadwal sholat · {city}"), Some((m.config.prayer.method.label().to_string(), TEXT_2))) + 14.0;
+    let y0 = b.header(top, OK, &format!("Sholat · {city}"), Some((m.config.prayer.method.label().to_string(), TEXT_2))) + 14.0;
     let (Some(day), Some(now)) = (m.prayer_day, m.local_minute()) else {
         return b.empty(y0 + 4.0, "Waiting for the clock…");
     };
-    // Left: the next prayer, large.
+    let cell_h = 54.0;
+    let gap = 8.0;
+    let grid_h = 2.0 * cell_h + gap;
+    // Hero: the next prayer, as tall as the times beside (or under) it.
     b.col(0);
-    let left_end = match day.next(now) {
+    let card = Rect::new(b.x, y0, b.w, grid_h);
+    b.hero(card, OK);
+    let next = day.next(now);
+    match next {
         Some((p, t)) => {
-            b.text(Rect::new(b.x, y0, b.w, 16.0), "NEXT", TextStyle::LABEL, LABEL);
-            b.text(Rect::new(b.x, y0 + 18.0, b.w, 52.0), p.name(), TextStyle { size: 36.0, weight: Weight::Semibold, mono: false }, TEXT);
             let left = ((t - now) * 60.0).max(0.0) as u64;
-            b.text(Rect::new(b.x, y0 + 76.0, b.w, 26.0), hhmm(t), TextStyle { size: 20.0, weight: Weight::Medium, mono: true }, OK);
+            b.icon_tile(Rect::new(card.x + 14.0, card.y + 14.0, 30.0, 30.0), Icon::Moon, OK);
+            b.text(Rect::new(card.x + 54.0, card.y + 14.0, card.w - 64.0, 30.0), "Next", TextStyle::SMALL, TEXT_2);
             b.text(
-                Rect::new(b.x, y0 + 104.0, b.w, 20.0),
+                Rect::new(card.x + 16.0, card.y + 50.0, card.w * 0.55, 46.0),
+                p.name(),
+                TextStyle { size: 32.0, weight: Weight::Semibold, mono: false },
+                TEXT,
+            );
+            b.text_end(
+                Rect::new(card.x + card.w * 0.5, card.y + 52.0, card.w * 0.5 - 16.0, 26.0),
+                hhmm(t),
+                TextStyle { size: 22.0, weight: Weight::Semibold, mono: true },
+                OK,
+            );
+            b.text_end(
+                Rect::new(card.x + card.w * 0.5, card.y + 80.0, card.w * 0.5 - 16.0, 18.0),
                 format!("in {}", format::clock(left)),
-                TextStyle { size: 14.0, weight: Weight::Regular, mono: true },
+                TextStyle::MONO_SMALL,
                 TEXT_2,
             );
-            y0 + 124.0
         }
         None => {
-            b.text(Rect::new(b.x, y0, b.w, 44.0), "Isya has passed — see you at Subuh", TextStyle::BODY, TEXT_2);
-            y0 + 44.0
+            b.icon_tile(Rect::new(card.x + 14.0, card.y + 14.0, 30.0, 30.0), Icon::Moon, OK);
+            b.text(Rect::new(card.x + 16.0, card.y + 56.0, card.w - 32.0, 30.0), "Until Subuh", TextStyle::TITLE, TEXT);
         }
-    };
-    // Then every time today.
-    let gy = b.side(y0, left_end);
-    let next = day.next(now).map(|(p, _)| p);
-    let cols = 3;
-    let gap = 8.0;
-    let w = (b.w - gap * (cols as f32 - 1.0)) / cols as f32;
-    for (i, p) in Prayer::ALL.iter().enumerate() {
-        let r = Rect::new(b.x + (i % cols) as f32 * (w + gap), gy + (i / cols) as f32 * (54.0 + gap), w, 54.0);
-        let active = Some(*p) == next;
-        b.rect(r, 10.0, if active { Color::rgb(0x1F3A30) } else { SURFACE_2 });
-        b.text(
-            Rect::new(r.x + 12.0, r.y + 7.0, r.w - 14.0, 18.0),
-            p.name(),
-            TextStyle { size: 11.0, weight: Weight::Medium, mono: true },
-            if active { OK } else { LABEL },
-        );
-        let t = day.get(*p).map(hhmm).unwrap_or_else(|| "—".into());
-        b.text(
-            Rect::new(r.x + 12.0, r.y + 25.0, r.w - 14.0, 22.0),
-            t,
-            TextStyle { size: 15.0, weight: Weight::Regular, mono: true },
-            if active { OK } else { TEXT },
-        );
     }
-    (gy + 2.0 * (54.0 + gap) + 54.0).max(left_end)
+    // Then every time today: four on top, three below, each row full width.
+    let gy = b.side(y0, card.bottom());
+    let next_p = next.map(|(p, _)| p);
+    for (row, items) in [&Prayer::ALL[..4], &Prayer::ALL[4..]].into_iter().enumerate() {
+        let n = items.len() as f32;
+        let w = (b.w - gap * (n - 1.0)) / n;
+        for (i, p) in items.iter().enumerate() {
+            let r = Rect::new(b.x + i as f32 * (w + gap), gy + row as f32 * (cell_h + gap), w, cell_h);
+            let active = Some(*p) == next_p;
+            if active {
+                b.prims.extend(soft::raised_grad(r, 12.0, accent_light(OK), accent_deep(OK), 2.0));
+            } else {
+                b.rect(r, 12.0, SURFACE_2);
+            }
+            let (k, v) = if active { (SURFACE, SURFACE) } else { (LABEL, TEXT) };
+            b.text(
+                Rect::new(r.x + 10.0, r.y + 7.0, r.w - 12.0, 16.0),
+                p.name(),
+                TextStyle { size: 11.0, weight: Weight::Medium, mono: false },
+                k,
+            );
+            let t = day.get(*p).map(hhmm).unwrap_or_else(|| "—".into());
+            b.text(
+                Rect::new(r.x + 10.0, r.y + 25.0, r.w - 12.0, 22.0),
+                t,
+                TextStyle { size: 15.0, weight: Weight::Semibold, mono: true },
+                v,
+            );
+        }
+    }
+    (gy + grid_h).max(card.bottom())
 }
 
 fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -1645,9 +1798,9 @@ fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             b.rect(Rect::new(tx + w + 2.0, y + 12.0, 2.0, 20.0), 1.0, OK);
         }
         y += 54.0;
-        y = b.button_row(
+        y = b.ibutton_row(
             y,
-            vec![("Add".into(), Btn::Primary(OK), Action::TodoSubmit), ("Cancel".into(), Btn::Secondary, Action::TodoCancel)],
+            vec![(Icon::Check, "Add", Btn::Primary(OK), Action::TodoSubmit), (Icon::Cross, "Cancel", Btn::Secondary, Action::TodoCancel)],
         );
         b.text(Rect::new(b.x, y + 8.0, b.w, 16.0), "Enter adds · Esc cancels", TextStyle::MONO_SMALL, LABEL);
         y += 30.0;
@@ -1715,12 +1868,12 @@ fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     // Add and Clear along the bottom (of the left column).
     b.col(0);
     let left_end = list_y0 + shown.min(per_col.max(1)) as f32 * 42.0 + if list.len() > shown && !b.two { 26.0 } else { 0.0 };
-    let mut buttons = vec![("Add task".to_string(), Btn::Primary(OK), Action::TodoAdd)];
+    let mut buttons = vec![(Icon::Plus, "Add task", Btn::Primary(OK), Action::TodoAdd)];
     if m.todos.iter().any(|t| t.done) {
-        buttons.push(("Clear done".to_string(), Btn::Secondary, Action::TodoClearDone));
+        buttons.push((Icon::Check, "Clear done", Btn::Secondary, Action::TodoClearDone));
     }
     let by = b.pin(left_end + 8.0, 44.0);
-    b.button_row(by, buttons).max(bottom)
+    b.ibutton_row(by, buttons).max(bottom)
 }
 
 /// "#RRGGBB" → colour, or a default per feed.
@@ -1748,8 +1901,32 @@ fn calendar_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let mut y = b.header(top, CODER, &format!("Calendar · {day} {}", months[month as usize - 1]), None) + 12.0;
     let y0 = y;
     b.col(0);
+    let today_count = m.calendar.iter().filter(|e| (e.start + offset).div_euclid(86_400) == today).count();
+    // Wide: a hero with today's date above the week.
+    if b.two {
+        let card = Rect::new(b.x, y, b.w, 96.0);
+        b.hero(card, CODER);
+        b.text(
+            Rect::new(card.x + 18.0, card.y + 10.0, 80.0, 76.0),
+            day.to_string(),
+            TextStyle { size: 52.0, weight: Weight::Semibold, mono: false },
+            TEXT,
+        );
+        let names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+        let tx = card.x + 104.0;
+        b.text(Rect::new(tx, card.y + 20.0, card.w - 118.0, 24.0), names[weekday(today) as usize], TextStyle::TITLE, TEXT);
+        b.text(Rect::new(tx, card.y + 44.0, card.w - 118.0, 18.0), months[month as usize - 1], TextStyle::SMALL, TEXT_2);
+        let line = match today_count {
+            0 => "Free today".to_string(),
+            1 => "1 event today".to_string(),
+            n => format!("{n} events today"),
+        };
+        b.icon(Icon::Calendar, Rect::new(tx, card.y + 67.0, 14.0, 14.0), CODER);
+        b.text(Rect::new(tx + 20.0, card.y + 64.0, card.w - 138.0, 20.0), line, TextStyle::MONO_SMALL, CODER);
+        y = card.bottom() + 12.0;
+    }
 
-    // This week, Monday to Sunday: today pressed in, dots for busy days.
+    // This week, Monday to Sunday: today lit, dots for busy days.
     let monday = today - weekday(today) as i64;
     let gap = 6.0;
     let cw = (b.w - gap * 6.0) / 7.0;
@@ -1758,7 +1935,7 @@ fn calendar_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         let r = Rect::new(b.x + i as f32 * (cw + gap), y, cw, 54.0);
         let is_today = d == today;
         if is_today {
-            b.prims.extend(soft::well(r, 12.0));
+            b.prims.extend(soft::raised_grad(r, 12.0, accent_light(CODER), accent_deep(CODER), 2.0));
         } else {
             b.prims.extend(soft::raised(r, 12.0, SURFACE, 2.0));
         }
@@ -1771,14 +1948,20 @@ fn calendar_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             wrap: false,
         };
         let name = ["M", "T", "W", "T", "F", "S", "S"][i as usize];
-        b.prims.push(center(name.into(), r.y + 5.0, 14.0, TextStyle { size: 10.0, weight: Weight::Medium, mono: true }, LABEL));
+        b.prims.push(center(
+            name.into(),
+            r.y + 5.0,
+            14.0,
+            TextStyle { size: 10.0, weight: Weight::Medium, mono: true },
+            if is_today { SURFACE } else { LABEL },
+        ));
         let num = civil_from_days(d).2.to_string();
         b.prims.push(center(
             num,
             r.y + 19.0,
             20.0,
             TextStyle { size: 15.0, weight: Weight::Semibold, mono: false },
-            if is_today { CODER } else { TEXT },
+            if is_today { SURFACE } else { TEXT },
         ));
         let busy: Vec<usize> = {
             let mut f: Vec<usize> = m.calendar.iter().filter(|e| (e.start + offset).div_euclid(86_400) == d).map(|e| e.feed).collect();
@@ -1792,25 +1975,16 @@ fn calendar_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             b.prims.push(Prim::Circle { cx, cy: r.y + 45.0, r: 2.2, fill: Some(feed_color(m, feed)), stroke: None });
         }
     }
-    y += 66.0;
-    // Under the week: today's count.
-    let today_count = m.calendar.iter().filter(|e| (e.start + offset).div_euclid(86_400) == today).count();
-    let line = match today_count {
-        0 => "Nothing today".to_string(),
-        1 => "1 event today".to_string(),
-        n => format!("{n} events today"),
-    };
-    b.text(Rect::new(b.x, y, b.w, 20.0), line, TextStyle::BODY_MEDIUM, TEXT_2);
     // Then the events themselves.
-    let left_end = y + 20.0;
-    y = b.side(y0, left_end);
+    let left_end = y + 54.0;
+    y = b.side(y0, left_end - 4.0);
 
     if m.config.calendar.feeds.is_empty() {
         b.text(Rect::new(b.x, y, b.w, 20.0), "No calendar linked yet.", TextStyle::BODY, TEXT_2);
-        b.text(Rect::new(b.x, y + 20.0, b.w, 20.0), "Add Google Calendar's secret iCal address in Settings.", TextStyle::SMALL, LABEL);
+        b.text(Rect::new(b.x, y + 20.0, b.w, 20.0), "Paste an iCal address in Settings.", TextStyle::SMALL, LABEL);
         y += 50.0;
         return b
-            .button_row(y, vec![("Link a calendar".into(), Btn::Primary(CODER), Action::OpenSettings(ModuleId::Calendar))])
+            .ibutton_row(y, vec![(Icon::Plus, "Link a calendar", Btn::Primary(CODER), Action::OpenSettings(ModuleId::Calendar))])
             .max(left_end);
     }
     // Upcoming, grouped by day.
@@ -1876,7 +2050,7 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let mut y = b.header(top, GAME, "Markets", Some((format!("{} symbols", list.len()), TEXT_2))) + 12.0;
     if list.is_empty() {
         y = b.empty(y, "Your watchlist is empty.") + 10.0;
-        return b.button_row(y, vec![("Add symbols".into(), Btn::Primary(GAME), Action::OpenSettings(ModuleId::Finance))]);
+        return b.ibutton_row(y, vec![(Icon::Plus, "Add symbols", Btn::Primary(GAME), Action::OpenSettings(ModuleId::Finance))]);
     }
     let y0 = y;
     let capacity = b.rows(y0, 62.0, 20.0) * b.cols();
@@ -1986,75 +2160,72 @@ fn weather_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     y += 16.0;
     let y0 = y;
     b.col(0);
+    let left_end;
     match &m.weather {
         Some(w) => {
-            // Hero: the sky in a well, the temperature, and what it feels like.
-            b.prims.extend(soft::well_circle(b.x + 34.0, y + 34.0, 34.0));
-            b.icon(condition_icon(w.condition), Rect::new(b.x + 16.0, y + 16.0, 36.0, 36.0), PORTS);
-            let tx = b.x + 84.0;
+            // Hero: the sky, the temperature and what it is like.
+            let card = Rect::new(b.x, y, b.w, 96.0);
+            b.hero(card, PORTS);
+            b.icon_tile(Rect::new(card.x + 14.0, card.y + 18.0, 60.0, 60.0), condition_icon(w.condition), PORTS);
+            let tx = card.x + 88.0;
             b.text(
-                Rect::new(tx, y + 2.0, 120.0, 44.0),
+                Rect::new(tx, card.y + 12.0, 120.0, 46.0),
                 format!("{:.0}°", w.temp_c),
-                TextStyle { size: 38.0, weight: Weight::Medium, mono: false },
+                TextStyle { size: 40.0, weight: Weight::Semibold, mono: false },
                 TEXT,
             );
-            b.text(Rect::new(tx, y + 44.0, b.w - 84.0, 22.0), w.description.clone(), TextStyle::BODY_MEDIUM, TEXT);
+            b.text(Rect::new(tx, card.y + 58.0, card.w - 88.0 - 90.0, 22.0), w.description.clone(), TextStyle::BODY_MEDIUM, TEXT_2);
             if let (Some(lo), Some(hi)) = (w.min_c, w.max_c) {
                 b.text_end(
-                    Rect::new(b.x + b.w - 120.0, y + 6.0, 120.0, 20.0),
-                    format!("↓{lo:.0}°  ↑{hi:.0}°"),
+                    Rect::new(card.right() - 110.0, card.y + 22.0, 96.0, 20.0),
+                    format!("↓{lo:.0}° ↑{hi:.0}°"),
                     TextStyle::MONO_SMALL,
                     TEXT_2,
                 );
             }
             if let Some(r) = w.rain_chance {
-                b.text_end(
-                    Rect::new(b.x + b.w - 120.0, y + 26.0, 120.0, 20.0),
-                    format!("rain {r}%"),
-                    TextStyle::MONO_SMALL,
-                    if r >= 60 { PORTS } else { TEXT_2 },
-                );
+                let c = if r >= 60 { PORTS } else { TEXT_2 };
+                let tw = b.tm.width(&format!("{r}%"), TextStyle::MONO_SMALL).ceil();
+                b.text_end(Rect::new(card.right() - 110.0, card.y + 48.0, 96.0, 20.0), format!("{r}%"), TextStyle::MONO_SMALL, c);
+                b.icon(Icon::Drop, Rect::new(card.right() - 14.0 - tw - 18.0, card.y + 51.0, 14.0, 14.0), c);
             }
-            y += 80.0;
-            // Three small readings in wells.
-            let stats: Vec<(String, String)> = [
-                w.feels_c.map(|f| ("FEELS".to_string(), format!("{f:.0}°"))),
-                w.humidity.map(|h| ("HUMIDITY".to_string(), format!("{h}%"))),
-                w.wind_kmh.map(|k| ("WIND".to_string(), format!("{k:.0} km/h"))),
+            y = card.bottom() + 10.0;
+            // Small readings: an icon and a value each.
+            let stats: Vec<(Icon, String)> = [
+                w.feels_c.map(|f| (Icon::Thermo, format!("{f:.0}°"))),
+                w.humidity.map(|h| (Icon::Drop, format!("{h}%"))),
+                w.wind_kmh.map(|k| (Icon::Wind, format!("{k:.0} km/h"))),
             ]
             .into_iter()
             .flatten()
             .collect();
             if !stats.is_empty() {
                 let n = stats.len() as f32;
-                let gap = 10.0;
+                let gap = 8.0;
                 let sw = (b.w - gap * (n - 1.0)) / n;
-                for (i, (k, v)) in stats.into_iter().enumerate() {
-                    let r = Rect::new(b.x + i as f32 * (sw + gap), y, sw, 50.0);
+                for (i, (icon, v)) in stats.into_iter().enumerate() {
+                    let r = Rect::new(b.x + i as f32 * (sw + gap), y, sw, 44.0);
                     b.prims.extend(soft::well(r, 12.0));
+                    b.icon(icon, Rect::new(r.x + 12.0, r.y + 13.0, 18.0, 18.0), PORTS);
                     b.text(
-                        Rect::new(r.x + 12.0, r.y + 7.0, r.w - 16.0, 14.0),
-                        k,
-                        TextStyle { size: 10.0, weight: Weight::Medium, mono: true },
-                        LABEL,
-                    );
-                    b.text(
-                        Rect::new(r.x + 12.0, r.y + 22.0, r.w - 16.0, 22.0),
+                        Rect::new(r.x + 38.0, r.y, r.w - 42.0, 44.0),
                         v,
                         TextStyle { size: 15.0, weight: Weight::Medium, mono: false },
                         TEXT,
                     );
                 }
-                y += 60.0;
+                y += 44.0 + 12.0;
             }
-            // The next hours as raised cards.
+            left_end = y - 12.0;
+            // Then the next hours as raised cards.
+            y = b.side(y0, left_end - 4.0);
             if !w.next.is_empty() {
                 let n = w.next.len().min(4);
-                let gap = 10.0;
+                let gap = 8.0;
                 let tw = (b.w - gap * (n as f32 - 1.0)) / n as f32;
                 for (i, slot) in w.next.iter().take(n).enumerate() {
                     let r = Rect::new(b.x + i as f32 * (tw + gap), y, tw, 74.0);
-                    b.raised(r, 14.0, SURFACE);
+                    b.prims.extend(soft::raised_grad(r, 14.0, SURFACE_TOP, SURFACE, 3.0));
                     let center = |t: String, yy: f32, h: f32, style: TextStyle, c: Color| Prim::Text {
                         rect: Rect::new(r.x, yy, r.w, h),
                         text: t,
@@ -2070,7 +2241,7 @@ fn weather_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                         TextStyle { size: 10.5, weight: Weight::Regular, mono: true },
                         LABEL,
                     ));
-                    b.icon(condition_icon(slot.condition), Rect::new(r.x + r.w / 2.0 - 10.0, r.y + 25.0, 20.0, 20.0), TEXT_2);
+                    b.icon(condition_icon(slot.condition), Rect::new(r.x + r.w / 2.0 - 10.0, r.y + 25.0, 20.0, 20.0), PORTS);
                     b.prims.push(center(
                         format!("{:.0}°", slot.temp_c),
                         r.y + 48.0,
@@ -2085,11 +2256,10 @@ fn weather_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         None => {
             let msg = if offline { "No connection. Weather loads once you're online." } else { "Loading weather…" };
             y = b.empty(y, msg) + 14.0;
+            left_end = y;
         }
     }
     // Then the early warnings.
-    let left_end = y - 12.0;
-    y = b.side(y0, y - 16.0);
     let alerts = m.relevant_alerts(3);
     let count = (!alerts.is_empty()).then(|| (alerts.len().to_string(), MEDIA));
     y = b.header(y, if alerts.is_empty() { OK } else { MEDIA }, "Early warnings", count) + 10.0;
@@ -2328,7 +2498,9 @@ mod tests {
             let slip_h = s.size.h - TAB_ROW_H - 8.0;
             for p in &s.prims {
                 let r = match p {
-                    Prim::RoundRect { rect, .. } | Prim::Text { rect, .. } | Prim::Image { rect, .. } => *rect,
+                    Prim::RoundRect { rect, .. } | Prim::Text { rect, .. } | Prim::Image { rect, .. } | Prim::Gradient { rect, .. } => {
+                        *rect
+                    }
                     _ => continue,
                 };
                 // The surface itself spans everything; the tabs sit below.

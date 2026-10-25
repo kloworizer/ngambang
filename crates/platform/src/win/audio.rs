@@ -59,9 +59,12 @@ impl AudioWorker {
             };
             st.publish(&bus);
             let mut peaks = false;
+            // The meters as last sent, in twentieths: nothing is sent (and
+            // nothing redrawn) until one visibly moves.
+            let mut shown: Vec<(u32, u8)> = Vec::new();
             loop {
                 let msg = if peaks {
-                    match rx.recv_timeout(Duration::from_millis(33)) {
+                    match rx.recv_timeout(Duration::from_millis(50)) {
                         Ok(m) => Some(m),
                         Err(RecvTimeoutError::Timeout) => None,
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -73,7 +76,13 @@ impl AudioWorker {
                     }
                 };
                 let Some(msg) = msg else {
-                    bus.send(Event::Peaks(st.peaks()));
+                    let now: Vec<(u32, f32)> =
+                        st.peaks().into_iter().map(|(pid, p)| (pid, (p.clamp(0.0, 1.0) * 20.0).round() / 20.0)).collect();
+                    let steps: Vec<(u32, u8)> = now.iter().map(|(pid, p)| (*pid, (p * 20.0) as u8)).collect();
+                    if steps != shown {
+                        shown = steps;
+                        bus.send(Event::Peaks(now));
+                    }
                     continue;
                 };
                 let r = match msg {

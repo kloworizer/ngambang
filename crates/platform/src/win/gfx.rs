@@ -35,10 +35,27 @@ pub struct Painter {
     mono: HSTRING,
     formats: RefCell<HashMap<(u32, Weight, bool, u8), IDWriteTextFormat>>,
     brushes: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
+    gradients: RefCell<HashMap<u64, ID2D1LinearGradientBrush>>,
+    /// Laid-out text, so redrawing a scene (every second while it is open)
+    /// doesn't lay out the same strings again.
+    layouts: RefCell<HashMap<LayoutKey, IDWriteTextLayout>>,
+    /// Measured widths, for layout passes.
+    widths: RefCell<HashMap<(String, u32, Weight, bool), f32>>,
     /// The last few album arts as bitmaps, newest last.
     images: RefCell<Vec<(u64, ID2D1Bitmap1)>>,
     stroke: ID2D1StrokeStyle,
 }
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct LayoutKey {
+    text: String,
+    style: (u32, Weight, bool, u8),
+    wrap: bool,
+    size: (u32, u32),
+}
+
+/// How many text layouts to keep before starting over.
+const LAYOUT_CACHE: usize = 384;
 
 fn create_d3d(driver: D3D_DRIVER_TYPE) -> Result<ID3D11Device> {
     let mut device = None;
@@ -76,6 +93,10 @@ impl Gfx {
     pub fn draw(&self, dc: &ID2D1DeviceContext, prims: &[Prim]) -> Result<()> {
         self.paint.draw(dc, prims)
     }
+
+    pub fn trim(&self) {
+        self.paint.trim();
+    }
 }
 
 impl Painter {
@@ -104,6 +125,9 @@ impl Painter {
                 mono,
                 formats: RefCell::new(HashMap::new()),
                 brushes: RefCell::new(HashMap::new()),
+                gradients: RefCell::new(HashMap::new()),
+                layouts: RefCell::new(HashMap::new()),
+                widths: RefCell::new(HashMap::new()),
                 images: RefCell::new(Vec::new()),
                 stroke: stroke.cast()?,
             })
@@ -151,6 +175,70 @@ impl Painter {
         let [r, g, b, a] = c.to_f32();
         let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r, g, b, a }, None)? };
         self.brushes.borrow_mut().insert(c.0, brush.clone());
+        Ok(brush)
+    }
+
+    fn layout(&self, text: &str, style: TextStyle, align: Align, wrap: bool, w: f32, h: f32) -> Result<IDWriteTextLayout> {
+        let key = LayoutKey {
+            text: text.to_string(),
+            style: ((style.size * 10.0) as u32, style.weight, style.mono, align as u8),
+            wrap,
+            size: (w.to_bits(), h.to_bits()),
+        };
+        if let Some(l) = self.layouts.borrow().get(&key) {
+            return Ok(l.clone());
+        }
+        let format = self.format(style, align)?;
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let layout = unsafe {
+            let layout = self.dwrite.CreateTextLayout(&units, &format, w, h)?;
+            layout.SetWordWrapping(if wrap { DWRITE_WORD_WRAPPING_WRAP } else { DWRITE_WORD_WRAPPING_NO_WRAP })?;
+            layout.SetParagraphAlignment(if wrap { DWRITE_PARAGRAPH_ALIGNMENT_NEAR } else { DWRITE_PARAGRAPH_ALIGNMENT_CENTER })?;
+            layout
+        };
+        let mut all = self.layouts.borrow_mut();
+        if all.len() >= LAYOUT_CACHE {
+            all.clear();
+        }
+        all.insert(key, layout.clone());
+        Ok(layout)
+    }
+
+    /// Let go of cached layouts, brushes and pictures (when the island rests).
+    pub fn trim(&self) {
+        self.layouts.borrow_mut().clear();
+        self.widths.borrow_mut().clear();
+        self.gradients.borrow_mut().clear();
+        self.images.borrow_mut().clear();
+    }
+
+    /// A two-stop linear gradient brush, kept per colour pair; the caller
+    /// sets its start and end points.
+    fn gradient(&self, dc: &ID2D1DeviceContext, from: Color, to: Color) -> Result<ID2D1LinearGradientBrush> {
+        let key = ((from.0 as u64) << 32) | to.0 as u64;
+        if let Some(b) = self.gradients.borrow().get(&key) {
+            return Ok(b.clone());
+        }
+        let stop = |position: f32, c: Color| {
+            let [r, g, b, a] = c.to_f32();
+            D2D1_GRADIENT_STOP { position, color: D2D1_COLOR_F { r, g, b, a } }
+        };
+        let brush = unsafe {
+            let stops = dc.CreateGradientStopCollection(
+                &[stop(0.0, from), stop(1.0, to)],
+                D2D1_COLOR_SPACE_SRGB,
+                D2D1_COLOR_SPACE_SRGB,
+                D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                D2D1_EXTEND_MODE_CLAMP,
+                D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT,
+            )?;
+            dc.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES::default(), None, &stops)?
+        };
+        let mut all = self.gradients.borrow_mut();
+        if all.len() > 64 {
+            all.clear();
+        }
+        all.insert(key, brush.clone());
         Ok(brush)
     }
 
@@ -234,6 +322,14 @@ impl Painter {
                             dc.FillGeometry(&geo, &self.brush(dc, *fill)?, None);
                         }
                     }
+                    Prim::Gradient { rect, radius, from, to, diagonal } => {
+                        let brush = self.gradient(dc, *from, *to)?;
+                        let end = if *diagonal { Point::new(rect.right(), rect.bottom()) } else { Point::new(rect.x, rect.bottom()) };
+                        brush.SetStartPoint(pt(Point::new(rect.x, rect.y)));
+                        brush.SetEndPoint(pt(end));
+                        let rr = D2D1_ROUNDED_RECT { rect: rf(rect.x, rect.y, rect.w, rect.h), radiusX: *radius, radiusY: *radius };
+                        dc.FillRoundedRectangle(&rr, &brush);
+                    }
                     Prim::Image { rect, art, radius } => {
                         if art.w == 0 || art.h == 0 || art.pixels.len() < (art.w * art.h * 4) as usize {
                             continue;
@@ -259,15 +355,7 @@ impl Painter {
                         if text.is_empty() || rect.w <= 1.0 || rect.h <= 1.0 {
                             continue;
                         }
-                        let format = self.format(*style, *align)?;
-                        let w: Vec<u16> = text.encode_utf16().collect();
-                        let layout = self.dwrite.CreateTextLayout(&w, &format, rect.w, rect.h)?;
-                        layout.SetWordWrapping(if *wrap { DWRITE_WORD_WRAPPING_WRAP } else { DWRITE_WORD_WRAPPING_NO_WRAP })?;
-                        layout.SetParagraphAlignment(if *wrap {
-                            DWRITE_PARAGRAPH_ALIGNMENT_NEAR
-                        } else {
-                            DWRITE_PARAGRAPH_ALIGNMENT_CENTER
-                        })?;
+                        let layout = self.layout(text, *style, *align, *wrap, rect.w, rect.h)?;
                         dc.DrawTextLayout(
                             pt(Point::new(rect.x, rect.y)),
                             &layout,
@@ -290,6 +378,10 @@ impl TextMeasure for Gfx {
 
 impl TextMeasure for Painter {
     fn width(&self, text: &str, style: TextStyle) -> f32 {
+        let key = (text.to_string(), (style.size * 10.0) as u32, style.weight, style.mono);
+        if let Some(w) = self.widths.borrow().get(&key) {
+            return *w;
+        }
         let measure = || -> Result<f32> {
             let format = self.format(style, Align::Start)?;
             let w: Vec<u16> = text.encode_utf16().collect();
@@ -300,7 +392,13 @@ impl TextMeasure for Painter {
                 Ok(m.widthIncludingTrailingWhitespace)
             }
         };
-        measure().unwrap_or_else(|_| ngambang_core::view::ApproxMeasure.width(text, style))
+        let w = measure().unwrap_or_else(|_| ngambang_core::view::ApproxMeasure.width(text, style));
+        let mut all = self.widths.borrow_mut();
+        if all.len() >= LAYOUT_CACHE * 2 {
+            all.clear();
+        }
+        all.insert(key, w);
+        w
     }
 }
 

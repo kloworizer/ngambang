@@ -586,6 +586,20 @@ impl App {
             Some(_) if self.dragging => Anim::None,
             // A tag arriving on its own (not a hover summary) pops up.
             Some(prev) if prev.kind != scene.kind && scene.kind == SceneKind::Tag && !self.model.hover_tag => Anim::Pop,
+            // Slips slide out of the docked edge and back into it.
+            Some(prev) if !matches!(prev.kind, SceneKind::Slip(_)) && matches!(scene.kind, SceneKind::Slip(_)) => {
+                Anim::Drawer { open: true, from: toward_edge(edge) }
+            }
+            Some(prev) if matches!(prev.kind, SceneKind::Slip(_)) && !matches!(scene.kind, SceneKind::Slip(_)) => {
+                Anim::Drawer { open: false, from: toward_edge(edge) }
+            }
+            // Flipping slips: slide in the order of the tabs.
+            Some(Scene { kind: SceneKind::Slip(a), .. }) if scene.kind != SceneKind::Slip(*a) => {
+                let tabs = self.model.available_slips();
+                let pos = |m: ModuleId| tabs.iter().position(|t| *t == m).unwrap_or(0) as i32;
+                let to = if let SceneKind::Slip(b) = scene.kind { pos(b) } else { 0 };
+                Anim::Flip { dir: if to >= pos(*a) { 1.0 } else { -1.0 } }
+            }
             Some(prev) if prev.kind != scene.kind => Anim::Morph,
             Some(_) if scene.kind == SceneKind::Tag && tag_text.is_some() && tag_text != self.last_tag => Anim::Swap,
             Some(_) => Anim::None,
@@ -640,6 +654,10 @@ impl App {
                 self.scene = Some(scene);
             }
         }
+    }
+
+    fn reduce(&self) -> bool {
+        self.reduce_motion || self.model.config.motion.reduce
     }
 
     fn recreate_device(&mut self) -> Result<()> {
@@ -1218,6 +1236,7 @@ impl App {
                         let _ = KillTimer(Some(self.hwnd), id);
                     }
                     if matches!(self.model.state, IslandState::Orb | IslandState::Seam | IslandState::Hidden) {
+                        self.gfx.trim();
                         trim_memory();
                     }
                 } else if id == TIMER_MIDNIGHT {
@@ -1259,6 +1278,7 @@ impl App {
                     let moved = (((pt.x - p.screen.x).pow(2) + (pt.y - p.screen.y).pow(2)) as f32).sqrt();
                     if p.draggable && moved > DRAG_THRESHOLD * self.scale {
                         self.dragging = true;
+                        let _ = self.renderer.press(None, true);
                         unsafe { SetCursor(LoadCursorW(None, IDC_SIZEALL).ok()) };
                         self.drag_to_cursor();
                     }
@@ -1305,6 +1325,13 @@ impl App {
                         unsafe {
                             let _ = GetCursorPos(&mut screen);
                         }
+                        // A control (not the island itself) dims while held.
+                        if action.as_ref().is_some_and(|a| *a != Action::ToggleSlips) {
+                            if let Some(h) = self.scene.as_ref().and_then(|s| s.hit_at(x, y)) {
+                                let r = h.rect.translate(self.scene_rect.x, self.scene_rect.y);
+                                let _ = self.renderer.press(Some((r, (r.h / 2.0).min(12.0))), self.reduce());
+                            }
+                        }
                         self.press = Some(Press { action, screen, draggable });
                         unsafe { SetCapture(self.hwnd) };
                         self.render();
@@ -1324,8 +1351,17 @@ impl App {
                     self.finish_drag();
                 } else if self.slider.take().is_some() {
                 } else if let Some(p) = self.press.take() {
+                    let _ = self.renderer.press(None, self.reduce());
                     if let Some(HitKind::Click(a)) = self.hit(x, y) {
                         if Some(&a) == p.action.as_ref() {
+                            // A ripple from where it was clicked.
+                            if a != Action::ToggleSlips {
+                                if let Some(h) = self.scene.as_ref().and_then(|s| s.hit_at(x, y)) {
+                                    let r = h.rect.translate(self.scene_rect.x, self.scene_rect.y);
+                                    let at = (x + self.scene_rect.x, y + self.scene_rect.y);
+                                    let _ = self.renderer.ripple(r, (r.h / 2.0).min(12.0), at, self.reduce());
+                                }
+                            }
                             self.dispatch(Event::Click(a));
                         }
                     }
@@ -1547,6 +1583,16 @@ fn trim_memory() {
     use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
     unsafe {
         let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
+/// A unit step from the island towards the edge it is docked to.
+fn toward_edge(edge: Edge) -> (f32, f32) {
+    match edge {
+        Edge::Left => (-1.0, 0.0),
+        Edge::Right => (1.0, 0.0),
+        Edge::Top => (0.0, -1.0),
+        Edge::Bottom => (0.0, 1.0),
     }
 }
 
