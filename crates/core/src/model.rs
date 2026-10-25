@@ -485,6 +485,8 @@ pub enum Event {
     },
     /// Another window became the foreground (the user clicked elsewhere).
     OutsideFocus,
+    /// The game's process has exited: end the session now, not after the grace period.
+    GameExited,
     /// Local wall clock, sent at start, at midnight and after time changes.
     Clock {
         year: i32,
@@ -963,6 +965,11 @@ impl Model {
                 }
             }
             Event::Timer(TimerId::GameGrace) => self.end_game(fx),
+            Event::GameExited => {
+                if self.game.is_some() && self.fullscreen != Fullscreen::Game {
+                    self.end_game(fx);
+                }
+            }
             Event::Timer(TimerId::Prayer) => self.prayer_alerts(fx),
             Event::Sample(_) => {}
 
@@ -2144,6 +2151,18 @@ mod tests {
         let fx = m.update(260_000, Event::Timer(TimerId::GameGrace));
         assert!(fx.contains(&Effect::GameEnded));
         assert_eq!(m.playlog.minutes["game.exe"], 4);
+    }
+
+    #[test]
+    fn closing_the_game_ends_the_session_at_once() {
+        let mut m = model();
+        m.update(0, Event::Fullscreen { active: true, exe: "game.exe".into(), signals: GPU });
+        m.update(120_000, Event::Fullscreen { active: false, exe: String::new(), signals: Signals::default() });
+        assert!(m.game.is_some(), "alt-tab grace");
+        let fx = m.update(121_000, Event::GameExited);
+        assert!(m.game.is_none());
+        assert!(fx.contains(&Effect::GameEnded));
+        assert_eq!(m.playlog.minutes["game.exe"], 2);
     }
 
     #[test]

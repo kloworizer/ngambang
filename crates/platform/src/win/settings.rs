@@ -45,11 +45,11 @@ const ID_CANCEL: usize = 2; // IDCANCEL: Esc
 const ID_OPEN_FILE: usize = 3;
 const ID_CITY: usize = 10;
 const ID_LOCATE: usize = 11;
-const ID_CHECK_UPDATE: usize = 12;
 const ID_MODULE_UP: usize = 20;
 const ID_MODULE_DOWN: usize = 21;
 const ID_FEED_ADD: usize = 30;
 const ID_FEED_REMOVE: usize = 31;
+const ID_FEED_UPDATE: usize = 32;
 const ID_SEARCH: usize = 40;
 const ID_RESULTS: usize = 41;
 const ID_WATCH_ADD: usize = 42;
@@ -637,20 +637,18 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
     b.hint("Weather by Open-Meteo; warnings from GDACS and USGS. Nothing is fetched while offline.");
     b.section("UPDATES");
     let update_check = b.check("Check GitHub for new versions once a day", form.update_check);
-    let y = b.y;
-    b.button_at("Check for updates now", X0, y, 200, ID_CHECK_UPDATE, false);
-    b.y += 42;
+    b.hint("To check now, right-click the orb or the tray icon: Check for updates.");
 
     // Calendar
     b.start_page(7);
     b.section("LINKED CALENDARS");
-    b.hint("In Google Calendar: Settings ▸ your calendar ▸ Integrate calendar ▸ \"Secret address in iCal format\". Outlook and iCloud links work too.");
+    b.hint("In Google Calendar: Settings ▸ your calendar ▸ Integrate calendar ▸ \"Secret address in iCal format\". Pick a calendar below to edit it.");
     let feeds = b.listview(X0, CW, 96, false, &[("Calendar", 150), ("Colour", 70), ("Address", CW - 230)]);
     let feed_name = b.edit("Name", "");
     let feed_url = b.edit("Secret iCal address", "");
     let colors: Vec<String> = CALENDAR_COLORS.iter().map(|c| c.0.to_string()).collect();
     let feed_color = b.combo("Colour", &colors, form.calendar_feeds.len() % CALENDAR_COLORS.len(), 0);
-    b.buttons(&[("Add calendar", ID_FEED_ADD), ("Remove selected", ID_FEED_REMOVE)]);
+    b.buttons(&[("Add", ID_FEED_ADD), ("Save changes", ID_FEED_UPDATE), ("Remove", ID_FEED_REMOVE)]);
     b.section("REMINDERS");
     let cal_reminder = b.edit("Remind me (minutes before)", &form.calendar_reminder);
     let cal_days = b.edit("Days ahead in the slip", &form.calendar_days);
@@ -923,15 +921,38 @@ impl Settings {
         lv_fill(self.c.feeds, &rows, None);
     }
 
-    fn add_feed(&mut self) -> Result<(), String> {
+    /// The calendar described by the Name / address / Colour fields.
+    fn feed_from_fields(&self, index: usize) -> Result<CalendarFeed, String> {
         let url = text(self.c.feed_url).trim().to_string();
         if !(url.starts_with("https://") || url.starts_with("webcal://")) {
             return Err("Paste the calendar's secret iCal address: it starts with https:// (or webcal://).".into());
         }
         let name = text(self.c.feed_name).trim().to_string();
-        let name = if name.is_empty() { format!("Calendar {}", self.feeds.len() + 1) } else { name };
+        let name = if name.is_empty() { format!("Calendar {}", index + 1) } else { name };
         let color = CALENDAR_COLORS[selected(self.c.feed_color).min(CALENDAR_COLORS.len() - 1)].1.to_string();
-        self.feeds.push(CalendarFeed { name, url, color });
+        Ok(CalendarFeed { name, url, color })
+    }
+
+    /// A calendar was picked in the list: put it in the fields to edit.
+    fn feed_selected(&self) {
+        let Some(f) = lv_selected(self.c.feeds).and_then(|i| self.feeds.get(i)) else { return };
+        set_text(self.c.feed_name, &f.name);
+        set_text(self.c.feed_url, &f.url);
+        let colour = CALENDAR_COLORS.iter().position(|c| c.1.eq_ignore_ascii_case(&f.color)).unwrap_or(0);
+        unsafe { SendMessageW(self.c.feed_color, CB_SETCURSEL, Some(WPARAM(colour)), None) };
+    }
+
+    fn update_feed(&mut self) -> Result<(), String> {
+        let Some(i) = lv_selected(self.c.feeds) else { return Err("Pick a calendar in the list first.".into()) };
+        self.feeds[i] = self.feed_from_fields(i)?;
+        self.fill_feeds();
+        lv_select(self.c.feeds, i);
+        Ok(())
+    }
+
+    fn add_feed(&mut self) -> Result<(), String> {
+        let feed = self.feed_from_fields(self.feeds.len())?;
+        self.feeds.push(feed);
         self.fill_feeds();
         set_text(self.c.feed_name, "");
         set_text(self.c.feed_url, "");
@@ -1256,6 +1277,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             with(|s| s.searched());
             LRESULT(0)
         }
+        WM_NOTIFY => {
+            // A different calendar picked in the list: show it for editing.
+            let hdr = unsafe { &*(lp.0 as *const NMHDR) };
+            if hdr.code == LVN_ITEMCHANGED {
+                let nm = unsafe { &*(lp.0 as *const NMLISTVIEW) };
+                if (nm.uNewState & LVIS_SELECTED.0) != 0 && (nm.uOldState & LVIS_SELECTED.0) == 0 {
+                    with(|s| {
+                        if hdr.hwndFrom == s.c.feeds {
+                            s.feed_selected();
+                        }
+                    });
+                }
+            }
+            LRESULT(0)
+        }
         WM_COMMAND => {
             let id = wp.0 & 0xFFFF;
             let code = (wp.0 >> 16) as u32;
@@ -1283,6 +1319,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 }
                 ID_FEED_ADD => {
                     if let Some(Err(msg)) = with(|s| s.add_feed()) {
+                        warn(hwnd, &msg);
+                    }
+                }
+                ID_FEED_UPDATE => {
+                    if let Some(Err(msg)) = with(|s| s.update_feed()) {
                         warn(hwnd, &msg);
                     }
                 }
@@ -1329,12 +1370,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                             let _ = PostMessageW(Some(HWND(target as *mut _)), WM_LOCATED, WPARAM(0), LPARAM(0));
                         }
                     });
-                }
-                ID_CHECK_UPDATE => {
-                    let owner = with(|s| s.owner.0 as isize).unwrap_or(0);
-                    unsafe {
-                        let _ = PostMessageW(Some(HWND(owner as *mut _)), WM_APP_SETTINGS, WPARAM(1), LPARAM(0));
-                    }
                 }
                 ID_OPEN_FILE => {
                     let path = crate::paths::config_file();

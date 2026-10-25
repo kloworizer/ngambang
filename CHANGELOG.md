@@ -6,6 +6,30 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Indonesian public holidays** are linked by default in the Calendar
+  module (Google's holiday calendar). Existing setups get it once; removing it
+  in Settings keeps it removed.
+- **Edit linked calendars**: pick one in Settings ▸ Calendar, change its name,
+  address or colour and press Save changes.
+
+### Changed
+- **Every slip has the same size** (a little wider, one fixed height), so
+  flipping from a tall module to a short one no longer shrinks the island out
+  from under the pointer. Lists show as many rows as fit; the tabs sit in one
+  row.
+- Update checks live in one place: right-click the orb or the tray icon ▸
+  Check for updates (it becomes Install update when one is found). Settings
+  keeps only the daily automatic check.
+
+### Fixed
+- **Borderless "windowed fullscreen" games** now sink the island to the Seam:
+  the foreground window is looked at again every 1.5 s (such games resize
+  after taking focus), and a fullscreen app that did not look like a game is
+  measured again every 10 s, as games often load with a quiet GPU.
+- **Game sessions end when the game closes**: the island watches the game's
+  process instead of always waiting out the one-minute alt-tab grace period.
+
 ## [0.1.3] - 2026-10-25
 
 ### Added

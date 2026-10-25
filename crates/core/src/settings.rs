@@ -48,6 +48,20 @@ pub struct Form {
 pub const CALENDAR_COLORS: [(&str, &str); 6] =
     [("Violet", "#A99BFF"), ("Teal", "#4CC3D9"), ("Mint", "#7FD1AE"), ("Amber", "#F2A93B"), ("Lime", "#B7E04A"), ("Coral", "#FF8A70")];
 
+/// The `feeds = …` value for config.toml, filling in missing names and colours.
+pub fn feeds_literal(feeds: &[CalendarFeed]) -> String {
+    let items: Vec<String> = feeds
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let name = if f.name.trim().is_empty() { format!("Calendar {}", i + 1) } else { f.name.trim().to_string() };
+            let color = if f.color.len() == 7 && f.color.starts_with('#') { f.color.clone() } else { CALENDAR_COLORS[i % 6].1.to_string() };
+            inline_table(&[("name", &name), ("url", f.url.trim()), ("color", &color)])
+        })
+        .collect();
+    format!("[{}]", items.join(", "))
+}
+
 fn inline_table(fields: &[(&str, &str)]) -> String {
     let body = fields.iter().map(|(k, v)| format!("{k} = {}", toml_str(v))).collect::<Vec<_>>().join(", ");
     format!("{{ {body} }}")
@@ -148,15 +162,11 @@ impl Form {
         let radius = number("Earthquake radius", &self.quake_radius_km, 10, 5000)?;
         let cal_reminder = number("Event reminder", &self.calendar_reminder, 0, 120)?;
         let cal_days = number("Days ahead", &self.calendar_days, 1, 30)?;
-        let mut feeds = Vec::new();
-        for (i, f) in self.calendar_feeds.iter().enumerate() {
+        for f in &self.calendar_feeds {
             let url = f.url.trim();
             if !(url.starts_with("https://") || url.starts_with("webcal://")) {
                 return Err(format!("Calendar address: \"{}\" must start with https:// or webcal://", f.name));
             }
-            let name = if f.name.trim().is_empty() { format!("Calendar {}", i + 1) } else { f.name.trim().to_string() };
-            let color = if f.color.len() == 7 && f.color.starts_with('#') { f.color.clone() } else { CALENDAR_COLORS[i % 6].1.to_string() };
-            feeds.push(inline_table(&[("name", &name), ("url", url), ("color", &color)]));
         }
         let watch: Vec<String> = self
             .watchlist
@@ -196,7 +206,7 @@ impl Form {
             ("weather", "alerts", b(self.weather_alerts)),
             ("weather", "quake_radius_km", radius.to_string()),
             ("modules", "order", format!("[{}]", order.join(", "))),
-            ("calendar", "feeds", format!("[{}]", feeds.join(", "))),
+            ("calendar", "feeds", feeds_literal(&self.calendar_feeds)),
             ("calendar", "reminder_min", cal_reminder.to_string()),
             ("calendar", "days", cal_days.to_string()),
             ("finance", "watchlist", format!("[{}]", watch.join(", "))),

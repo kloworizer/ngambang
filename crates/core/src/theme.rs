@@ -33,7 +33,9 @@ pub const RING_R: f32 = 11.0;
 pub const RING_W: f32 = 2.0;
 pub const TAG_H: f32 = 40.0;
 pub const TAG_MAX_W: f32 = 360.0;
-pub const SLIP_W: f32 = 372.0;
+pub const SLIP_W: f32 = 440.0;
+/// Every slip's height above the tab rail: the same for every module.
+pub const SLIP_H: f32 = 420.0;
 /// Height of one row of tabs under the slip.
 pub const TAB_ROW_H: f32 = 40.0;
 /// A now-playing tag is wider: it carries the player controls.

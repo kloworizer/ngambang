@@ -637,6 +637,8 @@ struct B<'a> {
     tm: &'a dyn TextMeasure,
     x: f32,
     w: f32,
+    /// Content must end above this y: every slip has the same height.
+    limit: f32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -769,6 +771,11 @@ impl B<'_> {
         }
     }
 
+    /// How many rows of `row_h` fit from `y`, keeping `reserve` free below them.
+    fn rows(&self, y: f32, row_h: f32, reserve: f32) -> usize {
+        ((self.limit - reserve - y) / row_h).floor().max(0.0) as usize
+    }
+
     fn empty(&mut self, y: f32, text: &str) -> f32 {
         self.text(Rect::new(self.x, y, self.w, 22.0), text, TextStyle::BODY, TEXT_2);
         y + 22.0
@@ -799,7 +806,7 @@ fn slips(m: &Model, front: ModuleId, tm: &dyn TextMeasure) -> Scene {
     // The tabs always run in a rail along the bottom of the slip, on every
     // edge: one shape, the same place to look, and it never hangs past the body.
     let pad = 18.0;
-    let mut b = B { prims: Vec::new(), hits: Vec::new(), tm, x: pad, w: SLIP_W - 2.0 * pad };
+    let mut b = B { prims: Vec::new(), hits: Vec::new(), tm, x: pad, w: SLIP_W - 2.0 * pad, limit: SLIP_H - pad };
 
     // Content first (into a separate list) so we know the height.
     let body_start = b.prims.len();
@@ -820,14 +827,17 @@ fn slips(m: &Model, front: ModuleId, tm: &dyn TextMeasure) -> Scene {
         ModuleId::Finance => finance_slip(m, &mut b, pad),
     };
     let content: Vec<Prim> = b.prims.drain(body_start..).collect();
-    let slip_h = (bottom + pad).ceil();
+    // Every module has the same height, so flipping between them keeps the
+    // island under the pointer; lists show as many rows as fit.
+    let _ = bottom;
+    let slip_h = SLIP_H;
     let n = tabs.len().max(1);
 
-    // Up to ten tabs a row.
+    // One row of tabs (up to fourteen).
     let mut rects = Vec::with_capacity(n);
-    let rows = n.div_ceil(10);
+    let rows = n.div_ceil(14);
     let per_row = n.div_ceil(rows);
-    let gap = 6.0;
+    let gap = 4.0;
     let tab_w = ((SLIP_W - 28.0 - gap * (per_row as f32 - 1.0)) / per_row as f32).min(48.0).floor();
     for row in 0..rows {
         let count = per_row.min(n - row * per_row);
@@ -1018,7 +1028,8 @@ fn mixer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     if m.mixer.apps.is_empty() {
         return b.empty(y + 4.0, "No app is playing sound");
     }
-    for app in m.mixer.apps.iter().take(6) {
+    let fit = b.rows(y, 52.0, -8.0);
+    for app in m.mixer.apps.iter().take(fit) {
         let initial: String = app.name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "?".into());
         let sub = if app.has_controls { ("controls", MEDIA) } else { ("volume only", LABEL) };
         let accent = if app.has_controls { MEDIA } else { TEXT };
@@ -1047,7 +1058,8 @@ fn commands_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         b.text(Rect::new(b.x, y + 8.0, b.w, 16.0), "ngambang run -- <command>", TextStyle::MONO_SMALL, LABEL);
         return y + 24.0;
     }
-    for j in m.jobs.iter().take(6) {
+    let fit = b.rows(y, 42.0, 52.0);
+    for j in m.jobs.iter().take(fit) {
         let (icon, color, detail) = match &j.status {
             JobStatus::Running { progress: Some(p) } => (Icon::Terminal, CODER, format!("{:.0}%", p * 100.0)),
             JobStatus::Running { progress: None } => {
@@ -1105,7 +1117,8 @@ fn ports_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     if m.ports.is_empty() {
         return b.empty(y + 4.0, "No local servers listening");
     }
-    for p in m.ports.iter().take(7) {
+    let fit = b.rows(y, 50.0, 0.0);
+    for p in m.ports.iter().take(fit) {
         b.text(Rect::new(b.x, y, 70.0, 48.0), format!(":{}", p.port), TextStyle { size: 15.0, weight: Weight::Regular, mono: true }, PORTS);
         let name_w = b.w - 70.0 - 44.0 - 6.0 - 64.0;
         b.text(Rect::new(b.x + 70.0, y, name_w, 48.0), format!("{} · {}", p.process, p.pid), TextStyle::BODY, TEXT);
@@ -1474,10 +1487,13 @@ fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     } else if m.todos.is_empty() {
         y = b.empty(y + 4.0, "Nothing to do. Add a task below.") + 14.0;
     }
-    let shown = if m.todo_input.is_some() { 4 } else { 6 };
     // Open tasks first, then the finished ones.
     let mut list: Vec<&TodoItem> = m.todos.iter().filter(|t| !t.done).collect();
     list.extend(m.todos.iter().filter(|t| t.done));
+    let reserve = if m.todo_input.is_some() { 0.0 } else { 52.0 };
+    let all = b.rows(y, 42.0, reserve);
+    // Room for "+N more" when not everything fits.
+    let shown = if list.len() > all { b.rows(y, 42.0, reserve + 22.0) } else { all };
     for t in list.iter().take(shown) {
         let check = Rect::new(b.x - 4.0, y + 2.0, 36.0, 36.0);
         let c = Point::new(check.x + 18.0, check.y + 18.0);
@@ -1599,13 +1615,17 @@ fn calendar_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     }
     // Upcoming, grouped by day.
     let horizon = now + m.config.calendar.days as i64 * 86_400;
-    let upcoming: Vec<&crate::calendar::CalEvent> = m.calendar.iter().filter(|e| e.end > now && e.start < horizon).take(6).collect();
+    let upcoming: Vec<&crate::calendar::CalEvent> = m.calendar.iter().filter(|e| e.end > now && e.start < horizon).collect();
     if upcoming.is_empty() {
         return b.empty(y, "Nothing coming up");
     }
     let mut last_day = None;
     for e in upcoming {
         let d = (e.start + offset).div_euclid(86_400).max(today);
+        let header = if last_day != Some(d) { 22.0 } else { 0.0 };
+        if y + header + 46.0 > b.limit {
+            break;
+        }
         if last_day != Some(d) {
             b.text(Rect::new(b.x, y, b.w, 18.0), day_label(d, today).to_uppercase(), TextStyle::LABEL, LABEL);
             y += 22.0;
@@ -1658,7 +1678,9 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         y = b.empty(y, "Your watchlist is empty.") + 10.0;
         return b.button_row(y, vec![("Add symbols".into(), Btn::Primary(GAME), Action::OpenSettings(ModuleId::Finance))]);
     }
-    for item in list.iter().take(6) {
+    let all = b.rows(y, 62.0, 20.0);
+    let fit = if list.len() > all { b.rows(y, 62.0, 42.0) } else { all };
+    for item in list.iter().take(fit) {
         let q = m.quotes.iter().find(|q| q.symbol.eq_ignore_ascii_case(&item.symbol));
         let r = Rect::new(b.x, y, b.w, 52.0);
         b.raised(r, 14.0, SURFACE);
@@ -1710,8 +1732,8 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         }
         y += 62.0;
     }
-    if list.len() > 6 {
-        b.text(Rect::new(b.x, y, b.w, 18.0), format!("+{} more in Settings", list.len() - 6), TextStyle::MONO_SMALL, LABEL);
+    if list.len() > fit {
+        b.text(Rect::new(b.x, y, b.w, 18.0), format!("+{} more in Settings", list.len() - fit), TextStyle::MONO_SMALL, LABEL);
         y += 22.0;
     }
     b.text(
@@ -1867,7 +1889,8 @@ fn weather_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         y += 26.0;
     }
     let l = &m.config.location;
-    for a in alerts {
+    let fit = b.rows(y, 56.0, 20.0);
+    for a in alerts.into_iter().take(fit) {
         let r = Rect::new(b.x, y, b.w, 48.0);
         b.prims.extend(soft::well(r, 12.0));
         b.prims.push(Prim::RoundRect {
@@ -2061,6 +2084,15 @@ mod tests {
                 assert!(span <= BOX_SPAN, "{name}: span {span}");
             }
         }
+    }
+
+    #[test]
+    fn every_slip_has_the_same_size() {
+        let scenes = all_scenes();
+        let slips: Vec<&(String, Scene)> =
+            scenes.iter().filter(|(n, s)| matches!(s.kind, SceneKind::Slip(_)) && n.ends_with("Left")).collect();
+        assert!(slips.len() > 10);
+        assert!(slips.iter().all(|(_, s)| s.size == slips[0].1.size), "{:?}", slips.iter().map(|(n, s)| (n, s.size)).collect::<Vec<_>>());
     }
 
     #[test]

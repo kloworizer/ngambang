@@ -126,8 +126,8 @@ listed in the sidebar (`Ctrl+Tab` moves to the next one):
 | Focus & commands | Timer presets · custom round length · long-command threshold |
 | Games | Break reminder · ping host · power plan to use while gaming (picked from your plans) |
 | Location & prayer | A city from the list (about 240 places: Indonesia in depth, Malaysia, Singapore, Brunei, the Middle East and large cities worldwide; Jakarta by default), your own coordinates, or **Use my location** · calculation method · Asr (standard or Hanafi) · reminder minutes |
-| Weather & updates | Disaster pop-ups on/off · earthquake radius · automatic update checks · **Check for updates now** |
-| Calendar | Link calendars by their secret iCal address (Google Calendar ▸ Settings ▸ your calendar ▸ Integrate calendar), name and colour · reminder minutes · days ahead |
+| Weather & updates | Disaster pop-ups on/off · earthquake radius · automatic update checks (check now from the right-click menu) |
+| Calendar | Link calendars by their secret iCal address (Google Calendar ▸ Settings ▸ your calendar ▸ Integrate calendar), name and colour; pick one to edit or remove it. Indonesian public holidays are linked by default · reminder minutes · days ahead |
 | Markets | Search box with live matches (shares, indices, crypto, currency pairs) · your watchlist with Move up / Move down / Remove |
 
 Everything applies as soon as you press **Save**; nothing needs a restart.

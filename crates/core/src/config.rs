@@ -411,9 +411,19 @@ pub struct CalendarConfig {
     pub days: u32,
 }
 
+/// Public holidays in Indonesia (Google's holiday calendar), linked by default.
+pub const HOLIDAYS_URL: &str =
+    "https://calendar.google.com/calendar/ical/en-gb.indonesian%23holiday%40group.v.calendar.google.com/public/basic.ics";
+
+impl CalendarFeed {
+    pub fn holidays() -> CalendarFeed {
+        CalendarFeed { name: "Libur Indonesia".into(), url: HOLIDAYS_URL.into(), color: "#FF8A70".into() }
+    }
+}
+
 impl Default for CalendarConfig {
     fn default() -> Self {
-        CalendarConfig { feeds: Vec::new(), reminder_min: 10, days: 7 }
+        CalendarConfig { feeds: vec![CalendarFeed::holidays()], reminder_min: 10, days: 7 }
     }
 }
 
@@ -536,7 +546,7 @@ quake_radius_km = 300
 quake_min_magnitude = 4.5
 
 [calendar]                 # link calendars in Settings ▸ Calendar
-feeds = []                 # [{ name = "Work", url = "https://…/basic.ics", color = "#A99BFF" }]
+feeds = [{ name = "Libur Indonesia", url = "https://calendar.google.com/calendar/ical/en-gb.indonesian%23holiday%40group.v.calendar.google.com/public/basic.ics", color = "#FF8A70" }]
 reminder_min = 10          # reminder before each event; 0 = none
 days = 7                   # days ahead shown
 
@@ -808,14 +818,17 @@ mod tests {
 
     #[test]
     fn hash_inside_strings_is_not_a_comment() {
-        let first =
-            set_toml_value(DEFAULT_TOML, "calendar", "feeds", r##"[{ name = "Work", url = "https://x/a.ics#y", color = "#A99BFF" }]"##);
+        let base = "[calendar]\nfeeds = []   # a note\n";
+        let first = set_toml_value(base, "calendar", "feeds", r##"[{ name = "Work", url = "https://x/a.ics#y", color = "#A99BFF" }]"##);
         let again = set_toml_value(&first, "calendar", "feeds", r##"[{ name = "Home", url = "https://x/b.ics", color = "#7FD1AE" }]"##);
         let (cfg, w) = Config::parse(&again);
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(cfg.calendar.feeds.len(), 1);
         assert_eq!(cfg.calendar.feeds[0].color, "#7FD1AE");
-        assert!(again.lines().any(|l| l.starts_with("feeds = [{ name = \"Home\"") && l.contains("# [{ name = \"Work\"")));
+        assert_eq!(
+            again.lines().nth(1).unwrap(),
+            r##"feeds = [{ name = "Home", url = "https://x/b.ics", color = "#7FD1AE" }]   # a note"##
+        );
         assert_eq!(comment_start(r#"a = "x#y" # note"#), Some(10));
         assert_eq!(comment_start(r#"a = 'x#y'"#), None);
         assert_eq!(comment_start(r##"a = "q\"#" # c"##), Some(11));

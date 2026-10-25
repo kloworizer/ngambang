@@ -52,6 +52,13 @@ const TIMER_MIDNIGHT: usize = 301;
 /// Trims the working set once the island has been at rest for a while.
 const TIMER_TRIM: usize = 302;
 const TRIM_AFTER_MS: u32 = 30_000;
+/// Looks at the foreground window again: borderless "windowed fullscreen"
+/// games often resize after they take focus, which raises no event.
+const TIMER_FULLSCREEN: usize = 303;
+const FULLSCREEN_POLL_MS: u32 = 1500;
+/// A fullscreen app that did not look like a game is measured again this often
+/// (games often load with a quiet GPU).
+const REPROBE_MS: u64 = 10_000;
 const HOTKEY_ID: i32 = 1;
 const DRAG_THRESHOLD: f32 = 8.0;
 /// Not exported by the WindowsAndMessaging module.
@@ -75,6 +82,8 @@ struct SavedState {
     todos: Vec<ngambang_core::model::TodoItem>,
     /// Upcoming events from linked calendars, shown while offline.
     calendar: Vec<ngambang_core::calendar::CalEvent>,
+    /// The Indonesian holiday calendar was linked once (removing it sticks).
+    holidays_linked: bool,
 }
 
 fn load_state() -> SavedState {
@@ -164,6 +173,9 @@ struct App {
     accepting: Arc<AtomicBool>,
     state: SavedState,
     last_fullscreen: Option<String>,
+    /// The fullscreen app's process, to notice when it exits.
+    last_fullscreen_pid: Option<u32>,
+    last_probe_ms: u64,
     taskbar_created: u32,
     reduce_motion: bool,
     hook: HWINEVENTHOOK,
@@ -404,6 +416,8 @@ impl App {
             accepting: Arc::new(AtomicBool::new(true)),
             state,
             last_fullscreen: None,
+            last_fullscreen_pid: None,
+            last_probe_ms: 0,
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
             reduce_motion: system::reduce_motion(),
             hook: HWINEVENTHOOK::default(),
@@ -446,6 +460,17 @@ impl App {
             );
             SetTimer(Some(self.hwnd), TIMER_MIDNIGHT, ms_until_midnight() as u32, None);
         }
+        // Link Indonesia's public holidays once, for configs made before it was a default.
+        if !self.state.holidays_linked {
+            self.state.holidays_linked = true;
+            save_state(&self.state);
+            let mut feeds = self.model.config.calendar.feeds.clone();
+            if !feeds.iter().any(|f| f.url == ngambang_core::config::HOLIDAYS_URL) {
+                feeds.push(ngambang_core::config::CalendarFeed::holidays());
+                edit_config(&[("calendar", "feeds", ngambang_core::settings::feeds_literal(&feeds))]);
+                self.model.config.calendar.feeds = feeds;
+            }
+        }
         match watch::config(self.bus.clone(), crate::paths::config_file()) {
             Ok(s) => self.workers._config = Some(s),
             Err(e) => log_warn!("config watch: {e}"),
@@ -471,6 +496,7 @@ impl App {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             SetTimer(Some(self.hwnd), TIMER_TRIM, TRIM_AFTER_MS, None);
+            SetTimer(Some(self.hwnd), TIMER_FULLSCREEN, FULLSCREEN_POLL_MS, None);
         }
     }
 
@@ -887,17 +913,35 @@ impl App {
         let app = system::fullscreen_app(self.hwnd, self.monitor);
         let path = app.as_ref().map(|(p, _)| p.clone());
         if path == self.last_fullscreen {
+            // Same app: a quiet one may still turn out to be a game once it loads.
+            if let Some((path, pid)) = app {
+                let not_game_yet = self.model.fullscreen == ngambang_core::model::Fullscreen::Media && self.model.game.is_none();
+                if not_game_yet && now_ms().saturating_sub(self.last_probe_ms) >= REPROBE_MS {
+                    self.probe_gpu(path, pid);
+                }
+            }
             return;
         }
         self.last_fullscreen = path.clone();
+        let previous_pid = std::mem::replace(&mut self.last_fullscreen_pid, app.as_ref().map(|(_, pid)| *pid));
         let Some((path, pid)) = app else {
             self.dispatch(Event::Fullscreen { active: false, exe: String::new(), signals: Default::default() });
+            // A game that closed ends its session as soon as its process is gone.
+            if let (Some(pid), true) = (previous_pid, self.model.game.is_some()) {
+                watch_exit(pid, self.bus.clone());
+            }
             return;
         };
         // Decide right away from the path and the exclusive-mode flag ...
         let signals = ngambang_core::games::Signals { exclusive_d3d: system::exclusive_d3d(), gpu_3d_pct: None };
         self.dispatch(Event::Fullscreen { active: true, exe: path.clone(), signals });
         // ... then measure the app's own 3D load; a busy GPU makes it a game.
+        self.probe_gpu(path, pid);
+    }
+
+    fn probe_gpu(&mut self, path: String, pid: u32) {
+        self.last_probe_ms = now_ms();
+        let exclusive = system::exclusive_d3d();
         let (bus, ours, monitor) = (self.bus.clone(), self.hwnd.0 as isize, self.monitor.0 as isize);
         let _ = std::thread::Builder::new().name("ngambang-gpu-probe".into()).spawn(move || {
             let gpu = system::process_gpu_3d(pid);
@@ -906,7 +950,7 @@ impl App {
                 bus.send(Event::Fullscreen {
                     active: true,
                     exe: path,
-                    signals: ngambang_core::games::Signals { exclusive_d3d: signals.exclusive_d3d, gpu_3d_pct: gpu },
+                    signals: ngambang_core::games::Signals { exclusive_d3d: exclusive, gpu_3d_pct: gpu },
                 });
             }
         });
@@ -1128,6 +1172,8 @@ impl App {
                         let _ = KillTimer(Some(self.hwnd), id);
                     }
                     let _ = self.renderer.drop_outgoing();
+                } else if id == TIMER_FULLSCREEN {
+                    self.check_fullscreen();
                 } else if id == TIMER_TRIM {
                     unsafe {
                         let _ = KillTimer(Some(self.hwnd), id);
@@ -1342,13 +1388,6 @@ impl App {
                 }
                 None
             }
-            WM_APP_SETTINGS if wp.0 == 1 => {
-                // "Check for updates now" in the Settings window.
-                if let Some(n) = &self.workers.net {
-                    n.check_update();
-                }
-                zero
-            }
             WM_APP_SETTINGS => {
                 let (cfg, warnings) = load_config();
                 for w in warnings {
@@ -1434,6 +1473,29 @@ impl App {
             _ => None,
         }
     }
+}
+
+/// Tell the model when a process exits, within the game grace period.
+fn watch_exit(pid: u32, bus: Bus) {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+    let _ = std::thread::Builder::new().name("ngambang-game-exit".into()).spawn(move || unsafe {
+        let h = match OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            Ok(h) => h,
+            // No such process: it has already exited.
+            Err(e) if e.code() == windows::Win32::Foundation::ERROR_INVALID_PARAMETER.to_hresult() => {
+                bus.send(Event::GameExited);
+                return;
+            }
+            // Protected games may not let us open them: the grace period still ends the session.
+            Err(_) => return,
+        };
+        let wait = ngambang_core::model::GAME_GRACE_MS as u32 + 5000;
+        if WaitForSingleObject(h, wait) == WAIT_OBJECT_0 {
+            bus.send(Event::GameExited);
+        }
+        let _ = CloseHandle(h);
+    });
 }
 
 /// Hand unused memory back to Windows (what Task Manager shows drops to the
