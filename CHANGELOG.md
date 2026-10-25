@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-25
+
 ### Added
 - **Indonesian public holidays** are linked by default in the Calendar
   module (Google's holiday calendar). Existing setups get it once; removing it
