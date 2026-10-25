@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-10-25
+
 ### Changed
 - **A fresh look.** Every slip leads with its most important thing, large: the
   next prayer, the session clock, the focus time, today's date, the

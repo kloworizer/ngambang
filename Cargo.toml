@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/core", "crates/platform", "crates/app"]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 license-file = "LICENSE"
 repository = "https://github.com/kloworizer/ngambang"
