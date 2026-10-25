@@ -7,11 +7,18 @@ All notable changes are listed here. The format follows
 ## [Unreleased]
 
 ### Changed
-- **Slips are wide and short, in two columns.** Instead of one tall column,
-  every module lays out side by side (cover beside the controls, the next
-  prayer beside the day's times, the week beside its events, the weather
-  beside its early warnings), and long lists flow into the second column.
-  Every slip still has the same size.
+- **Slips fit their content.** Each slip is as tall as what it shows, inside
+  a narrow band, so short modules no longer carry empty space and flipping
+  between modules only changes the size a little.
+- **Docked top or bottom, tall modules go wide.** Short modules keep one
+  column; taller ones (weather, prayer times, calendar, games…) spread into
+  two columns side by side instead of hanging far down the screen. Docked
+  left or right, slips stay one column.
+
+### Fixed
+- Flipping to a smaller slip with the wheel no longer closes the island when
+  the pointer ends up just outside it: the area of the slip you were on keeps
+  counting as the island until you move back in or away.
 
 ## [0.1.4] - 2026-10-25
 

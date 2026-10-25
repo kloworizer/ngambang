@@ -33,9 +33,19 @@ pub const RING_R: f32 = 11.0;
 pub const RING_W: f32 = 2.0;
 pub const TAG_H: f32 = 40.0;
 pub const TAG_MAX_W: f32 = 360.0;
-pub const SLIP_W: f32 = 680.0;
-/// Every slip's height above the tab rail: the same for every module.
-pub const SLIP_H: f32 = 300.0;
+/// A one-column slip's width, and a two-column one's (docked top or bottom).
+pub const SLIP_W: f32 = 440.0;
+pub const SLIP_W2: f32 = 680.0;
+/// Space around a slip's content.
+pub const SLIP_PAD: f32 = 18.0;
+/// A slip's height above the tab rail follows its content within a narrow
+/// band, so flipping between modules keeps the island under the pointer.
+/// Docked left or right:
+pub const SLIP_MIN_V: f32 = 320.0;
+pub const SLIP_MAX_V: f32 = 420.0;
+/// Docked top or bottom (taller content goes to two columns instead):
+pub const SLIP_MIN_H: f32 = 250.0;
+pub const SLIP_MAX_H: f32 = 330.0;
 /// Height of one row of tabs under the slip.
 pub const TAB_ROW_H: f32 = 40.0;
 /// A now-playing tag is wider: it carries the player controls.
@@ -43,7 +53,7 @@ pub const MEDIA_TAG_MAX_W: f32 = 420.0;
 pub const SEAM_T: f32 = 3.0;
 pub const SEAM_L: f32 = 92.0;
 /// The fixed window box around the anchor (SPEC §4.2): every state fits inside.
-pub const BOX_DEPTH: f32 = 720.0;
+pub const BOX_DEPTH: f32 = 580.0;
 pub const BOX_SPAN: f32 = 720.0;
 
 #[cfg(test)]

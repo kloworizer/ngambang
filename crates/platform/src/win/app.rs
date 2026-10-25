@@ -158,6 +158,10 @@ struct App {
     applied: Config,
     scene: Option<Scene>,
     scene_rect: Rect,
+    /// After flipping to a smaller slip with the pointer outside it: the
+    /// earlier slip's area, which keeps counting as the island until the
+    /// pointer comes back in or leaves it, so the flip doesn't close it.
+    hold: Option<Rect>,
     bx: Rect,
     work: Rect,
     scale: f32,
@@ -391,6 +395,7 @@ impl App {
             applied: config,
             scene: None,
             scene_rect: Rect::default(),
+            hold: None,
             bx: Rect::default(),
             work: Rect::default(),
             scale: 1.0,
@@ -602,9 +607,39 @@ impl App {
             unsafe { SetTimer(Some(self.hwnd), TIMER_CLEANUP, 450, None) };
         }
         let _ = self.renderer.ring(scene.ring, local, now);
+        // Slip to slip: if the pointer was over the island and the new slip
+        // no longer covers it, hold the old area.
+        let flip = matches!((self.scene.as_ref().map(|s| s.kind), scene.kind), (Some(SceneKind::Slip(_)), SceneKind::Slip(_)));
+        self.hold = match self.cursor_local() {
+            Some((x, y)) if flip && !self.dragging && !local.contains(x, y) => {
+                let before = self.hold.unwrap_or(self.scene_rect);
+                before.contains(x, y).then(|| before.union(&local))
+            }
+            _ => None,
+        };
         self.set_region(&scene, local);
         self.scene = Some(scene);
         self.scene_rect = local;
+    }
+
+    /// The cursor in window-local DIPs.
+    fn cursor_local(&self) -> Option<(f32, f32)> {
+        let mut pt = POINT::default();
+        unsafe {
+            GetCursorPos(&mut pt).ok()?;
+            let _ = ScreenToClient(self.hwnd, &mut pt);
+        }
+        Some((pt.x as f32 / self.scale, pt.y as f32 / self.scale))
+    }
+
+    /// Back over the slip itself (or gone): drop the held area.
+    fn release_hold(&mut self) {
+        if self.hold.take().is_some() {
+            if let Some(scene) = self.scene.take() {
+                self.set_region(&scene, self.scene_rect);
+                self.scene = Some(scene);
+            }
+        }
     }
 
     fn recreate_device(&mut self) -> Result<()> {
@@ -628,6 +663,10 @@ impl App {
                         Edge::Top => Rect::new(local.x, local.y, local.w, local.h + pad),
                         Edge::Bottom => Rect::new(local.x, local.y - pad, local.w, local.h + pad),
                     };
+                    CreateRectRgn((r.x * s) as i32, (r.y * s) as i32, (r.right() * s).ceil() as i32, (r.bottom() * s).ceil() as i32)
+                }
+                SceneKind::Slip(_) if self.hold.is_some() => {
+                    let r = self.hold.unwrap_or(local);
                     CreateRectRgn((r.x * s) as i32, (r.y * s) as i32, (r.right() * s).ceil() as i32, (r.bottom() * s).ceil() as i32)
                 }
                 _ => {
@@ -1190,6 +1229,9 @@ impl App {
             }
             WM_MOUSEMOVE => {
                 let (px, py) = lparam_point(lp);
+                if self.hold.is_some() && self.scene_rect.contains(px as f32 / self.scale, py as f32 / self.scale) {
+                    self.release_hold();
+                }
                 let (x, _) = self.to_scene(px, py);
                 if !self.tracking {
                     self.tracking = true;
@@ -1313,6 +1355,7 @@ impl App {
             }
             WM_MOUSELEAVE => {
                 self.tracking = false;
+                self.release_hold();
                 if !self.dragging && self.slider.is_none() {
                     self.dispatch(Event::PointerLeave);
                 }

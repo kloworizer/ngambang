@@ -358,7 +358,7 @@ pub fn build(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
         IslandState::Orb => orb(m),
         IslandState::Tag => tag(m, edge, tm),
         IslandState::Slips => match m.front {
-            Some(front) => slips(m, front, tm),
+            Some(front) => slips(m, front, edge, tm),
             None => orb(m),
         },
     }
@@ -637,9 +637,14 @@ struct B<'a> {
     tm: &'a dyn TextMeasure,
     x: f32,
     w: f32,
-    /// Content must end above this y: every slip has the same height.
+    /// Content must end above this y: the tallest a slip may grow.
     limit: f32,
-    /// The full content area, for switching between the two columns.
+    /// Where the content ends once the slip's height is known (0 while
+    /// measuring); things pinned to the bottom sit on it.
+    floor: f32,
+    /// Two columns side by side (a tall slip docked top or bottom) or one.
+    two: bool,
+    /// The full content area, for switching between the columns.
     x0: f32,
     full_w: f32,
 }
@@ -777,10 +782,40 @@ impl B<'_> {
         }
     }
 
-    /// Draw into column 0 (left) or 1 (right).
+    /// Draw into column 0 (left) or 1 (right); a one-column slip has only
+    /// the full width.
     fn col(&mut self, i: usize) {
+        if !self.two {
+            return self.full();
+        }
         self.w = (self.full_w - GUTTER) / 2.0;
         self.x = self.x0 + i as f32 * (self.w + GUTTER);
+    }
+
+    fn cols(&self) -> usize {
+        if self.two {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Moves on to a slip's second part: the right column from `y0`, or in a
+    /// one-column slip, below the first part (which ended at `below`).
+    fn side(&mut self, y0: f32, below: f32) -> f32 {
+        if self.two {
+            self.col(1);
+            y0
+        } else {
+            self.full();
+            below + 16.0
+        }
+    }
+
+    /// The y for something `h` tall pinned to the bottom of the slip, but
+    /// never above `y`.
+    fn pin(&self, y: f32, h: f32) -> f32 {
+        y.max(self.floor - h)
     }
 
     /// Draw across both columns.
@@ -795,7 +830,7 @@ impl B<'_> {
     fn flow(&mut self, i: usize, y0: f32, row_h: f32, reserve: f32) -> Option<f32> {
         let per_col = self.rows(y0, row_h, reserve).max(1);
         let col = i / per_col;
-        if col > 1 || self.rows(y0, row_h, reserve) == 0 {
+        if col >= self.cols() || self.rows(y0, row_h, reserve) == 0 {
             return None;
         }
         self.col(col);
@@ -832,24 +867,22 @@ fn module_icon(m: ModuleId) -> (Icon, Color) {
     }
 }
 
-fn slips(m: &Model, front: ModuleId, tm: &dyn TextMeasure) -> Scene {
-    let tabs = m.available_slips();
-    // The tabs always run in a rail along the bottom of the slip, on every
-    // edge: one shape, the same place to look, and it never hangs past the body.
-    let pad = 18.0;
+/// Lays out one module's content: returns where it ends and what it drew.
+fn slip_body<'a>(m: &Model, front: ModuleId, tm: &'a dyn TextMeasure, two: bool, max_h: f32, floor: f32) -> (f32, B<'a>) {
+    let pad = SLIP_PAD;
+    let w = if two { SLIP_W2 } else { SLIP_W };
     let mut b = B {
         prims: Vec::new(),
         hits: Vec::new(),
         tm,
         x: pad,
-        w: SLIP_W - 2.0 * pad,
-        limit: SLIP_H - pad,
+        w: w - 2.0 * pad,
+        limit: max_h - pad,
+        floor,
+        two,
         x0: pad,
-        full_w: SLIP_W - 2.0 * pad,
+        full_w: w - 2.0 * pad,
     };
-
-    // Content first (into a separate list) so we know the height.
-    let body_start = b.prims.len();
     let bottom = match front {
         ModuleId::Media => media_slip(m, &mut b, pad),
         ModuleId::Mixer => mixer_slip(m, &mut b, pad),
@@ -866,11 +899,34 @@ fn slips(m: &Model, front: ModuleId, tm: &dyn TextMeasure) -> Scene {
         ModuleId::Calendar => calendar_slip(m, &mut b, pad),
         ModuleId::Finance => finance_slip(m, &mut b, pad),
     };
-    let content: Vec<Prim> = b.prims.drain(body_start..).collect();
-    // Every module has the same height, so flipping between them keeps the
-    // island under the pointer; lists show as many rows as fit.
-    let _ = bottom;
-    let slip_h = SLIP_H;
+    (bottom, b)
+}
+
+/// The shape of a slip: whether it uses two columns and how tall it is.
+/// Docked left or right it is one column; docked top or bottom, a module
+/// that would be tall spreads into two columns instead. The height follows
+/// the content inside a narrow band, so flipping between slips barely
+/// changes the size.
+fn slip_shape(m: &Model, front: ModuleId, edge: Edge, tm: &dyn TextMeasure) -> (bool, f32) {
+    let (two, min_h, max_h) = if edge.is_vertical() {
+        (false, SLIP_MIN_V, SLIP_MAX_V)
+    } else {
+        let natural = slip_body(m, front, tm, false, 10_000.0, 0.0).0 + SLIP_PAD;
+        (natural > SLIP_MAX_H, SLIP_MIN_H, SLIP_MAX_H)
+    };
+    let bottom = slip_body(m, front, tm, two, max_h, 0.0).0;
+    (two, (bottom + SLIP_PAD).ceil().clamp(min_h, max_h))
+}
+
+fn slips(m: &Model, front: ModuleId, edge: Edge, tm: &dyn TextMeasure) -> Scene {
+    let tabs = m.available_slips();
+    // The tabs always run in a rail along the bottom of the slip, on every
+    // edge: one shape, the same place to look, and it never hangs past the body.
+    let (two, slip_h) = slip_shape(m, front, edge, tm);
+    let max_h = if edge.is_vertical() { SLIP_MAX_V } else { SLIP_MAX_H };
+    let (_, mut b) = slip_body(m, front, tm, two, max_h, slip_h - SLIP_PAD);
+    let slip_w = if two { SLIP_W2 } else { SLIP_W };
+    let content: Vec<Prim> = std::mem::take(&mut b.prims);
     let n = tabs.len().max(1);
 
     // One row of tabs (up to fourteen).
@@ -878,16 +934,16 @@ fn slips(m: &Model, front: ModuleId, tm: &dyn TextMeasure) -> Scene {
     let rows = n.div_ceil(14);
     let per_row = n.div_ceil(rows);
     let gap = 4.0;
-    let tab_w = ((SLIP_W - 28.0 - gap * (per_row as f32 - 1.0)) / per_row as f32).min(48.0).floor();
+    let tab_w = ((slip_w - 28.0 - gap * (per_row as f32 - 1.0)) / per_row as f32).min(48.0).floor();
     for row in 0..rows {
         let count = per_row.min(n - row * per_row);
         let row_w = count as f32 * tab_w + gap * (count as f32 - 1.0);
-        let x0 = ((SLIP_W - row_w) / 2.0).floor();
+        let x0 = ((slip_w - row_w) / 2.0).floor();
         for i in 0..count {
             rects.push(Rect::new(x0 + i as f32 * (tab_w + gap), slip_h + 4.0 + row as f32 * TAB_ROW_H, tab_w, TAB_ROW_H - 8.0));
         }
     }
-    let size = Size::new(SLIP_W, slip_h + rows as f32 * TAB_ROW_H + 8.0);
+    let size = Size::new(slip_w, slip_h + rows as f32 * TAB_ROW_H + 8.0);
 
     // One soft surface for the slip and its tabs, with a groove between them.
     b.prims.push(Prim::RoundRect {
@@ -896,7 +952,7 @@ fn slips(m: &Model, front: ModuleId, tm: &dyn TextMeasure) -> Scene {
         fill: Some(SURFACE),
         stroke: Some((HAIRLINE, 1.0)),
     });
-    let groove = Rect::new(18.0, slip_h - 1.0, SLIP_W - 36.0, 2.0);
+    let groove = Rect::new(18.0, slip_h - 1.0, slip_w - 36.0, 2.0);
     b.prims.push(Prim::RoundRect { rect: groove, radius: 1.0, fill: Some(SHADOW_DARK.with_alpha(0x90)), stroke: None });
     for (t, r) in tabs.iter().zip(rects) {
         let active = *t == front;
@@ -920,7 +976,7 @@ fn slips(m: &Model, front: ModuleId, tm: &dyn TextMeasure) -> Scene {
         let (who, v) = m.flashed_volume();
         let level = if v.muted { "muted".to_string() } else { format!("{:.0}%", v.level * 100.0) };
         let text = format!("{} {level}", format::ellipsize(&who, 12));
-        let pill = Rect::new(SLIP_W / 2.0 - 78.0, 8.0, 156.0, 30.0);
+        let pill = Rect::new(slip_w / 2.0 - 78.0, 8.0, 156.0, 30.0);
         b.prims.extend(soft::raised(pill, 15.0, SURFACE_3, 2.0));
         b.icon(if v.muted { Icon::SpeakerMuted } else { Icon::Speaker }, Rect::new(pill.x + 14.0, pill.y + 8.0, 14.0, 14.0), MEDIA);
         b.prims.push(Prim::Text {
@@ -943,9 +999,9 @@ fn media_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     };
     let label = if m.media.len() > 1 { format!("Media · {} sources", m.media.len()) } else { format!("Media · {}", s.app) };
     let y0 = b.header(top, MEDIA, &label, None) + 14.0;
-    // Left: the cover, large.
-    b.col(0);
-    let side = (b.limit - y0).min(b.w).min(214.0);
+    // The cover, large in a wide slip.
+    b.full();
+    let side = if b.two { (b.limit - y0).min(214.0) } else { 132.0 };
     let art = Rect::new(b.x, y0, side, side);
     match &s.art {
         Some(a) => b.prims.push(Prim::Image { rect: art, art: a.clone(), radius: 14.0 }),
@@ -1069,11 +1125,13 @@ fn mixer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     b.col(0);
     row(b, y0, "", "System", None, m.mixer.master, None, SliderTarget::Master, Action::MasterMute, MEDIA);
     if m.mixer.apps.is_empty() {
-        b.col(1);
-        return b.empty(y0 + 12.0, "No app is playing sound");
+        let y = b.side(y0 + 12.0, y0 + 44.0);
+        return b.empty(y, "No app is playing sound");
     }
+    let mut bottom = y0 + 44.0;
     for (i, app) in m.mixer.apps.iter().enumerate() {
         let Some(y) = b.flow(i + 1, y0, 52.0, -8.0) else { break };
+        bottom = bottom.max(y + 44.0);
         let initial: String = app.name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "?".into());
         let sub = if app.has_controls { ("controls", MEDIA) } else { ("volume only", LABEL) };
         let accent = if app.has_controls { MEDIA } else { TEXT };
@@ -1090,7 +1148,7 @@ fn mixer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             accent,
         );
     }
-    b.limit
+    bottom
 }
 
 fn commands_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -1104,9 +1162,11 @@ fn commands_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let y0 = y;
     let any_done = m.jobs.iter().any(|j| !matches!(j.status, JobStatus::Running { .. }));
     let reserve = if any_done { 54.0 } else { 0.0 };
+    let mut bottom = y0;
     for (i, j) in m.jobs.iter().enumerate() {
         let Some(row_y) = b.flow(i, y0, 42.0, reserve) else { break };
         y = row_y;
+        bottom = bottom.max(y + 42.0);
         let (icon, color, detail) = match &j.status {
             JobStatus::Running { progress: Some(p) } => (Icon::Terminal, CODER, format!("{:.0}%", p * 100.0)),
             JobStatus::Running { progress: None } => {
@@ -1152,10 +1212,10 @@ fn commands_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     }
     if any_done {
         b.col(1);
-        let by = b.limit - 44.0;
-        b.button_row(by, vec![("Clear finished".into(), Btn::Secondary, Action::JobsClear)]);
+        let by = b.pin(bottom + 10.0, 44.0);
+        return b.button_row(by, vec![("Clear finished".into(), Btn::Secondary, Action::JobsClear)]);
     }
-    b.limit
+    bottom
 }
 
 fn ports_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -1165,9 +1225,11 @@ fn ports_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         return b.empty(y + 4.0, "No local servers listening");
     }
     let y0 = y;
+    let mut bottom = y0;
     for (i, p) in m.ports.iter().enumerate() {
         let Some(row_y) = b.flow(i, y0, 50.0, 0.0) else { break };
         y = row_y;
+        bottom = bottom.max(y + 50.0);
         b.text(Rect::new(b.x, y, 70.0, 48.0), format!(":{}", p.port), TextStyle { size: 15.0, weight: Weight::Regular, mono: true }, PORTS);
         let name_w = b.w - 70.0 - 44.0 - 6.0 - 64.0;
         b.text(Rect::new(b.x + 70.0, y, name_w, 48.0), format!("{} · {}", p.process, p.pid), TextStyle::BODY, TEXT);
@@ -1204,7 +1266,7 @@ fn ports_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             });
         }
     }
-    y + 50.0
+    bottom
 }
 
 fn clipboard_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -1220,9 +1282,17 @@ fn clipboard_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let preview = clipboard::preview(&c.text, &c.kind, c.unix_at);
     let y0 = y;
     b.col(0);
-    let box_h = b.limit - y0;
-    let lines: Vec<&str> = preview.lines().take(((box_h - 24.0) / 18.0) as usize).collect();
-    let shown = format::ellipsize(&lines.join("\n"), 420);
+    // The preview as tall as its text (wrapped lines estimated), within the
+    // room left; in two columns it runs down to the bottom.
+    let shown = format::ellipsize(&preview, 420);
+    let per_line = ((b.w - 24.0) / 7.6).max(8.0) as usize;
+    let lines: usize = shown.lines().map(|l| l.chars().count().div_ceil(per_line).max(1)).sum();
+    let room = b.limit - y0 - if b.two { 0.0 } else { 110.0 };
+    let max_lines = ((room - 24.0) / 18.0).max(1.0) as usize;
+    let lines = lines.min(max_lines);
+    let shown: String = shown.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+    let natural_h = (lines as f32 * 18.0 + 24.0).max(64.0);
+    let box_h = if b.two { natural_h.max(b.floor - y0) } else { natural_h };
     b.rect(Rect::new(b.x, y, b.w, box_h), 8.0, SURFACE_2);
     let mut text_x = b.x + 12.0;
     if let ClipKind::HexColor { r, g, b: bl, a } = c.kind {
@@ -1244,9 +1314,9 @@ fn clipboard_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         wrap: true,
     });
     let _ = y;
-    b.col(1);
+    let cy = b.side(y0, y0 + box_h);
     let chips = c.kind.actions().iter().map(|a| (a.label().to_string(), CODER, Action::Clip(*a))).collect();
-    b.chips(y0, chips).max(y0 + box_h)
+    b.chips(cy, chips).max(y0 + if b.two { natural_h } else { box_h })
 }
 
 fn timer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -1277,13 +1347,19 @@ fn timer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                 wrap: false,
             });
             b.icon_button(Rect::new(b.x + 152.0, y, 44.0, 44.0), Icon::Plus, TEXT, Some(SURFACE_3), Some(Action::TimerCustom(1)), "Longer");
-            // Right: one button per preset, then the custom round.
-            b.col(1);
-            let mut y = y0;
+            // Then one button per preset and the custom round: stacked in
+            // the right column, or in one row below.
+            let mut y = b.side(y0, y + 44.0);
+            if !b.two {
+                let mut row: Vec<_> =
+                    m.config.timer.presets_min.iter().map(|p| (format!("{p} min"), Btn::Primary(GAME), Action::TimerStart(*p))).collect();
+                row.push((format!("{custom} min"), Btn::Ghost, Action::TimerStart(custom)));
+                return b.button_row(y, row);
+            }
             for p in &m.config.timer.presets_min {
                 y = b.button_row(y, vec![(format!("{p} min"), Btn::Primary(GAME), Action::TimerStart(*p))]) + 10.0;
             }
-            b.button_row(y, vec![(format!("Start {custom} min"), Btn::Ghost, Action::TimerStart(custom))])
+            b.button_row(y, vec![(format!("Start {custom} min"), Btn::Ghost, Action::TimerStart(custom))]).max(y0 + 152.0)
         }
         _ => {
             let rem = m.timer.remaining(now).unwrap_or(0);
@@ -1297,17 +1373,24 @@ fn timer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             let frac = m.timer.progress(now).unwrap_or(0.0);
             b.meter(Rect::new(b.x, y0 + 80.0, b.w, 6.0), frac, GAME);
             b.text(Rect::new(b.x, y0 + 96.0, b.w, 20.0), format!("{:.0}% of the round", frac * 100.0), TextStyle::SMALL, TEXT_2);
-            b.col(1);
+            let y = b.side(y0, y0 + 116.0);
             let main = if m.timer.is_running() {
                 ("Pause".to_string(), Btn::Primary(GAME), Action::TimerPause)
             } else {
                 ("Resume".to_string(), Btn::Primary(GAME), Action::TimerResume)
             };
-            let y = b.button_row(y0, vec![main]) + 10.0;
+            if !b.two {
+                return b.button_row(
+                    y,
+                    vec![main, ("+5 min".into(), Btn::Secondary, Action::TimerAdd(5)), ("Stop".into(), Btn::Secondary, Action::TimerStop)],
+                );
+            }
+            let y = b.button_row(y, vec![main]) + 10.0;
             b.button_row(
                 y,
                 vec![("+5 min".into(), Btn::Secondary, Action::TimerAdd(5)), ("Stop".into(), Btn::Secondary, Action::TimerStop)],
             )
+            .max(y0 + 116.0)
         }
     }
 }
@@ -1329,13 +1412,15 @@ fn game_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             b.col(0);
             b.text(Rect::new(b.x, y0, b.w, 50.0), format::clock(now.saturating_sub(g.started_ms) / 1000), TextStyle::BIG, GAME);
             b.text(Rect::new(b.x, y0 + 50.0, b.w, 20.0), "this session", TextStyle::BODY, TEXT_2);
+            let mut left_end = y0 + 70.0;
             if m.config.game.break_after_min > 0 {
+                left_end = y0 + 164.0;
                 let left = m.break_due_ms.map(|d| format::clock(d.saturating_sub(now).div_ceil(1000))).unwrap_or_else(|| "—".into());
                 b.text(Rect::new(b.x, y0 + 92.0, b.w, 20.0), format!("Next break reminder in {left}"), TextStyle::SMALL, TEXT_2);
                 b.button_row(y0 + 120.0, vec![("Snooze break 15 min".into(), Btn::Primary(GAME), Action::BreakSnooze)]);
             }
-            // Right: GPU, VRAM, temperature and ping, then the last capture.
-            b.col(1);
+            // Then GPU, VRAM, temperature and ping, and the last capture.
+            let y0 = b.side(y0, left_end);
             let tiles = [
                 ("GPU", m.stats.gpu_pct.map(|v| format!("{v:.0}%"))),
                 ("VRAM", m.stats.vram_mb.map(|v| if v >= 1024 { format!("{:.1}G", v as f32 / 1024.0) } else { format!("{v}M") })),
@@ -1376,9 +1461,9 @@ fn game_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                     LABEL,
                 );
                 b.button(Rect::new(b.x + b.w - 74.0, y + 6.0, 66.0, 44.0), "Copy", Btn::Secondary, Action::CaptureCopy(0));
-                return y + 56.0;
+                return (y + 56.0).max(left_end);
             }
-            y
+            (y - 12.0).max(left_end)
         }
         None => {
             let mut games: Vec<(&String, &u64)> = m.playlog.minutes.iter().collect();
@@ -1386,7 +1471,7 @@ fn game_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             let mut y = y0;
             for (i, (exe, mins)) in games.into_iter().enumerate() {
                 let Some(row_y) = b.flow(i, y0, 32.0, 0.0) else { break };
-                y = row_y + 32.0;
+                y = y.max(row_y + 32.0);
                 b.text(Rect::new(b.x, row_y, b.w - 90.0, 32.0), exe.clone(), TextStyle::MONO, TEXT);
                 b.text_end(Rect::new(b.x + b.w - 90.0, row_y, 90.0, 32.0), format::hours_minutes(*mins), TextStyle::MONO_SMALL, TEXT_2);
             }
@@ -1398,10 +1483,10 @@ fn game_slip(m: &Model, b: &mut B, top: f32) -> f32 {
 fn captures_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let now = m.now_ms;
     let y0 = b.header(top, PORTS, "Captures", None) + 12.0;
-    let mut y = y0;
+    let mut bottom = y0 + 10.0;
     for (i, c) in m.captures.iter().enumerate() {
-        let Some(row_y) = b.flow(i, y0, 54.0, 0.0) else { break };
-        y = row_y;
+        let Some(y) = b.flow(i, y0, 54.0, 0.0) else { break };
+        bottom = bottom.max(y + 54.0);
         let tile = Rect::new(b.x, y, 64.0, 44.0);
         b.rect(tile, 6.0, SURFACE_2);
         b.icon(
@@ -1434,9 +1519,8 @@ fn captures_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             Some(Action::CaptureFolder(i)),
             &format!("Show {} in folder", c.name),
         );
-        y += 54.0;
     }
-    y - 10.0
+    bottom - 10.0
 }
 
 fn privacy_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -1459,13 +1543,22 @@ fn privacy_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         );
         y += 34.0;
     }
-    b.col(1);
-    let mut y = y0;
+    let left_end = y - 2.0;
+    let y = b.side(y0, left_end);
+    let mut buttons = Vec::new();
     if m.privacy.iter().any(|p| p.device == Device::Microphone) {
-        y = b.button_row(y, vec![("Mute mic".to_string(), Btn::Danger, Action::MicMute)]) + 10.0;
+        buttons.push(("Mute mic".to_string(), Btn::Danger, Action::MicMute));
     }
     let dev = m.privacy.first().map(|p| p.device).unwrap_or(Device::Microphone);
-    b.button_row(y, vec![("Privacy settings".to_string(), Btn::Secondary, Action::PrivacySettings(dev))])
+    buttons.push(("Privacy settings".to_string(), Btn::Secondary, Action::PrivacySettings(dev)));
+    if !b.two {
+        return b.button_row(y, buttons);
+    }
+    let mut y = y;
+    for btn in buttons {
+        y = b.button_row(y, vec![btn]) + 10.0;
+    }
+    (y - 10.0).max(left_end)
 }
 
 fn prayer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -1477,7 +1570,7 @@ fn prayer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     };
     // Left: the next prayer, large.
     b.col(0);
-    match day.next(now) {
+    let left_end = match day.next(now) {
         Some((p, t)) => {
             b.text(Rect::new(b.x, y0, b.w, 16.0), "NEXT", TextStyle::LABEL, LABEL);
             b.text(Rect::new(b.x, y0 + 18.0, b.w, 52.0), p.name(), TextStyle { size: 36.0, weight: Weight::Semibold, mono: false }, TEXT);
@@ -1489,17 +1582,21 @@ fn prayer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                 TextStyle { size: 14.0, weight: Weight::Regular, mono: true },
                 TEXT_2,
             );
+            y0 + 124.0
         }
-        None => b.text(Rect::new(b.x, y0, b.w, 44.0), "Isya has passed — see you at Subuh", TextStyle::BODY, TEXT_2),
-    }
-    // Right: every time today.
-    b.col(1);
+        None => {
+            b.text(Rect::new(b.x, y0, b.w, 44.0), "Isya has passed — see you at Subuh", TextStyle::BODY, TEXT_2);
+            y0 + 44.0
+        }
+    };
+    // Then every time today.
+    let gy = b.side(y0, left_end);
     let next = day.next(now).map(|(p, _)| p);
     let cols = 3;
     let gap = 8.0;
     let w = (b.w - gap * (cols as f32 - 1.0)) / cols as f32;
     for (i, p) in Prayer::ALL.iter().enumerate() {
-        let r = Rect::new(b.x + (i % cols) as f32 * (w + gap), y0 + (i / cols) as f32 * (54.0 + gap), w, 54.0);
+        let r = Rect::new(b.x + (i % cols) as f32 * (w + gap), gy + (i / cols) as f32 * (54.0 + gap), w, 54.0);
         let active = Some(*p) == next;
         b.rect(r, 10.0, if active { Color::rgb(0x1F3A30) } else { SURFACE_2 });
         b.text(
@@ -1516,7 +1613,7 @@ fn prayer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             if active { OK } else { TEXT },
         );
     }
-    y0 + 3.0 * (54.0 + gap)
+    (gy + 2.0 * (54.0 + gap) + 54.0).max(left_end)
 }
 
 fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -1562,13 +1659,17 @@ fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let mut list: Vec<&TodoItem> = m.todos.iter().filter(|t| !t.done).collect();
     list.extend(m.todos.iter().filter(|t| t.done));
     let typing = m.todo_input.is_some();
-    let list_y0 = if typing { y0 } else { y };
+    // Typing in two columns: the list beside the field.
+    let beside = typing && b.two;
+    let input_end = y;
+    let list_y0 = if beside { y0 } else { y };
     let reserve = if typing { 0.0 } else { 52.0 };
     let per_col = b.rows(list_y0, 42.0, reserve);
-    let capacity = if typing { per_col } else { per_col * 2 };
+    let capacity = if beside { per_col } else { per_col * b.cols() };
     let shown = if list.len() > capacity { capacity.saturating_sub(1) } else { list.len() };
+    let mut bottom = list_y0;
     for (i, t) in list.iter().take(shown).enumerate() {
-        y = if typing {
+        y = if beside {
             b.col(1);
             list_y0 + i as f32 * 42.0
         } else {
@@ -1602,20 +1703,24 @@ fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             &format!("Delete \"{}\"", t.text),
         );
         y += 42.0;
+        bottom = bottom.max(y);
     }
     if list.len() > shown {
-        b.text(Rect::new(b.x + 40.0, y + 10.0, b.w - 40.0, 20.0), format!("+{} more", list.len() - shown), TextStyle::MONO_SMALL, LABEL);
+        b.text(Rect::new(b.x + 40.0, y + 4.0, b.w - 40.0, 20.0), format!("+{} more", list.len() - shown), TextStyle::MONO_SMALL, LABEL);
+        bottom = bottom.max(y + 26.0);
     }
     if typing {
-        return b.limit;
+        return bottom.max(input_end) - 4.0;
     }
-    // Add and Clear along the bottom of the left column.
+    // Add and Clear along the bottom (of the left column).
     b.col(0);
+    let left_end = list_y0 + shown.min(per_col.max(1)) as f32 * 42.0 + if list.len() > shown && !b.two { 26.0 } else { 0.0 };
     let mut buttons = vec![("Add task".to_string(), Btn::Primary(OK), Action::TodoAdd)];
     if m.todos.iter().any(|t| t.done) {
         buttons.push(("Clear done".to_string(), Btn::Secondary, Action::TodoClearDone));
     }
-    b.button_row(b.limit - 44.0, buttons)
+    let by = b.pin(left_end + 8.0, 44.0);
+    b.button_row(by, buttons).max(bottom)
 }
 
 /// "#RRGGBB" → colour, or a default per feed.
@@ -1696,21 +1801,23 @@ fn calendar_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         n => format!("{n} events today"),
     };
     b.text(Rect::new(b.x, y, b.w, 20.0), line, TextStyle::BODY_MEDIUM, TEXT_2);
-    // The events themselves on the right.
-    b.col(1);
-    y = y0;
+    // Then the events themselves.
+    let left_end = y + 20.0;
+    y = b.side(y0, left_end);
 
     if m.config.calendar.feeds.is_empty() {
         b.text(Rect::new(b.x, y, b.w, 20.0), "No calendar linked yet.", TextStyle::BODY, TEXT_2);
         b.text(Rect::new(b.x, y + 20.0, b.w, 20.0), "Add Google Calendar's secret iCal address in Settings.", TextStyle::SMALL, LABEL);
         y += 50.0;
-        return b.button_row(y, vec![("Link a calendar".into(), Btn::Primary(CODER), Action::OpenSettings(ModuleId::Calendar))]);
+        return b
+            .button_row(y, vec![("Link a calendar".into(), Btn::Primary(CODER), Action::OpenSettings(ModuleId::Calendar))])
+            .max(left_end);
     }
     // Upcoming, grouped by day.
     let horizon = now + m.config.calendar.days as i64 * 86_400;
     let upcoming: Vec<&crate::calendar::CalEvent> = m.calendar.iter().filter(|e| e.end > now && e.start < horizon).collect();
     if upcoming.is_empty() {
-        return b.empty(y, "Nothing coming up");
+        return b.empty(y, "Nothing coming up").max(left_end);
     }
     let mut last_day = None;
     for e in upcoming {
@@ -1761,7 +1868,7 @@ fn calendar_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         }
         y += 54.0;
     }
-    y - 8.0
+    (y - 8.0).max(left_end)
 }
 
 fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -1772,11 +1879,13 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         return b.button_row(y, vec![("Add symbols".into(), Btn::Primary(GAME), Action::OpenSettings(ModuleId::Finance))]);
     }
     let y0 = y;
-    let per_col = b.rows(y0, 62.0, 20.0);
-    let fit = if list.len() > per_col * 2 { (per_col * 2).saturating_sub(1) } else { list.len() };
+    let capacity = b.rows(y0, 62.0, 20.0) * b.cols();
+    let fit = if list.len() > capacity { capacity.saturating_sub(1) } else { list.len() };
+    let mut bottom = y0;
     for (i, item) in list.iter().take(fit).enumerate() {
         let Some(row_y) = b.flow(i, y0, 62.0, 20.0) else { break };
         y = row_y;
+        bottom = bottom.max(y + 52.0);
         let q = m.quotes.iter().find(|q| q.symbol.eq_ignore_ascii_case(&item.symbol));
         let r = Rect::new(b.x, y, b.w, 52.0);
         b.raised(r, 14.0, SURFACE);
@@ -1829,7 +1938,7 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     }
     let _ = y;
     b.full();
-    let y = b.limit - 16.0;
+    let y = b.pin(bottom + 12.0, 16.0);
     if list.len() > fit {
         b.text_end(Rect::new(b.x, y, b.w, 16.0), format!("+{} more in Settings", list.len() - fit), TextStyle::MONO_SMALL, LABEL);
     }
@@ -1978,10 +2087,9 @@ fn weather_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             y = b.empty(y, msg) + 14.0;
         }
     }
-    let _ = y;
-    // Early warnings in the right column.
-    b.col(1);
-    y = y0;
+    // Then the early warnings.
+    let left_end = y - 12.0;
+    y = b.side(y0, y - 16.0);
     let alerts = m.relevant_alerts(3);
     let count = (!alerts.is_empty()).then(|| (alerts.len().to_string(), MEDIA));
     y = b.header(y, if alerts.is_empty() { OK } else { MEDIA }, "Early warnings", count) + 10.0;
@@ -2029,7 +2137,7 @@ fn weather_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         TextStyle { size: 10.5, weight: Weight::Regular, mono: true },
         if offline { MEDIA } else { LABEL },
     );
-    y + 18.0
+    (y + 18.0).max(left_end)
 }
 
 /// Points for a static ring arc (used by tests and fallback renderers).
@@ -2189,12 +2297,47 @@ mod tests {
     }
 
     #[test]
-    fn every_slip_has_the_same_size() {
+    fn slip_sizes_stay_in_a_narrow_band() {
         let scenes = all_scenes();
-        let slips: Vec<&(String, Scene)> =
-            scenes.iter().filter(|(n, s)| matches!(s.kind, SceneKind::Slip(_)) && n.ends_with("Left")).collect();
+        let slips: Vec<&(String, Scene)> = scenes.iter().filter(|(_, s)| matches!(s.kind, SceneKind::Slip(_))).collect();
         assert!(slips.len() > 10);
-        assert!(slips.iter().all(|(_, s)| s.size == slips[0].1.size), "{:?}", slips.iter().map(|(n, s)| (n, s.size)).collect::<Vec<_>>());
+        let mut widths = std::collections::HashSet::new();
+        for (name, s) in slips {
+            let side = name.ends_with("Left") || name.ends_with("Right");
+            let (lo, hi) = if side { (SLIP_MIN_V, SLIP_MAX_V) } else { (SLIP_MIN_H, SLIP_MAX_H) };
+            // Height above the one row of tabs.
+            let h = s.size.h - TAB_ROW_H - 8.0;
+            assert!(h >= lo && h <= hi, "{name}: {h}");
+            if side {
+                assert_eq!(s.size.w, SLIP_W, "{name}");
+            } else {
+                assert!(s.size.w == SLIP_W || s.size.w == SLIP_W2, "{name}: {}", s.size.w);
+                widths.insert(s.size.w as u32);
+            }
+        }
+        // Docked top or bottom, short modules stay narrow and tall ones go wide.
+        assert_eq!(widths.len(), 2, "{widths:?}");
+    }
+
+    #[test]
+    fn slip_content_stays_above_the_tabs() {
+        for (name, s) in all_scenes() {
+            if !matches!(s.kind, SceneKind::Slip(_)) {
+                continue;
+            }
+            let slip_h = s.size.h - TAB_ROW_H - 8.0;
+            for p in &s.prims {
+                let r = match p {
+                    Prim::RoundRect { rect, .. } | Prim::Text { rect, .. } | Prim::Image { rect, .. } => *rect,
+                    _ => continue,
+                };
+                // The surface itself spans everything; the tabs sit below.
+                if r.y <= 0.0 || r.y >= slip_h {
+                    continue;
+                }
+                assert!(r.bottom() <= slip_h + 6.0, "{name}: {p:?} runs into the tabs (slip {slip_h})");
+            }
+        }
     }
 
     #[test]
