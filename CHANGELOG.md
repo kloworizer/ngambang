@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-25
+
 ### Added
 - **Calendar** module: link Google Calendar (its secret iCal address) or any
   iCal calendar, as many as you like, each with its own colour. The slip shows
