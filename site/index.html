@@ -326,7 +326,7 @@ footer { padding-block: 40px; border-top: 1px solid var(--line); }
     <div class="wrap hero-grid">
       <div>
         <h1>An island that floats on the <em>edge</em> of your screen.</h1>
-        <p class="lead">Ngambang is a small orb for Windows. It rests on any screen edge, shows what is running on its ring, and unfolds into slips for music, volume, builds, ports, your clipboard and games. When a game goes fullscreen it sinks to a 3&nbsp;px line.</p>
+        <p class="lead">Ngambang is a small orb for Windows. It rests on any screen edge, shows what is running on its ring, and unfolds into soft slips for music, volume, your calendar, markets, weather, prayer times, tasks, builds, ports, your clipboard and games. When a game goes fullscreen it sinks to a 3&nbsp;px line.</p>
         <p class="word"><b>ngambang</b> · Javanese · <i>floating, drifting on the surface</i></p>
         <div class="ctas">
           <a class="btn primary" href="https://github.com/kloworizer/ngambang/releases/latest">
@@ -335,7 +335,7 @@ footer { padding-block: 40px; border-top: 1px solid var(--line); }
           </a>
           <a class="btn ghost" href="https://github.com/kloworizer/ngambang">Source on GitHub</a>
         </div>
-        <p class="meta">v0.1.0 · x64 &amp; ARM64 · Windows 10 1903+ · MIT + Commons Clause</p>
+        <p class="meta">v0.1.3 · x64 &amp; ARM64 · Windows 10 1903+ · MIT + Commons Clause</p>
       </div>
 
       <div class="demo">
@@ -383,9 +383,9 @@ footer { padding-block: 40px; border-top: 1px solid var(--line); }
       <h2 id="states-h" style="font-size: clamp(30px, 4vw, 44px); margin-top: 12px;">Four states, from a line to a card.</h2>
       <div class="states">
         <div class="state"><div class="stage"><span class="mini seam"></span></div><h3><span>SEAM</span>Out of the way</h3><p>A 3&nbsp;px line while a fullscreen app has focus. Only mic/camera alerts and your break reminder come through.</p></div>
-        <div class="state"><div class="stage"><span class="mini orb"></span></div><h3><span>ORB</span>Resting</h3><p>The ring is the tide: progress of the track, timer or build that is running. Scroll on it for volume.</p></div>
-        <div class="state"><div class="stage"><span class="mini tag"></span></div><h3><span>TAG</span>A glance</h3><p>Hover, or a new event, and a label slides out: a finished build, a saved clip, the next track.</p></div>
-        <div class="state"><div class="stage"><span class="mini slip"></span></div><h3><span>SLIPS</span>Everything</h3><p>Click and it unfolds. Every active module gets an index tab on the outer side; scroll to flip.</p></div>
+        <div class="state"><div class="stage"><span class="mini orb"></span></div><h3><span>ORB</span>Resting</h3><p>The ring is the tide: progress of the track, timer or build that is running. Scroll on it to turn the player up or down; the level shows as you go.</p></div>
+        <div class="state"><div class="stage"><span class="mini tag"></span></div><h3><span>TAG</span>A glance</h3><p>Hover, or a new event, and a label pops out: the next track with its cover and controls, a meeting in ten minutes, a change in the weather, a finished build.</p></div>
+        <div class="state"><div class="stage"><span class="mini slip"></span></div><h3><span>SLIPS</span>Everything</h3><p>Click and it unfolds. Every active module gets a tab in the rail along the bottom, in the order you choose; scroll to flip.</p></div>
       </div>
     </div>
   </section>
@@ -411,7 +411,37 @@ footer { padding-block: 40px; border-top: 1px solid var(--line); }
     </div>
   </section>
 
-  <section class="band alt" aria-labelledby="apps-h">
+  <section class="band alt" aria-labelledby="day-h">
+    <div class="wrap">
+      <p class="eyebrow">Your day</p>
+      <h2 id="day-h" style="font-size: clamp(30px, 4vw, 44px); margin-top: 12px;">The next meeting, the market, the sky.</h2>
+      <p class="lead" style="margin-top: 14px;">A glance at the edge of the screen instead of five browser tabs. Everything loads in the background, works offline with the last data, and costs nothing when the module is off.</p>
+      <div class="layers">
+        <div class="layer-card">
+          <h3>Calendar</h3>
+          <p>Link Google Calendar, Outlook or iCloud by their private iCal address, as many calendars as you like, each in its own colour. See this week, what is next, and get a reminder with a Join button before each meeting.</p>
+          <p class="api">iCal · recurring events and time zones</p>
+        </div>
+        <div class="layer-card">
+          <h3>Markets</h3>
+          <p>Type a name in Settings, from BBCA to bitcoin to USD/IDR, and pick it. The slip shows price, today's change and a sparkline, refreshed every minute while it is open.</p>
+          <p class="api">Yahoo Finance · may be delayed</p>
+        </div>
+        <div class="layer-card">
+          <h3>Weather &amp; warnings</h3>
+          <p>The weather for your place and the next hours, plus earthquake, tsunami, cyclone and flood warnings nearby. A change in the sky or a warning pops up.</p>
+          <p class="api">Open-Meteo · GDACS · USGS</p>
+        </div>
+        <div class="layer-card">
+          <h3>Jadwal sholat &amp; to-do</h3>
+          <p>Prayer times calculated on your computer for about 240 places, with a reminder before each one. And a short to-do list you type straight into the slip.</p>
+          <p class="api">Kemenag RI, MWL, ISNA, Umm al-Qura and more</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" aria-labelledby="apps-h">
     <div class="wrap">
       <p class="eyebrow">Media</p>
       <h2 id="apps-h" style="font-size: clamp(30px, 4vw, 44px); margin-top: 12px;">Control every app that makes sound.</h2>
@@ -419,19 +449,19 @@ footer { padding-block: 40px; border-top: 1px solid var(--line); }
       <div class="layers">
         <div class="layer-card">
           <h3>Playback</h3>
-          <p>Title, play, pause, skip and seek for every app that publishes Windows media controls: music apps, every major browser (so web players too) and video players. With several playing, switch between them from source chips.</p>
+          <p>Title, artist, album art, play, pause, skip and seek for every app that publishes Windows media controls: music apps, every major browser (so web players too) and video players. The now-playing tag carries the controls too; with several playing, switch between them from source chips.</p>
           <p class="api">Windows.Media.Control · SMTC</p>
         </div>
         <div class="layer-card">
           <h3>Volume &amp; mute</h3>
-          <p>A mixer row for every process that outputs audio, including games and voice chat that report nothing else. Each row says whether the app also has playback controls.</p>
+          <p>A mixer row with its level for every process that outputs audio, including games and voice chat that report nothing else. Scroll on the orb and the player you are listening to gets louder or quieter, not the whole system.</p>
           <p class="api">WASAPI · IAudioSessionManager2</p>
         </div>
       </div>
     </div>
   </section>
 
-  <section class="band" id="cli" aria-labelledby="cli-h">
+  <section class="band alt" id="cli" aria-labelledby="cli-h">
     <div class="wrap">
       <p class="eyebrow">For your terminal</p>
       <h2 id="cli-h" style="font-size: clamp(30px, 4vw, 44px); margin-top: 12px;">Know when the build is done.</h2>
