@@ -188,8 +188,8 @@ State (dock position, today's play time) lives in
 
 Ngambang checks GitHub Releases once a day. When a new version is out, a tag
 offers **Install**; it downloads the zip, verifies its SHA-256 checksum,
-replaces the files and restarts. You can also use **Check for updates** in
-the tray menu or Settings. Updating needs the install folder to be writable
+replaces the files and restarts. You can also right-click the orb or the
+tray icon and choose **Check for updates**. Updating needs the install folder to be writable
 (for example `%LOCALAPPDATA%\Programs\Ngambang`).
 
 ## Troubleshooting

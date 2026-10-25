@@ -6,6 +6,13 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Slips are wide and short, in two columns.** Instead of one tall column,
+  every module lays out side by side (cover beside the controls, the next
+  prayer beside the day's times, the week beside its events, the weather
+  beside its early warnings), and long lists flow into the second column.
+  Every slip still has the same size.
+
 ## [0.1.4] - 2026-10-25
 
 ### Added
