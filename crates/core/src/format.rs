@@ -13,6 +13,18 @@ pub fn duration_short(secs: u64) -> String {
 }
 
 /// Media/timer clock: "1:42", "12:05", "1:32:08".
+/// "512 KB", "34.2 MB", "1.4 GB".
+pub fn bytes(n: u64) -> String {
+    let f = n as f64;
+    if f >= 1e9 {
+        format!("{:.1} GB", f / 1e9)
+    } else if f >= 1e6 {
+        format!("{:.1} MB", f / 1e6)
+    } else {
+        format!("{:.0} KB", (f / 1e3).max(1.0))
+    }
+}
+
 pub fn clock(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
     if h > 0 {

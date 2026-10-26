@@ -11,8 +11,8 @@ pub(super) struct Item {
     text: String,
     detail: Option<String>,
     module: ModuleId,
-    /// The playing track: a play/pause button rides along.
-    media: bool,
+    /// Small round buttons riding along (play/pause, join, mic…).
+    buttons: Vec<(Icon, Color, Action, &'static str)>,
 }
 
 /// Docked top or bottom: the row's height and widest extent.
@@ -31,8 +31,29 @@ const DETAIL_S: TextStyle = TextStyle { size: 10.5, weight: Weight::Regular, mon
 pub(super) fn items(m: &Model) -> Vec<Item> {
     let now = m.now_ms;
     let mut v = Vec::new();
-    let mut push =
-        |icon, color, text: String, detail: Option<String>, module, media| v.push(Item { icon, color, text, detail, module, media });
+    // In a meeting: join it, mute or unmute the microphone.
+    if let Some(e) = m.meeting() {
+        let mic = match m.mic_muted {
+            Some(true) => (Icon::SpeakerMuted, PRIVACY, Action::MicToggle, "Unmute microphone"),
+            _ => (Icon::Mic, OK, Action::MicToggle, "Mute microphone"),
+        };
+        v.push(Item {
+            icon: Icon::Calendar,
+            color: CODER,
+            text: e.title.clone(),
+            detail: Some("meeting now".into()),
+            module: ModuleId::Calendar,
+            buttons: vec![(Icon::Open, CODER, Action::OpenUrl(e.link.clone()), "Join meeting"), mic],
+        });
+    }
+    let mut push = |icon, color, text: String, detail: Option<String>, module, media: bool| {
+        let mut buttons = Vec::new();
+        if let Some(s) = m.front_media().filter(|s| media && s.can_play_pause) {
+            let icon = if s.playing { Icon::Pause } else { Icon::Play };
+            buttons.push((icon, MEDIA, Action::MediaPlayPause, if s.playing { "Pause" } else { "Play" }));
+        }
+        v.push(Item { icon, color, text, detail, module, buttons })
+    };
     if let Some(p) = m.privacy.first() {
         let (icon, what) = match p.device {
             Device::Microphone => (Icon::Mic, "Mic"),
@@ -51,8 +72,22 @@ pub(super) fn items(m: &Model) -> Vec<Item> {
         push(Icon::Game, GAME, g.exe.clone(), Some(format::clock(now.saturating_sub(g.started_ms) / 1000)), ModuleId::Game, false);
     }
     if let Some(rem) = m.timer.remaining(now) {
-        let text = if m.timer.is_running() { "Focus" } else { "Focus paused" };
+        let text = if m.on_break {
+            "Break"
+        } else if m.timer.is_running() {
+            "Focus"
+        } else {
+            "Focus paused"
+        };
         push(Icon::Clock, GAME, text.into(), Some(format::clock(rem / 1000)), ModuleId::Timer, false);
+    }
+    if let Some(d) = m.downloads.first() {
+        let more = if m.downloads.len() > 1 { format!(" +{}", m.downloads.len() - 1) } else { String::new() };
+        push(Icon::Download, PORTS, d.name.clone(), Some(format!("{}{more}", format::bytes(d.bytes))), ModuleId::Captures, false);
+    }
+    if let Some((p, pct)) = m.power.and_then(|p| p.percent.map(|v| (p, v))).filter(|(p, v)| !p.on_ac && *v <= 30) {
+        let left = p.secs_left.map(|s| format!("{} left", format::hours_minutes(s as u64 / 60)));
+        push(Icon::Battery, PRIVACY_TEXT, format!("Battery {pct}%"), left, ModuleId::Power, false);
     }
     if let Some(j) = m.jobs.iter().find(|j| matches!(j.status, JobStatus::Running { .. })) {
         let detail = match j.status {
@@ -78,7 +113,11 @@ pub(super) fn items(m: &Model) -> Vec<Item> {
         };
         push(Icon::Calendar, CODER, e.title.clone(), Some(when), ModuleId::Calendar, false);
     }
-    if let (Some(day), Some(t)) = (m.prayer_day, m.local_minute()) {
+    if let (Some((what, at)), Some(t)) = (m.fasting(), m.local_minute()) {
+        let left = (at - t).max(0.0).round() as i64;
+        let detail = if left < 60 { format!("in {left}m") } else { format!("in {}h{:02}", left / 60, left % 60) };
+        push(Icon::Moon, OK, format!("{what} {}", crate::prayer::hhmm(at.rem_euclid(1440.0))), Some(detail), ModuleId::Prayer, false);
+    } else if let (Some(day), Some(t)) = (m.prayer_day, m.local_minute()) {
         if let Some((p, at)) = day.next(t) {
             let left = (at - t).max(0.0).round() as i64;
             let detail = if left < 60 { format!("in {left}m") } else { format!("in {}h{:02}", left / 60, left % 60) };
@@ -164,17 +203,13 @@ fn item(b: &mut Vec<Prim>, hits: &mut Vec<Hit>, m: &Model, it: &Item, r: Rect, f
         });
     }
     hits.push(Hit { rect: r, kind: HitKind::Click(Action::SelectSlip(it.module)), label: format!("Open {}", it.module.label()) });
-    if it.media {
-        if let Some(s) = m.front_media() {
-            let pr = Rect::new(r.right() - 36.0, r.y + (r.h - 28.0) / 2.0, 28.0, 28.0);
-            let pc = if s.can_play_pause { MEDIA } else { TRACK };
-            b.extend(soft::raised_grad(pr, 14.0, accent_light(pc), accent_deep(pc), 1.5));
-            let (icon, label) = if s.playing { (Icon::Pause, "Pause") } else { (Icon::Play, "Play") };
-            b.extend(icon_prims(icon, Rect::new(pr.x + 8.0, pr.y + 8.0, 12.0, 12.0), SURFACE));
-            if s.can_play_pause {
-                hits.push(Hit { rect: pr, kind: HitKind::Click(Action::MediaPlayPause), label: label.into() });
-            }
-        }
+    let mut bx = r.right() - 8.0 - 28.0 * it.buttons.len() as f32 - 4.0 * (it.buttons.len() as f32 - 1.0).max(0.0);
+    for (icon, color, action, label) in &it.buttons {
+        let pr = Rect::new(bx, r.y + (r.h - 28.0) / 2.0, 28.0, 28.0);
+        b.extend(soft::raised_grad(pr, 14.0, accent_light(*color), accent_deep(*color), 1.5));
+        b.extend(icon_prims(*icon, Rect::new(pr.x + 8.0, pr.y + 8.0, 12.0, 12.0), SURFACE));
+        hits.push(Hit { rect: pr, kind: HitKind::Click(action.clone()), label: (*label).into() });
+        bx += 32.0;
     }
     ring
 }
@@ -182,7 +217,7 @@ fn item(b: &mut Vec<Prim>, hits: &mut Vec<Hit>, m: &Model, it: &Item, r: Rect, f
 /// Width an item needs in a row (capped).
 fn width(tm: &dyn TextMeasure, it: &Item) -> (f32, f32) {
     let tw = tm.width(&it.text, TEXT_S).max(it.detail.as_ref().map(|d| tm.width(d, DETAIL_S)).unwrap_or(0.0)).ceil().min(126.0);
-    let extra = if it.media { 36.0 } else { 0.0 };
+    let extra = 32.0 * it.buttons.len() as f32 + if it.buttons.is_empty() { 0.0 } else { 4.0 };
     (8.0 + 26.0 + 10.0 + tw + 14.0 + extra, tw)
 }
 
@@ -230,7 +265,7 @@ fn column(m: &Model, edge: Edge, tm: &dyn TextMeasure, items: Vec<Item>) -> Scen
     let n = items.len();
     for (i, it) in items.iter().enumerate() {
         let r = Rect::new(pad, pad + i as f32 * LINE_H, w - 2.0 * pad, LINE_H);
-        let tw = r.w - 8.0 - 26.0 - 10.0 - 10.0 - if it.media { 36.0 } else { 0.0 };
+        let tw = r.w - 8.0 - 26.0 - 10.0 - 10.0 - 32.0 * it.buttons.len() as f32;
         let rs = item(&mut prims, &mut hits, m, it, r, i == 0, tw);
         ring = ring.or(rs);
         if i + 1 < n {

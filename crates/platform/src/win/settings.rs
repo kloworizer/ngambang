@@ -58,6 +58,7 @@ const ID_WATCH: usize = 43;
 const ID_WATCH_UP: usize = 44;
 const ID_WATCH_DOWN: usize = 45;
 const ID_WATCH_REMOVE: usize = 46;
+const ID_WATCH_LEVELS: usize = 47;
 /// Posted to the Settings window when "Use my location" finishes.
 const WM_LOCATED: u32 = WM_APP + 20;
 /// Posted when a symbol search finishes.
@@ -110,7 +111,7 @@ const PAGES: [Page; 9] = [
     Page { icon: Icon::Grid, title: "Modules", subtitle: "Turn modules on or off and set the order of their tabs", accent: theme::CODER },
     Page { icon: Icon::Note, title: "Media & clipboard", subtitle: "Now playing, volume and developer clipboard", accent: theme::MEDIA },
     Page { icon: Icon::Clock, title: "Focus & commands", subtitle: "The focus timer and long-running command tags", accent: theme::GAME },
-    Page { icon: Icon::Game, title: "Games", subtitle: "Break reminders, ping and power plan while playing", accent: theme::GAME },
+    Page { icon: Icon::Game, title: "Games & power", subtitle: "Breaks while playing, battery and power plans", accent: theme::GAME },
     Page { icon: Icon::Pin, title: "Location & prayer", subtitle: "Your place for jadwal sholat and the weather", accent: theme::OK },
     Page { icon: Icon::Cloud, title: "Weather & updates", subtitle: "Early warnings near you and new versions", accent: theme::PORTS },
     Page {
@@ -132,7 +133,7 @@ pub fn page_for(m: ModuleId) -> usize {
     match m {
         ModuleId::Media | ModuleId::Clipboard | ModuleId::Mixer => 2,
         ModuleId::Timer | ModuleId::Commands => 3,
-        ModuleId::Game => 4,
+        ModuleId::Game | ModuleId::Power => 4,
         ModuleId::Prayer => 5,
         ModuleId::Weather => 6,
         ModuleId::Calendar => 7,
@@ -185,6 +186,17 @@ struct Controls {
     price_alerts: HWND,
     move_pct: HWND,
     news: HWND,
+    above: HWND,
+    below: HWND,
+    hijri_adjust: HWND,
+    break_min: HWND,
+    long_break: HWND,
+    long_every: HWND,
+    focus_assist: HWND,
+    battery_plan: HWND,
+    plugged_plan: HWND,
+    low_battery: HWND,
+    network_tags: HWND,
 }
 
 struct Settings {
@@ -591,7 +603,10 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
     b.section("FOCUS TIMER");
     let presets = b.edit("Preset rounds (minutes)", &form.timer_presets);
     let custom = b.edit("Custom round (minutes)", &form.timer_custom);
-    b.hint("Presets are buttons in the timer slip; − and + there change the custom round.");
+    let break_min = b.edit("Break after a round (minutes)", &form.break_min);
+    let long_break = b.edit("Long break (minutes)", &form.long_break_min);
+    let long_every = b.edit("Long break every (rounds)", &form.long_every);
+    let focus_assist = b.check("Turn on Do not disturb during rounds (Windows 11)", form.focus_assist);
     b.section("COMMANDS");
     let long_command = b.edit("Long command (seconds)", &form.long_command_s);
     b.hint("Used by the shell hook: run `ngambang hook powershell` to set it up.");
@@ -611,7 +626,15 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
         plans.iter().position(|(g, _)| ngambang_core::format::parse_guid(g) == want).map(|i| i + 1).unwrap_or(0)
     };
     let power_plan = b.combo("Power plan in games", &plan_items, plan_index, 0);
-    b.hint("Only real games count: a game-library folder, exclusive fullscreen or a busy GPU. 0 turns the reminder off.");
+    b.section("BATTERY & NETWORK");
+    let plan_at = |guid: &str| {
+        let want = ngambang_core::format::parse_guid(guid);
+        plans.iter().position(|(g, _)| !guid.is_empty() && ngambang_core::format::parse_guid(g) == want).map(|i| i + 1).unwrap_or(0)
+    };
+    let battery_plan = b.combo("Power plan on battery", &plan_items, plan_at(&form.battery_plan), 0);
+    let plugged_plan = b.combo("Power plan plugged in", &plan_items, plan_at(&form.plugged_plan), 0);
+    let low_battery = b.edit("Warn at battery level (%)", &form.low_battery);
+    let network_tags = b.check("Tell me when the connection or a VPN drops or comes back", form.network_tags);
 
     // Location & prayer
     b.start_page(5);
@@ -637,6 +660,7 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
     let asr_items = vec!["Standard (Shafi'i, Maliki, Hanbali)".to_string(), "Hanafi".to_string()];
     let asr = b.combo("Asr", &asr_items, (form.prayer_asr == ngambang_core::prayer::Asr::Hanafi) as usize, 0);
     let reminder = b.edit("Reminder (minutes before)", &form.prayer_reminder);
+    let hijri_adjust = b.edit("Hijri date correction (days)", &form.hijri_adjust);
 
     // Weather & updates
     b.start_page(6);
@@ -673,7 +697,7 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
         b.make(w!("STATIC"), "Type a company, index, coin or currency pair", 0, WINDOW_EX_STYLE(0), (CTRL_X, b.y, CTRL_W, 18), 0);
     b.hints.push(search_status);
     b.y += 24;
-    let results = b.listbox(CTRL_X, CTRL_W, 72, ID_RESULTS);
+    let results = b.listbox(CTRL_X, CTRL_W, 60, ID_RESULTS);
     b.buttons(&[("Add to watchlist", ID_WATCH_ADD)]);
     b.section("YOUR WATCHLIST");
     let wy = b.y;
@@ -687,6 +711,13 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
         b.make(w!("EDIT"), &form.move_pct, (ES_AUTOHSCROLL as u32) | WS_TABSTOP.0, WS_EX_CLIENTEDGE, (X0 + 154, b.y - 1, 52, 28), 0);
     let news = b.check_at("Tag fresh headlines about the watchlist", X0 + 232, CW - 232, form.news);
     b.y += 30;
+    // Price levels for the selected symbol.
+    let ly = b.y;
+    b.label_at("Alert above / below", ly - 4);
+    let above = b.make(w!("EDIT"), "", (ES_AUTOHSCROLL as u32) | WS_TABSTOP.0, WS_EX_CLIENTEDGE, (CTRL_X, ly, 110, 28), 0);
+    let below = b.make(w!("EDIT"), "", (ES_AUTOHSCROLL as u32) | WS_TABSTOP.0, WS_EX_CLIENTEDGE, (CTRL_X + 118, ly, 110, 28), 0);
+    b.button_at("Set for selected", CTRL_X + 236, ly - 2, 150, ID_WATCH_LEVELS, false);
+    b.y += 34;
 
     // Footer, on every page.
     b.page = PAGES.len();
@@ -751,6 +782,17 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
         price_alerts,
         move_pct,
         news,
+        above,
+        below,
+        hijri_adjust,
+        break_min,
+        long_break,
+        long_every,
+        focus_assist,
+        battery_plan,
+        plugged_plan,
+        low_battery,
+        network_tags,
     };
     let painter = unsafe {
         D2D1CreateFactory::<ID2D1Factory1>(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&D2D1_FACTORY_OPTIONS::default()))
@@ -868,6 +910,21 @@ impl Settings {
             price_alerts: checked(c.price_alerts),
             move_pct: text(c.move_pct),
             news: checked(c.news),
+            hijri_adjust: text(c.hijri_adjust),
+            break_min: text(c.break_min),
+            long_break_min: text(c.long_break),
+            long_every: text(c.long_every),
+            focus_assist: checked(c.focus_assist),
+            battery_plan: match selected(c.battery_plan) {
+                0 => String::new(),
+                i => self.plans.get(i - 1).map(|p| p.0.clone()).unwrap_or_default(),
+            },
+            plugged_plan: match selected(c.plugged_plan) {
+                0 => String::new(),
+                i => self.plans.get(i - 1).map(|p| p.0.clone()).unwrap_or_default(),
+            },
+            low_battery: text(c.low_battery),
+            network_tags: checked(c.network_tags),
         }
     }
 
@@ -884,7 +941,9 @@ impl Settings {
                     "Volume step" => 2,
                     "Long command" | "Timer presets" | "Custom round" => 3,
                     "Break reminder" | "Ping host" | "Power plan" => 4,
-                    "Latitude" | "Longitude" | "Prayer reminder" => 5,
+                    "Latitude" | "Longitude" | "Prayer reminder" | "Hijri date" => 5,
+                    "Break" | "Long break" | "Long break every" => 3,
+                    "Low battery" | "Battery plan" | "Plugged-in plan" => 4,
                     "Earthquake radius" => 6,
                     "Calendar address" | "Event reminder" | "Days ahead" => 7,
                     "Price move" => 8,
@@ -990,22 +1049,54 @@ impl Settings {
         let items: Vec<String> = self
             .watchlist
             .iter()
-            .map(|w| if w.name.is_empty() { w.symbol.clone() } else { format!("{} — {}", w.symbol, w.name) })
+            .map(|w| {
+                let mut label = if w.name.is_empty() { w.symbol.clone() } else { format!("{} — {}", w.symbol, w.name) };
+                if let Some(a) = w.above {
+                    label += &format!("  ↑{}", ngambang_core::finance::format_level(a));
+                }
+                if let Some(b) = w.below {
+                    label += &format!("  ↓{}", ngambang_core::finance::format_level(b));
+                }
+                label
+            })
             .collect();
         lb_fill(self.c.watch, &items);
+    }
+
+    /// The alert levels typed for the selected symbol; an error to show, if any.
+    fn set_levels(&mut self) -> Option<String> {
+        let Some(i) = lb_selected(self.c.watch) else { return Some("Pick a symbol in your watchlist first.".into()) };
+        let parse = |t: String| -> Result<Option<f64>, String> {
+            let t = t.trim().replace(',', "");
+            if t.is_empty() {
+                return Ok(None);
+            }
+            t.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0).map(Some).ok_or_else(|| format!("\"{t}\" is not a price"))
+        };
+        let (above, below) = match (parse(text(self.c.above)), parse(text(self.c.below))) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => return Some(e),
+        };
+        if let Some(w) = self.watchlist.get_mut(i) {
+            w.above = above;
+            w.below = below;
+        }
+        self.fill_watchlist();
+        unsafe { SendMessageW(self.c.watch, LB_SETCURSEL, Some(WPARAM(i)), None) };
+        None
     }
 
     fn add_watch(&mut self) {
         // The selected result, else the first one, else the text as a symbol.
         let hit = lb_selected(self.c.results).and_then(|i| self.hits.get(i)).or(self.hits.first()).cloned();
         let item = match hit {
-            Some(h) => WatchItem { symbol: h.symbol, name: h.name },
+            Some(h) => WatchItem { symbol: h.symbol, name: h.name, ..Default::default() },
             None => {
                 let typed = text(self.c.search).trim().to_uppercase();
                 if typed.is_empty() || typed.contains(' ') {
                     return;
                 }
-                WatchItem { symbol: typed, name: String::new() }
+                WatchItem { symbol: typed, name: String::new(), ..Default::default() }
             }
         };
         if self.watchlist.iter().any(|w| w.symbol.eq_ignore_ascii_case(&item.symbol)) || self.watchlist.len() >= 20 {
@@ -1381,6 +1472,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 }
                 ID_WATCH_UP | ID_WATCH_DOWN => {
                     with(|s| s.move_watch(if id == ID_WATCH_UP { -1 } else { 1 }));
+                }
+                ID_WATCH_LEVELS => {
+                    let err = with(|s| s.set_levels()).flatten();
+                    if let Some(msg) = err {
+                        warn(hwnd, &msg);
+                    }
+                }
+                ID_WATCH if code == LBN_SELCHANGE => {
+                    with(|s| {
+                        if let Some(w) = lb_selected(s.c.watch).and_then(|i| s.watchlist.get(i)) {
+                            let f = |v: Option<f64>| v.map(ngambang_core::finance::format_level).unwrap_or_default();
+                            set_text(s.c.above, &f(w.above));
+                            set_text(s.c.below, &f(w.below));
+                        }
+                    });
                 }
                 ID_WATCH_REMOVE => {
                     with(|s| {

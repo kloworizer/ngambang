@@ -348,7 +348,7 @@ footer { padding-block: 40px; border-top: 1px solid var(--line); }
           </a>
           <a class="btn ghost" href="https://github.com/kloworizer/ngambang">Source on GitHub</a>
         </div>
-        <p class="meta">v0.1.8 · x64 &amp; ARM64 · Windows 10 1903+ · MIT + Commons Clause</p>
+        <p class="meta">v0.1.9 · x64 &amp; ARM64 · Windows 10 1903+ · MIT + Commons Clause</p>
       </div>
 
       <div class="demo">
@@ -405,7 +405,7 @@ footer { padding-block: 40px; border-top: 1px solid var(--line); }
 
   <section class="band" id="looks" aria-labelledby="looks-h">
     <div class="wrap">
-      <p class="eyebrow">New in 0.1.7 &amp; 0.1.8</p>
+      <p class="eyebrow">New in 0.1.7 – 0.1.9</p>
       <h2 id="looks-h" style="font-size: clamp(30px, 4vw, 44px); margin-top: 12px;">An orb or a notch. One display or three.</h2>
       <div class="layers">
         <div class="layer-card">
@@ -464,13 +464,23 @@ footer { padding-block: 40px; border-top: 1px solid var(--line); }
       <p class="lead" style="margin-top: 14px;">A glance at the edge of the screen instead of five browser tabs. Everything loads in the background, works offline with the last data, and costs nothing when the module is off.</p>
       <div class="layers">
         <div class="layer-card">
+          <h3>Ramadan, focus &amp; notes</h3>
+          <p>In Ramadan the island counts down to imsak and buka, with the Hijri date and the qibla direction. Focus rounds come with breaks and turn on Do not disturb. Keep quick notes, from the slip or with <code>ngambang note</code>.</p>
+          <p class="api">New in 0.1.9</p>
+        </div>
+        <div class="layer-card">
+          <h3>Clipboard, battery &amp; launch</h3>
+          <p>Paste from the last 20 things you copied, see battery and VPN at a glance and switch power plans, follow downloads as they arrive, and drop apps or folders on the island to launch them from there.</p>
+          <p class="api">New in 0.1.9</p>
+        </div>
+        <div class="layer-card">
           <h3>Calendar</h3>
-          <p>Indonesian public holidays are there from the start. Link Google Calendar, Outlook or iCloud by their private iCal address, as many calendars as you like, each in its own colour. See this week, what is next, and get the reminders you set on each event, with a Join button for meetings.</p>
+          <p>Indonesian public holidays are there from the start. Link Google Calendar, Outlook or iCloud by their private iCal address, as many calendars as you like, each in its own colour. See this week, what is next, and get the reminders you set on each event. Meet, Zoom and Teams links become a Join button, and during a meeting the glance mutes or unmutes your mic.</p>
           <p class="api">iCal · recurring events and time zones</p>
         </div>
         <div class="layer-card">
           <h3>Markets</h3>
-          <p>Type a name in Settings, from BBCA to bitcoin to USD/IDR, and pick it. The slip shows price, today's change, a sparkline and the latest headlines from Google News and Yahoo, refreshed every few minutes. A tag pops up when something on your watchlist moves 3&nbsp;% (or your own step) and when fresh news about it breaks.</p>
+          <p>Type a name in Settings, from BBCA to bitcoin to USD/IDR, and pick it. The slip shows price, today's change, a sparkline and the latest headlines from Google News and Yahoo, refreshed every few minutes. A tag pops up when something on your watchlist moves 3&nbsp;% (or your own step), crosses a price you set, or when fresh news about it breaks.</p>
           <p class="api">Yahoo Finance · Google News · may be delayed</p>
         </div>
         <div class="layer-card">
@@ -560,7 +570,7 @@ ngambang.exe notify <span class="k">"backup finished"</span> --level ok</pre>
 
 <footer>
   <div class="wrap foot">
-    <span>Ngambang 0.1.8 · MIT + Commons Clause · no telemetry</span>
+    <span>Ngambang 0.1.9 · MIT + Commons Clause · no telemetry</span>
     <span><a href="https://github.com/kloworizer/ngambang/blob/main/CHANGELOG.md">Changelog</a> · <a href="https://github.com/kloworizer/ngambang/blob/main/docs/integrations.md">Integrations</a> · <a href="https://github.com/kloworizer/ngambang/releases">Releases</a></span>
   </div>
 </footer>
@@ -620,16 +630,19 @@ ngambang.exe notify <span class="k">"backup finished"</span> --level ok</pre>
     ["mixer", "Volume mixer", "--text", "Volume and mute for every app making sound, games and voice chat included."],
     ["commands", "Command tags", "--coder", "✓ or ✕ when long commands finish, from ngambang run or your shell hook."],
     ["ports", "Local ports", "--ports", "What is listening on localhost. Open it in the browser, or stop it."],
-    ["clipboard", "Dev clipboard", "--coder", "JWT, JSON, base64, Unix time, UUID, colours and tracking links, with one-tap fixes."],
-    ["timer", "Focus timer", "--game", "25 or 50-minute rounds, or your own length, on the ring. Minor tags wait until the break."],
+    ["clipboard", "Clipboard", "--coder", "The last 20 things you copied, to paste again or pin; plus JWT, JSON, base64, UUID, colours and tracking links, with one-tap fixes."],
+    ["timer", "Focus timer", "--game", "Rounds with breaks between them, on the ring, with Do not disturb on while you focus."],
     ["game", "Game stats", "--game", "Session time, GPU load, VRAM, temperature, ping and a break reminder."],
-    ["captures", "Screenshots & clips", "--ports", "New captures get a tag; copy them or show them in their folder."],
+    ["captures", "Captures & downloads", "--ports", "New screenshots, clips and downloads (with progress) get a tag; copy them or show them in their folder."],
     ["privacy", "Mic & camera", "--privacy", "Tells you when an app uses the microphone or camera, even mid-game."],
     ["weather", "Weather & warnings", "--ports", "Weather for your location, plus earthquake, tsunami, cyclone and flood warnings from GDACS and USGS."],
-    ["prayer", "Jadwal sholat", "--ok", "Prayer times calculated on your device, with a reminder before each prayer. Off by default."],
+    ["prayer", "Jadwal sholat", "--ok", "Prayer times calculated on your device, reminders, the Hijri date, qibla, and imsak/buka in Ramadan. Off by default."],
     ["todo", "To-do list", "--ok", "A short task list: type it in the slip, tick off, clear. Kept between restarts."],
     ["calendar", "Calendar", "--coder", "This week and what's next from Google Calendar or any iCal calendar, with reminders."],
-    ["finance", "Markets watchlist", "--game", "Shares, indices, crypto and currencies with today's change and a sparkline."]
+    ["finance", "Markets watchlist", "--game", "Shares, indices, crypto and currencies with today's change, headlines and price alerts."],
+    ["notes", "Quick notes", "--ok", "Jot something down in the slip, or with ngambang note from any terminal."],
+    ["power", "Battery & network", "--ok", "Battery and time left, low-battery and VPN tags, and one-click power plans."],
+    ["launch", "Quick launch", "--ports", "Drop apps, folders or files on the island to open them from there."]
   ];
   var state = {};
   var grid = document.getElementById("mod-grid");

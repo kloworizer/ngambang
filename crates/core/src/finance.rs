@@ -282,6 +282,12 @@ pub fn format_price(q: &Quote) -> String {
     }
 }
 
+/// A price level as typed: "9000", "1.0850", "80000.5".
+pub fn format_level(v: f64) -> String {
+    let s = format!("{v:.4}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 /// "+1.25%" / "−0.40%".
 pub fn format_change(pct: f64) -> String {
     if pct < 0.0 {

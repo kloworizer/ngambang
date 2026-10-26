@@ -141,14 +141,7 @@ fn title(m: &Model, front: ModuleId) -> (String, Option<(String, Color)>) {
             ),
             None => ("Clipboard".into(), None),
         },
-        ModuleId::Timer => {
-            let state = match m.timer {
-                FocusTimer::Idle => "ready",
-                FocusTimer::Running { .. } => "running",
-                FocusTimer::Paused { .. } => "paused",
-            };
-            (format!("Focus · {state}"), None)
-        }
+        ModuleId::Timer => (focus_title(m), focus_rounds(m)),
         ModuleId::Game => {
             let now = m.now_ms;
             let today = format!(
@@ -174,6 +167,9 @@ fn title(m: &Model, front: ModuleId) -> (String, Option<(String, Color)>) {
         ModuleId::Finance => {
             ("Markets".into(), detail(format!("{} symbols · Yahoo Finance, may be delayed", m.config.finance.watchlist.len())))
         }
+        ModuleId::Notes => ("Notes".into(), (!m.notes.is_empty()).then(|| (m.notes.len().to_string(), TEXT_2))),
+        ModuleId::Power => ("Battery & network".into(), None),
+        ModuleId::Launch => ("Quick launch".into(), detail("drop files here to pin".into())),
     }
 }
 
@@ -209,6 +205,9 @@ pub(super) fn strip(m: &Model, front: ModuleId, tm: &dyn TextMeasure) -> Scene {
         ModuleId::Todo => todo(m, &mut b),
         ModuleId::Calendar => calendar(m, &mut b),
         ModuleId::Finance => finance(m, &mut b),
+        ModuleId::Notes => notes(m, &mut b),
+        ModuleId::Power => power(m, &mut b),
+        ModuleId::Launch => launch(m, &mut b),
     };
     let content: Vec<Prim> = std::mem::take(&mut b.prims);
     // As tall as the content, never more than the strip may be.
@@ -217,7 +216,7 @@ pub(super) fn strip(m: &Model, front: ModuleId, tm: &dyn TextMeasure) -> Scene {
     b.prims.extend(surface(Rect::new(0.0, 0.0, w, h), 16.0));
 
     // Tabs: small icons on the right of the header row.
-    let (tab_w, gap) = (26.0, 3.0);
+    let (tab_w, gap) = (24.0, 2.0);
     let n = tabs.len() as f32;
     let tabs_w = n * tab_w + (n - 1.0).max(0.0) * gap;
     let mut tx = w - PAD - tabs_w;
@@ -535,15 +534,28 @@ fn ports(m: &Model, b: &mut B) -> f32 {
 }
 
 fn clip(m: &Model, b: &mut B) -> f32 {
-    let Some(c) = &m.clip else { return empty(b, "Copy a JWT, JSON, UUID, timestamp, colour or link") };
-    let cols = columns(PAD, b.full_w, &[2.0, 1.0]);
+    let cols = columns(PAD, b.full_w, &[1.0, 1.3]);
+    b.at(cols[1]);
+    let history = super::more::clip_history(m, b, TOP);
+    b.at(cols[0]);
+    let Some(c) = &m.clip else {
+        b.text(Rect::new(b.x, TOP, b.w, 36.0), "Copy a JWT, JSON, UUID, timestamp, colour or link", S_SMALL, TEXT_2);
+        return history.max(TOP + 36.0);
+    };
+    detected(b, c, cols[0]).max(history)
+}
+
+/// The detected format in a column: a preview and its actions.
+fn detected(b: &mut B, c: &ClipState, col: (f32, f32)) -> f32 {
+    let cols = [col, col];
     let (x, w) = cols[0];
     let preview = clipboard::preview(&c.text, &c.kind, c.unix_at);
     let per_line = ((w - 20.0) / 6.8).max(8.0) as usize;
-    let max_lines = ((ROOM - 16.0) / 15.0).floor() as usize;
+    // Room for the actions under it.
+    let max_lines = 4;
     let shown: String = format::ellipsize(&preview, 400).lines().take(max_lines).collect::<Vec<_>>().join("\n");
     let lines: usize = shown.lines().map(|l| l.chars().count().div_ceil(per_line).max(1)).sum::<usize>().min(max_lines);
-    let box_h = (lines as f32 * 15.0 + 16.0).clamp(44.0, ROOM);
+    let box_h = (lines as f32 * 15.0 + 16.0).clamp(36.0, ROOM - 34.0);
     b.rect(Rect::new(x, TOP, w, box_h), 8.0, SURFACE_2);
     let mut tx = x + 10.0;
     if let ClipKind::HexColor { r, g, b: bl, a } = c.kind {
@@ -566,7 +578,7 @@ fn clip(m: &Model, b: &mut B) -> f32 {
     });
     b.at(cols[1]);
     let chips = c.kind.actions().iter().map(|a| (a.label().to_string(), CODER, Action::Clip(*a))).collect();
-    b.mini_chips(TOP, chips).max(TOP + box_h)
+    b.mini_chips(TOP + box_h + 8.0, chips)
 }
 
 fn timer(m: &Model, b: &mut B) -> f32 {
@@ -655,7 +667,7 @@ fn game(m: &Model, b: &mut B) -> f32 {
         let r = Rect::new(rx, y, rw, 30.0);
         b.rect(r, 8.0, SURFACE_2);
         let what = if c.kind == CaptureKind::Clip { "Clip saved" } else { "Screenshot" };
-        b.icon(if c.kind == CaptureKind::Clip { Icon::Play } else { Icon::Image }, Rect::new(r.x + 8.0, r.y + 8.0, 14.0, 14.0), PORTS);
+        b.icon(capture_icon(c.kind), Rect::new(r.x + 8.0, r.y + 8.0, 14.0, 14.0), PORTS);
         b.line(Rect::new(r.x + 28.0, r.y, r.w - 60.0, 30.0), what, S_SMALL, TEXT);
         b.mini_icon(Rect::new(r.right() - 28.0, r.y + 3.0, 24.0, 24.0), Icon::Copy, TEXT, Some(Action::CaptureCopy(0)), "Copy capture");
     }
@@ -664,10 +676,21 @@ fn game(m: &Model, b: &mut B) -> f32 {
 
 fn captures(m: &Model, b: &mut B) -> f32 {
     let now = m.now_ms;
-    if m.captures.is_empty() {
-        return empty(b, "New screenshots and clips show up here");
+    if m.captures.is_empty() && m.downloads.is_empty() {
+        return empty(b, "New screenshots, clips and downloads show up here");
     }
-    let cols = columns(PAD, b.full_w, &[1.0, 1.0]);
+    let all = columns(PAD, b.full_w, &[1.0, 1.0]);
+    // Downloads in progress take the first column.
+    let cols: Vec<(f32, f32)> = if m.downloads.is_empty() {
+        all.clone()
+    } else {
+        b.at(all[0]);
+        super::more::downloads(m, b, TOP);
+        vec![all[1]]
+    };
+    if m.captures.is_empty() {
+        return TOP + 34.0 * m.downloads.len() as f32;
+    }
     let row_h = 38.0;
     let rows = fit_rows(row_h, 0.0);
     let mut bottom = TOP;
@@ -676,11 +699,7 @@ fn captures(m: &Model, b: &mut B) -> f32 {
         bottom = bottom.max(y + row_h);
         let tile = Rect::new(x, y + 2.0, 44.0, 30.0);
         b.rect(tile, 6.0, SURFACE_2);
-        b.icon(
-            if c.kind == CaptureKind::Clip { Icon::Play } else { Icon::Image },
-            Rect::new(tile.x + 15.0, tile.y + 8.0, 14.0, 14.0),
-            TEXT,
-        );
+        b.icon(capture_icon(c.kind), Rect::new(tile.x + 15.0, tile.y + 8.0, 14.0, 14.0), TEXT);
         b.hits.push(Hit { rect: tile, kind: HitKind::Click(Action::CaptureOpen(i)), label: format!("Open {}", c.name) });
         let tw = w - 52.0 - 60.0;
         b.line(Rect::new(x + 52.0, y + 1.0, tw, 18.0), c.name.clone(), S_BODY, TEXT);
@@ -735,9 +754,10 @@ fn prayer(m: &Model, b: &mut B) -> f32 {
     let (Some(day), Some(now)) = (m.prayer_day, m.local_minute()) else { return empty(b, "Waiting for the clock…") };
     let cols = columns(PAD, b.full_w, &[1.0, 2.2]);
     let (hx, hw) = cols[0];
-    let end = prayer_headline(b, day, now, hx, TOP + 4.0, hw);
+    let end = prayer_headline(b, m, day, now, hx, TOP + 4.0, hw);
     let (tx, tw) = cols[1];
-    prayer_timeline(b, day, now, tx, TOP + 26.0, tw).max(end)
+    let end = prayer_timeline(b, day, now, tx, TOP + 22.0, tw).max(end);
+    prayer_footer(b, m, tx, end + 14.0, tw)
 }
 
 fn weather(m: &Model, b: &mut B) -> f32 {
@@ -818,7 +838,7 @@ fn todo(m: &Model, b: &mut B) -> f32 {
     let rows = fit_rows(row_h, 0.0);
     let mut bottom = TOP;
     // Typing: the field in the first column, the list in the second.
-    if let Some(input) = &m.todo_input {
+    if let Some(input) = m.typing(InputFor::Todo) {
         let (x, w) = cols[0];
         let field = Rect::new(x, TOP, w, 34.0);
         b.prims.extend(soft::well(field, 10.0));
@@ -827,7 +847,7 @@ fn todo(m: &Model, b: &mut B) -> f32 {
             b.line(Rect::new(tx, TOP, tw, 34.0), "What needs doing?", S_BODY, LABEL);
             b.rect(Rect::new(tx, TOP + 9.0, 2.0, 16.0), 1.0, OK);
         } else {
-            let mut shown = input.clone();
+            let mut shown = input.to_string();
             while b.tm.width(&shown, S_BODY) > tw - 6.0 && !shown.is_empty() {
                 shown.remove(0);
             }
@@ -1006,8 +1026,17 @@ fn calendar(m: &Model, b: &mut B) -> f32 {
         let pw = b.tm.width(&place, S_TINY).ceil().min(ew * 0.3);
         b.line(Rect::new(r.x + 100.0, r.y, r.w - 110.0 - pw - 8.0, r.h), e.title.clone(), S_BODY_M, TEXT);
         b.text_end(Rect::new(r.right() - 8.0 - pw, r.y, pw, r.h), place, S_TINY, LABEL);
-        if e.location.starts_with("https://") {
-            b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(e.location.clone())), label: format!("Join {}", e.title) });
+        if !e.link.is_empty() {
+            // The meeting link: the whole row joins it.
+            b.prims.push(Prim::Text {
+                rect: Rect::new(r.right() - 64.0, r.bottom() - 18.0, 56.0, 14.0),
+                text: "Join ›".into(),
+                style: TextStyle { size: 10.5, weight: Weight::Semibold, mono: false },
+                color: CODER,
+                align: Align::End,
+                wrap: false,
+            });
+            b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(e.link.clone())), label: format!("Join {}", e.title) });
         }
         y += row_h + 2.0;
     }
@@ -1118,4 +1147,73 @@ pub(super) fn ago(secs: i64) -> String {
         m if m < 48 * 60 => format!("{}h ago", m / 60),
         m => format!("{}d ago", m / 1440),
     }
+}
+
+fn notes(m: &Model, b: &mut B) -> f32 {
+    let cols = columns(PAD, b.full_w, &[1.0, 2.2]);
+    let (x, w) = cols[0];
+    let end = match m.typing(InputFor::Note) {
+        Some(text) => {
+            super::more::field(b, Rect::new(x, TOP, w, 32.0), text, "Write a note…", OK);
+            let bw = (w - 8.0) / 2.0;
+            b.pill(Rect::new(x, TOP + 40.0, bw, 30.0), Some(Icon::Check), "Save", Btn::Primary(OK), Action::TodoSubmit);
+            b.pill(Rect::new(x + bw + 8.0, TOP + 40.0, bw, 30.0), Some(Icon::Cross), "Cancel", Btn::Secondary, Action::TodoCancel);
+            b.line(Rect::new(x, TOP + 78.0, w, 14.0), "Enter saves · Esc cancels", S_TINY, LABEL);
+            TOP + 92.0
+        }
+        None => {
+            b.line(
+                Rect::new(x, TOP - 4.0, w, 34.0),
+                m.notes.len().to_string(),
+                TextStyle { size: 26.0, weight: Weight::Semibold, mono: false },
+                OK,
+            );
+            b.line(Rect::new(x, TOP + 28.0, w, 14.0), "NOTES", S_TINY, LABEL);
+            b.pill(Rect::new(x, TOP + 48.0, w, 30.0), Some(Icon::Plus), "New note", Btn::Primary(OK), Action::NoteAdd);
+            TOP + 78.0
+        }
+    };
+    b.at(cols[1]);
+    if m.notes.is_empty() {
+        b.line(Rect::new(b.x, TOP, b.w, 20.0), "No notes yet. ngambang note \"…\" adds one from a terminal.", S_SMALL, TEXT_2);
+        return end.max(TOP + 20.0);
+    }
+    // Typing: the list stays beside the field (the shared list skips its own field).
+    let typing = m.typing(InputFor::Note).is_some();
+    let y = if typing { notes_list(m, b) } else { super::more::notes(m, b, TOP, false) };
+    y.max(end)
+}
+
+/// The notes alone (while the field in the first column is open).
+fn notes_list(m: &Model, b: &mut B) -> f32 {
+    let mut y = TOP;
+    for n in m.notes.iter().take(fit_rows(38.0, 0.0)) {
+        b.rect(Rect::new(b.x, y + 5.0, 3.0, 24.0), 1.5, OK);
+        b.line(Rect::new(b.x + 12.0, y, b.w - 12.0, 34.0), n.text.clone(), S_BODY, TEXT);
+        y += 38.0;
+    }
+    y
+}
+
+fn power(m: &Model, b: &mut B) -> f32 {
+    let cols = columns(PAD, b.full_w, &[1.0, 1.2]);
+    b.at(cols[0]);
+    let a = super::more::power_now(m, b, TOP);
+    b.at(cols[1]);
+    let c = super::more::power_plans(m, b, TOP, 28.0);
+    if m.power_plans.is_empty() {
+        b.line(Rect::new(b.x, TOP, b.w, 18.0), "Power plans load in a moment…", S_SMALL, TEXT_2);
+    }
+    a.max(c)
+}
+
+fn launch(m: &Model, b: &mut B) -> f32 {
+    let items = !m.config.launch.items.is_empty();
+    if items {
+        let label = if m.launch_edit { "Done" } else { "Edit" };
+        let icon = if m.launch_edit { Icon::Check } else { Icon::Pencil };
+        b.pill(Rect::new(PAD + b.full_w - 72.0, TOP, 72.0, 26.0), Some(icon), label, Btn::Secondary, Action::LaunchEdit);
+    }
+    b.at((PAD, if items { b.full_w - 84.0 } else { b.full_w }));
+    super::more::launch(m, b, TOP, 58.0, 7)
 }

@@ -12,6 +12,7 @@ use crate::soft;
 use crate::theme::*;
 
 mod glance;
+mod more;
 mod strip;
 pub use strip::STRIP_MAX_H;
 
@@ -250,7 +251,13 @@ pub fn summary(m: &Model) -> Option<Summary> {
         return Some(Summary {
             icon: Icon::Clock,
             color: GAME,
-            text: if paused { "Focus paused".into() } else { "Focus".into() },
+            text: if m.on_break {
+                "Break".into()
+            } else if paused {
+                "Focus paused".into()
+            } else {
+                "Focus".into()
+            },
             detail: Some(format::clock(rem / 1000)),
             wave: false,
         });
@@ -319,8 +326,9 @@ pub fn ring(m: &Model) -> Option<(Color, f32, f32)> {
     if !m.privacy.is_empty() {
         return Some((PRIVACY, 1.0, 0.0));
     }
+    let focus = if m.on_break { OK } else { GAME };
     match m.timer {
-        FocusTimer::Running { total_ms, .. } => return Some((GAME, m.timer.progress(now)?, 1.0 / total_ms.max(1) as f32)),
+        FocusTimer::Running { total_ms, .. } => return Some((focus, m.timer.progress(now)?, 1.0 / total_ms.max(1) as f32)),
         FocusTimer::Paused { .. } => return Some((GAME, m.timer.progress(now)?, 0.0)),
         FocusTimer::Idle => {}
     }
@@ -491,6 +499,11 @@ fn notch_line(m: &Model) -> Option<NotchLine> {
         }
         Glance::Prayer => {
             let (day, now) = (m.prayer_day?, m.local_minute()?);
+            if let Some((what, t)) = m.fasting() {
+                let left = (t - now).max(0.0).round() as i64;
+                let detail = if left < 60 { format!("in {left}m") } else { format!("in {}h{:02}", left / 60, left % 60) };
+                return Some((Icon::Moon, OK, format!("{what} {}", crate::prayer::hhmm(t.rem_euclid(1440.0))), Some((detail, OK)), false));
+            }
             let (p, t) = day.next(now)?;
             let left = (t - now).max(0.0).round() as i64;
             let detail = if left < 60 { format!("in {left}m") } else { format!("in {}h{:02}", left / 60, left % 60) };
@@ -1118,6 +1131,9 @@ fn module_icon(m: ModuleId) -> (Icon, Color) {
         ModuleId::Todo => (Icon::Todo, OK),
         ModuleId::Calendar => (Icon::Calendar, CODER),
         ModuleId::Finance => (Icon::Chart, GAME),
+        ModuleId::Notes => (Icon::Pencil, OK),
+        ModuleId::Power => (Icon::Battery, OK),
+        ModuleId::Launch => (Icon::Grid, PORTS),
     }
 }
 
@@ -1155,6 +1171,9 @@ fn slip_body<'a>(m: &Model, front: ModuleId, tm: &'a dyn TextMeasure, edge: Edge
         ModuleId::Todo => todo_slip(m, &mut b, pad),
         ModuleId::Calendar => calendar_slip(m, &mut b, pad),
         ModuleId::Finance => finance_slip(m, &mut b, pad),
+        ModuleId::Notes => notes_slip(m, &mut b, pad),
+        ModuleId::Power => power_slip(m, &mut b, pad),
+        ModuleId::Launch => launch_slip(m, &mut b, pad),
     };
     (bottom, b)
 }
@@ -1593,10 +1612,40 @@ fn ports_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     bottom
 }
 
+fn notes_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let y = b.header(top, OK, "Notes", (!m.notes.is_empty()).then(|| (m.notes.len().to_string(), TEXT_2))) + 12.0;
+    b.full();
+    more::notes(m, b, y, true)
+}
+
+fn power_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let y = b.header(top, OK, "Battery & network", None) + 12.0;
+    b.full();
+    let y = more::power_now(m, b, y) + 10.0;
+    more::power_plans(m, b, y, 30.0)
+}
+
+fn launch_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let y = b.header(top, PORTS, "Quick launch", None);
+    if !m.config.launch.items.is_empty() {
+        let label = if m.launch_edit { "Done" } else { "Edit" };
+        b.ibutton(
+            Rect::new(b.x + b.w - 64.0, top - 8.0, 64.0, 30.0),
+            if m.launch_edit { Some(Icon::Check) } else { Some(Icon::Pencil) },
+            label,
+            Btn::Ghost,
+            Action::LaunchEdit,
+        );
+    }
+    b.full();
+    more::launch(m, b, y + 14.0, 70.0, 4)
+}
+
 fn clipboard_slip(m: &Model, b: &mut B, top: f32) -> f32 {
-    let Some(c) = &m.clip else {
-        let y = b.header(top, CODER, "Clipboard", None);
-        return b.empty(y + 12.0, "Copy a JWT, JSON, UUID, timestamp, colour or link");
+    let Some(c) = m.clip.as_ref().filter(|_| m.typing(InputFor::ClipSearch).is_none()) else {
+        let y = b.header(top, CODER, "Clipboard", None) + 12.0;
+        b.full();
+        return more::clip_history(m, b, y);
     };
     let status = clipboard::status(&c.kind, c.unix_at).map(|s| {
         let col = if s.starts_with("expired") { PRIVACY_TEXT } else { TEXT_2 };
@@ -1612,7 +1661,8 @@ fn clipboard_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let per_line = ((b.w - 24.0) / 7.6).max(8.0) as usize;
     let lines: usize = shown.lines().map(|l| l.chars().count().div_ceil(per_line).max(1)).sum();
     let room = b.limit - y0 - if b.two { 0.0 } else { 110.0 };
-    let max_lines = ((room - 24.0) / 18.0).max(1.0) as usize;
+    // A short preview: the history follows under it.
+    let max_lines = (((room - 24.0) / 18.0).max(1.0) as usize).min(3);
     let lines = lines.min(max_lines);
     let shown: String = shown.lines().take(max_lines).collect::<Vec<_>>().join("\n");
     let natural_h = (lines as f32 * 18.0 + 24.0).max(64.0);
@@ -1640,20 +1690,32 @@ fn clipboard_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let _ = y;
     let cy = b.side(y0, y0 + box_h);
     let chips = c.kind.actions().iter().map(|a| (a.label().to_string(), CODER, Action::Clip(*a))).collect();
-    b.chips(cy, chips).max(y0 + if b.two { natural_h } else { box_h })
+    let y = b.chips(cy, chips).max(y0 + if b.two { natural_h } else { box_h });
+    b.full();
+    more::clip_history(m, b, y + 14.0)
 }
 
 fn timer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
-    let state = match m.timer {
-        FocusTimer::Idle => "ready",
-        FocusTimer::Running { .. } => "running",
-        FocusTimer::Paused { .. } => "paused",
-    };
-    let y0 = b.header(top, GAME, &format!("Focus · {state}"), None) + 10.0;
+    let y0 = b.header(top, GAME, &focus_title(m), focus_rounds(m)) + 10.0;
     b.full();
     let (y, buttons) = timer_face(m, b, b.x, y0, b.w);
     let row = buttons.iter().map(|(i, l, k, a)| (*i, l.as_str(), *k, a.clone())).collect();
     b.ibutton_row(y + 14.0, row)
+}
+
+/// "Focus · running", "Break · 5 min"…
+fn focus_title(m: &Model) -> String {
+    match (m.on_break, m.timer) {
+        (true, _) => "Break".into(),
+        (_, FocusTimer::Idle) => "Focus · ready".into(),
+        (_, FocusTimer::Running { .. }) => "Focus · running".into(),
+        (_, FocusTimer::Paused { .. }) => "Focus · paused".into(),
+    }
+}
+
+/// Rounds finished today, for the header.
+fn focus_rounds(m: &Model) -> Option<(String, Color)> {
+    (m.focus_rounds > 0).then(|| (format!("{} done today", m.focus_rounds), TEXT_2))
 }
 
 /// The focus clock, large and unboxed: the round's length between round
@@ -1706,7 +1768,17 @@ fn timer_face(m: &Model, b: &mut B, x: f32, y: f32, w: f32) -> (f32, Vec<(Icon, 
                 align: Align::Center,
                 wrap: false,
             });
-            b.meter(Rect::new(x + w * 0.15, y + 62.0, w * 0.7, 3.0), frac, GAME);
+            let accent = if m.on_break { OK } else { GAME };
+            b.meter(Rect::new(x + w * 0.15, y + 62.0, w * 0.7, 3.0), frac, accent);
+            if m.on_break {
+                return (
+                    y + 68.0,
+                    vec![
+                        (Icon::Next, "Skip break".into(), Btn::Primary(OK), Action::TimerSkipBreak),
+                        (Icon::Plus, "5 min".into(), Btn::Secondary, Action::TimerAdd(5)),
+                    ],
+                );
+            }
             let main = if m.timer.is_running() {
                 (Icon::Pause, "Pause".to_string(), Btn::Primary(GAME), Action::TimerPause)
             } else {
@@ -1834,18 +1906,16 @@ fn game_slip(m: &Model, b: &mut B, top: f32) -> f32 {
 
 fn captures_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let now = m.now_ms;
-    let y0 = b.header(top, PORTS, "Captures", None) + 12.0;
+    let y0 = b.header(top, PORTS, "Captures & downloads", None) + 12.0;
+    b.full();
+    let y0 = more::downloads(m, b, y0);
     let mut bottom = y0 + 10.0;
     for (i, c) in m.captures.iter().enumerate() {
         let Some(y) = b.flow(i, y0, 54.0, 0.0) else { break };
         bottom = bottom.max(y + 54.0);
         let tile = Rect::new(b.x, y, 64.0, 44.0);
         b.rect(tile, 6.0, SURFACE_2);
-        b.icon(
-            if c.kind == CaptureKind::Clip { Icon::Play } else { Icon::Image },
-            Rect::new(tile.x + 22.0, tile.y + 12.0, 20.0, 20.0),
-            TEXT,
-        );
+        b.icon(capture_icon(c.kind), Rect::new(tile.x + 22.0, tile.y + 12.0, 20.0, 20.0), TEXT);
         b.hits.push(Hit { rect: tile, kind: HitKind::Click(Action::CaptureOpen(i)), label: format!("Open {}", c.name) });
         let tw = b.w - 64.0 - 12.0 - 2.0 * 50.0;
         b.text(Rect::new(b.x + 76.0, y + 2.0, tw, 20.0), c.name.clone(), TextStyle::BODY, TEXT);
@@ -1873,6 +1943,14 @@ fn captures_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         );
     }
     bottom - 10.0
+}
+
+fn capture_icon(k: CaptureKind) -> Icon {
+    match k {
+        CaptureKind::Clip => Icon::Play,
+        CaptureKind::Screenshot => Icon::Image,
+        CaptureKind::Download => Icon::Download,
+    }
 }
 
 fn privacy_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -1921,14 +1999,49 @@ fn prayer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         return b.empty(y0 + 4.0, "Waiting for the clock…");
     };
     b.full();
-    let y = prayer_headline(b, day, now, b.x, y0, b.w);
-    prayer_timeline(b, day, now, b.x, y + 18.0, b.w)
+    let y = prayer_headline(b, m, day, now, b.x, y0, b.w);
+    let y = prayer_timeline(b, day, now, b.x, y + 18.0, b.w);
+    prayer_footer(b, m, b.x, y + 12.0, b.w)
+}
+
+/// The Hijri date on the left, the qibla direction on the right.
+fn prayer_footer(b: &mut B, m: &Model, x: f32, y: f32, w: f32) -> f32 {
+    if let Some(h) = m.hijri() {
+        b.text(Rect::new(x, y, w * 0.6, 16.0), crate::prayer::hijri_label(h), TextStyle::MONO_SMALL, TEXT_2);
+    }
+    let l = &m.config.location;
+    let q = crate::prayer::qibla(l.latitude, l.longitude);
+    let label = format!("Kiblat {q:.0}° {}", crate::prayer::compass(q));
+    let lw = b.tm.width(&label, TextStyle::MONO_SMALL).ceil();
+    b.text_end(Rect::new(x + w - lw, y, lw, 16.0), label, TextStyle::MONO_SMALL, TEXT_2);
+    // A small needle pointing that way (north up).
+    let (c, r) = (Point::new(x + w - lw - 12.0, y + 8.0), 6.0);
+    let a = (q as f32).to_radians();
+    let tip = Point::new(c.x + r * a.sin(), c.y - r * a.cos());
+    let tail = Point::new(c.x - r * a.sin(), c.y + r * a.cos());
+    b.prims.push(Prim::Polyline { points: vec![tail, tip], width: 1.5, color: OK, closed: false });
+    b.prims.push(Prim::Circle { cx: tip.x, cy: tip.y, r: 2.0, fill: Some(OK), stroke: None });
+    y + 16.0
 }
 
 /// The next prayer, large, with its time and how long until it. No card:
 /// just type. Returns where it ends.
-fn prayer_headline(b: &mut B, day: crate::prayer::Day, now: f64, x: f32, y: f32, w: f32) -> f32 {
+fn prayer_headline(b: &mut B, m: &Model, day: crate::prayer::Day, now: f64, x: f32, y: f32, w: f32) -> f32 {
     use crate::prayer::hhmm;
+    // In Ramadan the fast leads: imsak before dawn, buka during the day.
+    if let (Some((what, t)), Some(n)) = (m.fasting(), m.ramadan_day()) {
+        let left = ((t - now) * 60.0).max(0.0) as u64;
+        b.text(Rect::new(x, y, w, 14.0), format!("RAMADAN · DAY {n}"), TextStyle::LABEL, OK);
+        b.text(Rect::new(x, y + 14.0, w * 0.6, 42.0), what, TextStyle { size: 32.0, weight: Weight::Semibold, mono: false }, TEXT);
+        b.text_end(
+            Rect::new(x + w * 0.4, y + 16.0, w * 0.6, 30.0),
+            hhmm(t.rem_euclid(1440.0)),
+            TextStyle { size: 24.0, weight: Weight::Semibold, mono: true },
+            OK,
+        );
+        b.text_end(Rect::new(x + w * 0.4, y + 44.0, w * 0.6, 16.0), format!("in {}", format::clock(left)), TextStyle::MONO_SMALL, TEXT_2);
+        return y + 60.0;
+    }
     match day.next(now) {
         Some((p, t)) => {
             let left = ((t - now) * 60.0).max(0.0) as u64;
@@ -1984,7 +2097,8 @@ fn prayer_timeline(b: &mut B, day: crate::prayer::Day, now: f64, x: f32, y: f32,
     }
     for (i, p) in Prayer::ALL.iter().enumerate() {
         let c = cx(i);
-        let (passed, is_next) = (i < next_i, i == next_i);
+        let passed = day.get(*p).is_some_and(|t| t < now) && i != next_i;
+        let is_next = i == next_i;
         if is_next {
             b.prims.push(Prim::Circle { cx: c, cy: y, r: 8.0, fill: Some(OK.with_alpha(0x33)), stroke: None });
             b.prims.push(Prim::Circle { cx: c, cy: y, r: 4.5, fill: Some(OK), stroke: None });
@@ -2029,7 +2143,7 @@ fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let mut y = y0;
     // The field for a new task sits in the left column while it is open.
     b.col(0);
-    if let Some(input) = &m.todo_input {
+    if let Some(input) = m.typing(InputFor::Todo) {
         let field = Rect::new(b.x, y, b.w, 44.0);
         b.prims.extend(soft::well(field, 12.0));
         let tx = field.x + 14.0;
@@ -2040,7 +2154,7 @@ fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         } else {
             // Show the end of long text, with the caret after it.
             let shown: String = {
-                let mut t = input.clone();
+                let mut t = input.to_string();
                 while b.tm.width(&t, TextStyle::BODY) > tw - 6.0 && !t.is_empty() {
                     t.remove(0);
                 }
@@ -2064,7 +2178,7 @@ fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     // the right column only, otherwise they flow through both.
     let mut list: Vec<&TodoItem> = m.todos.iter().filter(|t| !t.done).collect();
     list.extend(m.todos.iter().filter(|t| t.done));
-    let typing = m.todo_input.is_some();
+    let typing = m.typing(InputFor::Todo).is_some();
     // Typing in two columns: the list beside the field.
     let beside = typing && b.two;
     let input_end = y;
@@ -2290,8 +2404,17 @@ fn calendar_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             TextStyle { size: 11.0, weight: Weight::Regular, mono: false },
             LABEL,
         );
-        if e.location.starts_with("https://") {
-            b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(e.location.clone())), label: format!("Join {}", e.title) });
+        if !e.link.is_empty() {
+            // The meeting link: the whole row joins it.
+            b.prims.push(Prim::Text {
+                rect: Rect::new(r.right() - 64.0, r.bottom() - 18.0, 56.0, 14.0),
+                text: "Join ›".into(),
+                style: TextStyle { size: 10.5, weight: Weight::Semibold, mono: false },
+                color: CODER,
+                align: Align::End,
+                wrap: false,
+            });
+            b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(e.link.clone())), label: format!("Join {}", e.title) });
         }
         y += 54.0;
     }
@@ -2306,20 +2429,20 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         return b.ibutton_row(y, vec![(Icon::Plus, "Add symbols", Btn::Primary(GAME), Action::OpenSettings(ModuleId::Finance))]);
     }
     let y0 = y;
-    let capacity = b.rows(y0, 62.0, 20.0) * b.cols();
+    let capacity = b.rows(y0, 50.0, 20.0) * b.cols();
     let fit = if list.len() > capacity { capacity.saturating_sub(1) } else { list.len() };
     let mut bottom = y0;
     for (i, item) in list.iter().take(fit).enumerate() {
-        let Some(row_y) = b.flow(i, y0, 62.0, 20.0) else { break };
+        let Some(row_y) = b.flow(i, y0, 50.0, 20.0) else { break };
         y = row_y;
-        bottom = bottom.max(y + 52.0);
+        bottom = bottom.max(y + 42.0);
         let q = m.quotes.iter().find(|q| q.symbol.eq_ignore_ascii_case(&item.symbol));
-        let r = Rect::new(b.x, y, b.w, 52.0);
+        let r = Rect::new(b.x, y, b.w, 42.0);
         b.raised(r, 14.0, SURFACE);
         let name = if item.name.is_empty() { q.map(|q| q.name.clone()).unwrap_or_default() } else { item.name.clone() };
-        b.text(Rect::new(r.x + 14.0, r.y + 7.0, 112.0, 20.0), name, TextStyle::BODY_MEDIUM, TEXT);
+        b.text(Rect::new(r.x + 14.0, r.y + 4.0, 112.0, 18.0), name, TextStyle::BODY_MEDIUM, TEXT);
         b.text(
-            Rect::new(r.x + 14.0, r.y + 27.0, 112.0, 16.0),
+            Rect::new(r.x + 14.0, r.y + 22.0, 112.0, 14.0),
             item.symbol.clone(),
             TextStyle { size: 11.0, weight: Weight::Regular, mono: true },
             LABEL,
@@ -2329,7 +2452,7 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                 let up = q.change_pct >= 0.0;
                 let color = if up { OK } else { PRIVACY_TEXT };
                 // Sparkline in a groove.
-                let spark = Rect::new(r.x + 130.0, r.y + 10.0, 60.0, 32.0);
+                let spark = Rect::new(r.x + 130.0, r.y + 7.0, 60.0, 28.0);
                 b.prims.extend(soft::well(spark, 8.0));
                 if q.points.len() >= 2 {
                     let (lo, hi) = q.points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
@@ -2345,13 +2468,13 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                     b.prims.push(Prim::Polyline { points, width: 1.5, color, closed: false });
                 }
                 b.text_end(
-                    Rect::new(r.x + 196.0, r.y + 7.0, r.w - 210.0, 20.0),
+                    Rect::new(r.x + 196.0, r.y + 4.0, r.w - 210.0, 18.0),
                     crate::finance::format_price(q),
                     TextStyle { size: 14.0, weight: Weight::Medium, mono: true },
                     TEXT,
                 );
                 b.text_end(
-                    Rect::new(r.x + 196.0, r.y + 27.0, r.w - 210.0, 16.0),
+                    Rect::new(r.x + 196.0, r.y + 22.0, r.w - 210.0, 14.0),
                     crate::finance::format_change(q.change_pct),
                     TextStyle { size: 11.5, weight: Weight::Medium, mono: true },
                     color,
@@ -2366,8 +2489,8 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let _ = y;
     // Headlines beside the prices in a wide slip (when the right column is
     // free), else under them, as many as fit.
-    let room = |b: &B, y: f32| y + 44.0 <= b.limit - 28.0;
-    let beside = b.two && fit <= b.rows(y0, 62.0, 20.0);
+    let room = |b: &B, y: f32| y + 40.0 <= b.limit - 20.0;
+    let beside = b.two && fit <= b.rows(y0, 50.0, 20.0);
     let start = if beside {
         b.col(1);
         y0
@@ -2384,7 +2507,7 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             if !room(b, y) {
                 break;
             }
-            let r = Rect::new(b.x, y, b.w, 40.0);
+            let r = Rect::new(b.x, y, b.w, 36.0);
             b.rect(Rect::new(r.x, r.y + 4.0, 3.0, r.h - 8.0), 1.5, GAME);
             b.text(Rect::new(r.x + 12.0, r.y + 1.0, r.w - 12.0, 20.0), n.title.clone(), TextStyle::SMALL, TEXT);
             let age = now
@@ -2395,13 +2518,13 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                 })
                 .unwrap_or_default();
             b.text(
-                Rect::new(r.x + 12.0, r.y + 21.0, r.w - 12.0, 16.0),
+                Rect::new(r.x + 12.0, r.y + 19.0, r.w - 12.0, 15.0),
                 format!("{} · {}{age}", n.symbol.trim_start_matches('^'), n.publisher),
                 TextStyle { size: 11.0, weight: Weight::Regular, mono: true },
                 LABEL,
             );
             b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(n.link.clone())), label: n.title.clone() });
-            y += 44.0;
+            y += 40.0;
             bottom = bottom.max(y - 4.0);
         }
     }
@@ -2761,6 +2884,12 @@ mod tests {
         assert_eq!(rest.hits[0].kind, HitKind::Click(Action::ToggleSlips));
     }
 
+    /// Rows in a slip's tab rail.
+    fn tab_rows(s: &Scene) -> f32 {
+        let tabs = s.hits.iter().filter(|h| matches!(h.kind, HitKind::Click(Action::SelectSlip(_)))).count();
+        tabs.div_ceil(14) as f32
+    }
+
     #[test]
     fn every_scene_fits_its_bounds_and_the_window_box() {
         for (name, s) in all_scenes() {
@@ -2791,8 +2920,8 @@ mod tests {
         for (name, s) in slips {
             let side = name.ends_with("Left") || name.ends_with("Right");
             if side {
-                // Height above the one row of tabs.
-                let h = s.size.h - TAB_ROW_H - 8.0;
+                // Height above the rows of tabs.
+                let h = s.size.h - tab_rows(s) * TAB_ROW_H - 8.0;
                 assert!((SLIP_MIN_V..=SLIP_MAX_V).contains(&h), "{name}: {h}");
                 assert_eq!(s.size.w, SLIP_W, "{name}");
             } else {
@@ -2810,7 +2939,7 @@ mod tests {
             if !matches!(s.kind, SceneKind::Slip(_)) || !(name.ends_with("Left") || name.ends_with("Right")) {
                 continue;
             }
-            let slip_h = s.size.h - TAB_ROW_H - 8.0;
+            let slip_h = s.size.h - tab_rows(&s) * TAB_ROW_H - 8.0;
             for p in &s.prims {
                 let r = match p {
                     Prim::RoundRect { rect, .. } | Prim::Text { rect, .. } | Prim::Image { rect, .. } | Prim::Gradient { rect, .. } => {

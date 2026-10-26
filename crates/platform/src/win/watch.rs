@@ -19,7 +19,7 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects, INFINITE};
 use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
-use windows::Win32::UI::Shell::{FOLDERID_Pictures, FOLDERID_Videos, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+use windows::Win32::UI::Shell::{FOLDERID_Downloads, FOLDERID_Pictures, FOLDERID_Videos, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
 
 use super::util::{now_ms, Bus, OwnedHandle};
 
@@ -173,6 +173,58 @@ pub fn captures(bus: Bus, dirs: Vec<PathBuf>) -> Result<Stopper> {
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(500));
+                }
+            });
+        }
+    });
+    Ok(stop)
+}
+
+/// Browsers download into a temporary file next to the final one.
+const PARTIAL: [&str; 5] = ["crdownload", "part", "partial", "download", "opdownload"];
+
+/// The final name of a browser's temporary download file, if it is one.
+fn partial_name(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    PARTIAL.contains(&ext.as_str()).then(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default())
+}
+
+/// Downloads in the Downloads folder: progress while a browser's temporary
+/// file grows (checked every second only then), and the finished file.
+pub fn downloads(bus: Bus) -> Result<Stopper> {
+    let (stop, stop_handle) = Stopper::new()?;
+    let Some(dir) = known_folder(&FOLDERID_Downloads).filter(|d| d.is_dir()) else { return Ok(stop) };
+    let mut watch = DirWatch::open(&dir, FILE_NOTIFY_CHANGE_FILE_NAME)?;
+    let _ = std::thread::Builder::new().name("ngambang-downloads".into()).spawn(move || {
+        // Temporary file → the final name it will get.
+        let mut tracked: std::collections::BTreeMap<PathBuf, String> = std::collections::BTreeMap::new();
+        loop {
+            let handles = [watch.event.0, stop_handle.0];
+            let timeout = if tracked.is_empty() { INFINITE } else { 1000 };
+            let r = unsafe { WaitForMultipleObjects(&handles, false, timeout) };
+            if r.0 == WAIT_OBJECT_0.0 + 1 || r == WAIT_FAILED {
+                return;
+            }
+            if r == WAIT_OBJECT_0 {
+                for (action, path) in watch.take() {
+                    if action == FILE_ACTION_ADDED.0 || action == FILE_ACTION_RENAMED_NEW_NAME.0 {
+                        if let Some(name) = partial_name(&path) {
+                            tracked.insert(path, name);
+                        }
+                    }
+                }
+            }
+            tracked.retain(|tmp, name| match std::fs::metadata(tmp) {
+                Ok(meta) => {
+                    bus.send(Event::Download { name: name.clone(), bytes: meta.len(), done: None });
+                    true
+                }
+                Err(_) => {
+                    // Gone: finished when the final file is there, else cancelled.
+                    let fin = dir.join(&*name);
+                    let done = if fin.is_file() { fin.to_string_lossy().into_owned() } else { String::new() };
+                    bus.send(Event::Download { name: name.clone(), bytes: 0, done: Some(done) });
+                    false
                 }
             });
         }
