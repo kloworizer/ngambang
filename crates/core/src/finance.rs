@@ -4,8 +4,14 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Quotes refresh this often while the slip is open.
+/// Quotes refresh this often while the slip is open ...
 pub const REFRESH_MS: u64 = 60_000;
+/// ... and this often in the background, to notice big moves.
+pub const WATCH_MS: u64 = 5 * 60_000;
+/// Headlines for the watchlist refresh this often.
+pub const NEWS_MS: u64 = 15 * 60_000;
+/// A headline pops up only while it is this fresh (seconds).
+pub const NEWS_FRESH_S: i64 = 3 * 3600;
 
 fn encode(s: &str) -> String {
     s.bytes()
@@ -18,6 +24,52 @@ fn encode(s: &str) -> String {
 
 pub fn search_url(query: &str) -> String {
     format!("https://query1.finance.yahoo.com/v1/finance/search?q={}&quotesCount=8&newsCount=0&listsCount=0", encode(query.trim()))
+}
+
+/// Headlines about a symbol (or a name, for symbols Yahoo has none for).
+pub fn news_url(query: &str) -> String {
+    format!("https://query1.finance.yahoo.com/v1/finance/search?q={}&quotesCount=0&newsCount=4&listsCount=0", encode(query.trim()))
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewsItem {
+    pub id: String,
+    pub title: String,
+    pub publisher: String,
+    pub link: String,
+    /// Unix seconds.
+    pub time: i64,
+    /// The watchlist symbol it was found for.
+    pub symbol: String,
+}
+
+pub fn parse_news(json: &str, symbol: &str) -> Vec<NewsItem> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return Vec::new() };
+    let text = |n: &serde_json::Value, k: &str| n.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    v.get("news")
+        .and_then(|n| n.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|n| {
+                    let (id, title, link) = (text(n, "uuid"), text(n, "title"), text(n, "link"));
+                    if id.is_empty() || title.is_empty() || !link.starts_with("https://") {
+                        return None;
+                    }
+                    let time = n.get("providerPublishTime").and_then(|t| t.as_i64()).unwrap_or(0);
+                    Some(NewsItem { id, title, publisher: text(n, "publisher"), link, time, symbol: symbol.to_string() })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// How many whole steps of `step` percent a change is (toward zero), to
+/// announce a move once per step: +3.2 % with 3 % steps is 1, −6.5 % is −2.
+pub fn move_steps(change_pct: f64, step: f64) -> i32 {
+    if step <= 0.0 || !change_pct.is_finite() {
+        return 0;
+    }
+    (change_pct / step).trunc() as i32
 }
 
 pub fn chart_url(symbol: &str) -> String {
@@ -187,6 +239,27 @@ mod tests {
             "https://query1.finance.yahoo.com/v1/finance/search?q=btc%20usd&quotesCount=8&newsCount=0&listsCount=0"
         );
         assert!(chart_url("^JKSE").contains("/chart/%5EJKSE?"));
+    }
+
+    #[test]
+    fn news_items() {
+        let news = parse_news(include_str!("../testdata/yahoo_news.json"), "AAPL");
+        assert_eq!(news.len(), 3);
+        assert!(news[0].title.starts_with("Apple seeks more iPhone Duo"));
+        assert_eq!(news[0].publisher, "Investing.com");
+        assert_eq!(news[0].time, 1_792_973_405);
+        assert!(news.iter().all(|n| n.symbol == "AAPL" && n.link.starts_with("https://")));
+        assert!(parse_news("{}", "X").is_empty());
+        assert!(news_url("^JKSE").contains("q=%5EJKSE&quotesCount=0&newsCount=4"));
+    }
+
+    #[test]
+    fn moves_count_whole_steps() {
+        assert_eq!(move_steps(3.2, 3.0), 1);
+        assert_eq!(move_steps(2.9, 3.0), 0);
+        assert_eq!(move_steps(-6.5, 3.0), -2);
+        assert_eq!(move_steps(f64::NAN, 3.0), 0);
+        assert_eq!(move_steps(5.0, 0.0), 0);
     }
 
     #[test]

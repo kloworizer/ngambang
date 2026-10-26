@@ -179,6 +179,7 @@ fn sample() -> Model {
     btc.change_pct = 1.4;
     btc.points.reverse();
     m.update(now, Event::Quotes(vec![q, btc]));
+    m.update(now, Event::News(ngambang_core::finance::parse_news(include_str!("../testdata/yahoo_news.json"), "AAPL")));
     m.tags.clear();
     m
 }
@@ -204,6 +205,16 @@ fn main() {
             add(&format!("{slip:?} {edge:?}"), &build(&m, edge, &ApproxMeasure));
         }
     }
+    // The notch style: at rest, a tag and a slip hanging from the top.
+    m.config.dock.style = ngambang_core::config::Style::Notch;
+    m.state = IslandState::Orb;
+    add("notch", &build(&m, Edge::Top, &ApproxMeasure));
+    m.state = IslandState::Tag;
+    add("notch tag", &build(&m, Edge::Top, &ApproxMeasure));
+    m.state = IslandState::Slips;
+    m.front = Some(ModuleId::Media);
+    add("notch Media", &build(&m, Edge::Top, &ApproxMeasure));
+    m.config.dock.style = ngambang_core::config::Style::Orb;
     m.state = IslandState::Slips;
     m.front = Some(ModuleId::Todo);
     m.todo_input = Some("Call the bank about the card".into());

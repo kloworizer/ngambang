@@ -51,6 +51,21 @@ Game detection now requires a game-library folder, exclusive fullscreen, or
 ≥ 20 % 3D GPU load by the process (Task Manager's counter), and ignores
 screen overlays such as Snipping Tool.
 
+**0.1.7 notes.** `dock.style = "notch"` draws the rest state as a 184×30
+notch flush with the top edge (tags and slips get square top corners and
+hang from it); dragging only changes the offset along the top.
+`dock.move_in_fullscreen` (default on) moves the window to another display
+(primary first) while a non-overlay fullscreen app covers the home display;
+the model gets `Event::Displaced` and then neither sinks to the Seam nor
+holds tags back. Fullscreen is always detected on the home display.
+Calendar reminders combine `calendar.reminder_min` with each event's VALARM
+triggers; calendar and prayer reminders are priority 2 (they pass the
+fullscreen/focus quiet), and late timers catch up (calendar within 15 min,
+prayer times within 20 min). The platform re-syncs the model's clock when
+it drifts by more than 20 s (checked every 60 s). Markets: quotes every
+5 min in the background when `finance.price_alerts` is on (60 s while the
+slip is open), headlines every 15 min from Yahoo's search endpoint.
+
 ### 1.2 Deliberately *not* in v0.1
 
 | Feature | Reason | Target |

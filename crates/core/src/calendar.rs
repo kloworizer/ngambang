@@ -20,6 +20,9 @@ pub struct CalEvent {
     pub all_day: bool,
     /// Index into the configured feeds.
     pub feed: usize,
+    /// The event's own reminders (VALARM), in seconds before the start.
+    #[serde(default)]
+    pub alarms: Vec<i64>,
 }
 
 /// `webcal://` links (what "subscribe" buttons hand out) are plain HTTPS.
@@ -301,6 +304,27 @@ struct RawEvent {
     exdates: Vec<(i64, Tz)>,
     recurrence_id: Option<(i64, Tz)>,
     cancelled: bool,
+    alarms: Vec<Trigger>,
+}
+
+/// When a VALARM fires.
+#[derive(Clone, Debug)]
+enum Trigger {
+    /// Seconds from the start (negative: before it).
+    Start(i64),
+    /// Seconds from the end.
+    End(i64),
+    /// A fixed moment, unix seconds.
+    At(i64),
+}
+
+fn parse_trigger(p: &Prop) -> Option<Trigger> {
+    if p.params.get("VALUE").is_some_and(|v| v.eq_ignore_ascii_case("DATE-TIME")) {
+        let (ls, _, utc) = parse_stamp(&p.value)?;
+        return utc.then_some(Trigger::At(ls));
+    }
+    let secs = parse_duration(&p.value)?;
+    Some(if p.params.get("RELATED").is_some_and(|v| v.eq_ignore_ascii_case("END")) { Trigger::End(secs) } else { Trigger::Start(secs) })
 }
 
 fn stamp_with_tz(p: &Prop) -> Option<(i64, bool, Tz)> {
@@ -324,10 +348,25 @@ pub fn parse(text: &str, feed: usize, from: i64, to: i64, local_offset_min: i32)
     let mut cur: Option<RawEvent> = None;
     let mut zone: Option<(String, Vec<ZoneRule>)> = None;
     let mut rule: Option<ZoneRule> = None;
+    // Inside a VALARM: its trigger, once read. Its other properties
+    // (SUMMARY, DESCRIPTION…) are not the event's.
+    let mut alarm: Option<Option<Trigger>> = None;
     for line in unfold(text) {
         let Some(p) = parse_prop(&line) else { continue };
         match (p.name.as_str(), p.value.trim()) {
             ("BEGIN", "VEVENT") => cur = Some(RawEvent::default()),
+            ("BEGIN", "VALARM") => alarm = Some(None),
+            ("END", "VALARM") => {
+                if let (Some(Some(t)), Some(e)) = (alarm.take(), cur.as_mut()) {
+                    e.alarms.push(t);
+                }
+                alarm = None;
+            }
+            (_, _) if alarm.is_some() => {
+                if p.name == "TRIGGER" {
+                    alarm = Some(parse_trigger(&p));
+                }
+            }
             ("END", "VEVENT") => events.extend(cur.take()),
             ("BEGIN", "VTIMEZONE") => zone = Some((String::new(), Vec::new())),
             ("END", "VTIMEZONE") => {
@@ -417,9 +456,30 @@ pub fn parse(text: &str, feed: usize, from: i64, to: i64, local_offset_min: i32)
         }
         .max(0);
         let excluded: BTreeSet<i64> = e.exdates.iter().map(|(ls, tz)| zones.to_unix(*ls, tz)).collect();
+        // Reminders as a lead before the start: up to a week ahead, none after it starts.
+        let mut alarms: Vec<i64> = e
+            .alarms
+            .iter()
+            .map(|t| match t {
+                Trigger::Start(d) => -d,
+                Trigger::End(d) => -(length + d),
+                Trigger::At(at) => start_unix - at,
+            })
+            .filter(|lead| (0..=7 * 86_400).contains(lead))
+            .collect();
+        alarms.sort_unstable();
+        alarms.dedup();
         let mut push = |s: i64| {
             if s < to && s + length.max(1) > from && !excluded.contains(&s) {
-                out.push(CalEvent { title: e.title.clone(), location: e.location.clone(), start: s, end: s + length, all_day, feed });
+                out.push(CalEvent {
+                    title: e.title.clone(),
+                    location: e.location.clone(),
+                    start: s,
+                    end: s + length,
+                    all_day,
+                    feed,
+                    alarms: alarms.clone(),
+                });
             }
         };
         match e.rrule.as_deref().filter(|_| e.recurrence_id.is_none()) {
@@ -628,6 +688,33 @@ mod tests {
         assert_eq!(last_friday, vec![unix(2026, 10, 30, 0, 0, 420)]);
         let all = parse(ICS, 0, 0, i64::MAX / 4, 420);
         assert_eq!(all.iter().filter(|e| e.title == "Payday").count(), 3, "COUNT=3");
+    }
+
+    #[test]
+    fn event_reminders_come_from_valarm() {
+        let ev = parse(ICS, 0, FROM, FROM + 14 * 86_400, 420);
+        let dentist = ev.iter().find(|e| e.start == unix(2026, 10, 26, 10, 0, 420)).expect("dentist");
+        // An alarm's SUMMARY is not the event's title.
+        assert_eq!(dentist.title, "Dentist");
+        // 30 min and a day before; one after the end is dropped.
+        assert_eq!(dentist.alarms, vec![1800, 86_400]);
+        assert!(ev.iter().filter(|e| e.title != "Dentist").all(|e| e.alarms.is_empty()));
+    }
+
+    #[test]
+    fn times_do_not_depend_on_the_computers_zone() {
+        // The same feed read on computers in Jakarta, London and Tokyo.
+        for offset in [420, 0, 540, -300] {
+            let ev = parse(ICS, 0, FROM, FROM + 14 * 86_400, offset);
+            let at = |t: &str| ev.iter().find(|e| e.title == t).map(|e| e.start).unwrap_or_else(|| panic!("{t} missing"));
+            // UTC and zoned times are the same instant everywhere ...
+            assert_eq!(at("Launch review, part 1"), unix(2026, 10, 27, 3, 0, 0), "offset {offset}");
+            assert_eq!(at("Dentist"), unix(2026, 10, 26, 10, 0, 420), "offset {offset}");
+            assert_eq!(at("Standup"), unix(2026, 10, 26, 9, 30, 420), "offset {offset}");
+            // ... while times without a zone and all-day events follow the computer's clock.
+            assert_eq!(at("Lunch (no zone)"), unix(2026, 10, 29, 12, 0, offset as i64), "offset {offset}");
+            assert_eq!(at("Libur"), unix(2026, 10, 28, 0, 0, offset as i64), "offset {offset}");
+        }
     }
 
     #[test]

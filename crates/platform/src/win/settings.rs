@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use ngambang_core::config::{CalendarFeed, Config, ModuleId, WatchItem, DEFAULT_TOML};
+use ngambang_core::config::{CalendarFeed, Config, ModuleId, Style, WatchItem, DEFAULT_TOML};
 use ngambang_core::finance::SearchHit;
 use ngambang_core::geometry::{Color, Edge, Rect};
 use ngambang_core::icons::{arc_points, icon_prims};
@@ -44,6 +44,7 @@ const ID_SAVE: usize = 1; // IDOK: Enter
 const ID_CANCEL: usize = 2; // IDCANCEL: Esc
 const ID_OPEN_FILE: usize = 3;
 const ID_CITY: usize = 10;
+const ID_STYLE: usize = 12;
 const ID_LOCATE: usize = 11;
 const ID_MODULE_UP: usize = 20;
 const ID_MODULE_DOWN: usize = 21;
@@ -143,6 +144,8 @@ pub fn page_for(m: ModuleId) -> usize {
 struct Controls {
     autostart: HWND,
     hide_in_fullscreen: HWND,
+    move_in_fullscreen: HWND,
+    style: HWND,
     reduce_motion: HWND,
     hide_from_capture: HWND,
     hotkey: HWND,
@@ -179,6 +182,9 @@ struct Controls {
     search_status: HWND,
     results: HWND,
     watch: HWND,
+    price_alerts: HWND,
+    move_pct: HWND,
+    news: HWND,
 }
 
 struct Settings {
@@ -543,8 +549,11 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
     let reduce_motion = b.check("Reduce motion (no morphs or pop-ups)", form.reduce_motion);
     let hide_from_capture = b.check("Hide the island from screenshots and screen sharing", form.hide_from_capture);
     let hide_in_fullscreen = b.check("Sink to a thin line while a fullscreen app has focus", form.hide_in_fullscreen);
+    let move_in_fullscreen = b.check("With two or more displays, move to another one while a fullscreen app runs", form.move_in_fullscreen);
     let hotkey = b.edit("Open with hotkey", &form.hotkey);
     b.section("POSITION");
+    let looks: Vec<String> = ["Orb on any edge", "Notch at the top"].map(String::from).to_vec();
+    let style = b.combo("Look", &looks, Style::ALL.iter().position(|s| *s == form.style).unwrap_or(0), ID_STYLE);
     let edges: Vec<String> = ["Left", "Right", "Top", "Bottom"].map(String::from).to_vec();
     let edge = b.combo("Screen edge", &edges, Edge::ALL.iter().position(|e| *e == form.edge).unwrap_or(0), 0);
     let mut monitors = vec!["primary".to_string()];
@@ -558,7 +567,7 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
         .collect();
     let monitor = b.combo("Monitor", &labels, monitors.iter().position(|m| m.eq_ignore_ascii_case(&form.monitor)).unwrap_or(0), 0);
     let offset = b.edit("Along the edge (%)", &form.offset_pct);
-    b.hint("Tip: drag the orb, a tag or an open slip to move the island to any edge.");
+    b.hint("Tip: drag the orb, a tag or an open slip to move the island to any edge; a notch slides along the top.");
 
     // Modules: one list, ticked to show, in tab order.
     b.start_page(1);
@@ -664,14 +673,20 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
         b.make(w!("STATIC"), "Type a company, index, coin or currency pair", 0, WINDOW_EX_STYLE(0), (CTRL_X, b.y, CTRL_W, 18), 0);
     b.hints.push(search_status);
     b.y += 24;
-    let results = b.listbox(CTRL_X, CTRL_W, 100, ID_RESULTS);
+    let results = b.listbox(CTRL_X, CTRL_W, 72, ID_RESULTS);
     b.buttons(&[("Add to watchlist", ID_WATCH_ADD)]);
     b.section("YOUR WATCHLIST");
     let wy = b.y;
-    let watch = b.listbox(X0, CW - 140, 120, ID_WATCH);
+    let watch = b.listbox(X0, CW - 140, 112, ID_WATCH);
     b.button_at("Move up", X0 + CW - 128, wy, 128, ID_WATCH_UP, false);
     b.button_at("Move down", X0 + CW - 128, wy + 40, 128, ID_WATCH_DOWN, false);
     b.button_at("Remove", X0 + CW - 128, wy + 80, 128, ID_WATCH_REMOVE, false);
+    // Alerts on one row: big moves (with the step in %) and fresh headlines.
+    let price_alerts = b.check_at("Tag moves of (%)", X0, 150, form.price_alerts);
+    let move_pct =
+        b.make(w!("EDIT"), &form.move_pct, (ES_AUTOHSCROLL as u32) | WS_TABSTOP.0, WS_EX_CLIENTEDGE, (X0 + 154, b.y - 1, 52, 28), 0);
+    let news = b.check_at("Tag fresh headlines about the watchlist", X0 + 232, CW - 232, form.news);
+    b.y += 30;
 
     // Footer, on every page.
     b.page = PAGES.len();
@@ -695,6 +710,8 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
     let c = Controls {
         autostart,
         hide_in_fullscreen,
+        move_in_fullscreen,
+        style,
         reduce_motion,
         hide_from_capture,
         hotkey,
@@ -731,6 +748,9 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
         search_status,
         results,
         watch,
+        price_alerts,
+        move_pct,
+        news,
     };
     let painter = unsafe {
         D2D1CreateFactory::<ID2D1Factory1>(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&D2D1_FACTORY_OPTIONS::default()))
@@ -814,6 +834,8 @@ impl Settings {
             monitor: self.monitors.get(selected(c.monitor)).cloned().unwrap_or_else(|| "primary".into()),
             hotkey: text(c.hotkey),
             hide_in_fullscreen: checked(c.hide_in_fullscreen),
+            move_in_fullscreen: checked(c.move_in_fullscreen),
+            style: Style::ALL[selected(c.style).min(Style::ALL.len() - 1)],
             reduce_motion: checked(c.reduce_motion),
             hide_from_capture: checked(c.hide_from_capture),
             modules,
@@ -843,6 +865,9 @@ impl Settings {
             calendar_reminder: text(c.cal_reminder),
             calendar_days: text(c.cal_days),
             watchlist: self.watchlist.clone(),
+            price_alerts: checked(c.price_alerts),
+            move_pct: text(c.move_pct),
+            news: checked(c.news),
         }
     }
 
@@ -862,6 +887,7 @@ impl Settings {
                     "Latitude" | "Longitude" | "Prayer reminder" => 5,
                     "Earthquake radius" => 6,
                     "Calendar address" | "Event reminder" | "Days ahead" => 7,
+                    "Price move" => 8,
                     _ => self.page,
                 };
                 self.show_page(page);
@@ -1306,6 +1332,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 ID_CANCEL => unsafe {
                     let _ = DestroyWindow(hwnd);
                 },
+                // A notch starts in the middle of the top edge.
+                ID_STYLE if code == CBN_SELCHANGE => {
+                    with(|s| {
+                        if Style::ALL.get(selected(s.c.style)) == Some(&Style::Notch) {
+                            set_text(s.c.offset, "50");
+                        }
+                    });
+                }
                 ID_CITY if code == CBN_SELCHANGE => {
                     with(|s| {
                         if let Some(c) = selected(s.c.city).checked_sub(1).and_then(|i| ngambang_core::prayer::CITIES.get(i)) {

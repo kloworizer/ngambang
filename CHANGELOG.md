@@ -6,6 +6,45 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-10-26
+
+### Added
+- **Move to another display during fullscreen.** With two or more displays,
+  a fullscreen video or game sends the island to another display, where it
+  stays a full orb and keeps showing tags; it goes back when the app leaves
+  fullscreen or is minimized. On by default (`dock.move_in_fullscreen`, or
+  Settings ▸ General).
+- **Notch style.** Choose *Notch at the top* in Settings ▸ General ▸ Look or
+  the tray's Dock edge menu: the island hangs from the top of the screen
+  like a notch, widens for tags, drops its slips down and slides left or
+  right when you drag it (`dock.style = "notch"`).
+- **Market alerts and headlines.** The watchlist is checked every few
+  minutes in the background: a tag pops up when a symbol moves 3 % from the
+  previous close (and at every further step; change the step or turn it off
+  in Settings ▸ Markets), and when a fresh headline about it appears, with a
+  Read button. The Markets slip lists the latest headlines.
+- **Calendar reminders from your events.** The reminders you set on each
+  event in Google Calendar, Outlook or iCloud (VALARM) now pop up too,
+  including ones on all-day events, alongside the reminder from Settings.
+
+### Changed
+- **A fuller music slip.** A larger cover and bigger player buttons, with
+  no empty space: docked left or right, the cover and titles sit on top
+  and the progress and controls stretch across the slip; docked top or
+  bottom, the cover fills the slip's height.
+
+### Fixed
+- **Calendar and prayer reminders did not show** while a fullscreen app
+  (or a maximized window with an auto-hiding taskbar) had focus or a focus
+  round ran; they now come through like the break reminder. A reminder for
+  an event that starts within the reminder time, or one whose timer woke up
+  late after sleep, is no longer skipped.
+- The island re-checks Windows' clock every minute, so a time sync, a time
+  zone change or modern standby no longer shifts reminders.
+- An alarm's own title in a calendar feed could replace the event's title.
+- A maximized window no longer counts as fullscreen when the taskbar
+  hides itself.
+
 ## [0.1.6] - 2026-10-25
 
 ### Changed
