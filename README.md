@@ -17,7 +17,10 @@ mic/camera alert.
 - **Yours to shape.** Every module can be turned on or off on its own, from
   the tray menu or `config.toml`. Nothing is bundled into fixed profiles.
 - **Never in the way.** When a game or video goes fullscreen, the island
-  sinks to a 3 px line on the edge.
+  moves to your other display (if you have one) and comes back afterwards,
+  or sinks to a 3 px line on the edge.
+- **Orb or notch.** Rest as an orb on any edge, or as a notch hanging from
+  the top of the screen that you slide left or right.
 
 Specification: [docs/SPEC.md](docs/SPEC.md)
 
@@ -38,7 +41,7 @@ Specification: [docs/SPEC.md](docs/SPEC.md)
 | Shift + wheel on the orb | Next / previous track |
 | Middle-click the orb | Play / pause |
 | Wheel on the slips, or ↑ / ↓ | Flip between slips |
-| Drag the orb, a tag or a slip's background | Move it to another edge or monitor; it follows the pointer as you drag |
+| Drag the orb, a tag or a slip's background | Move it to another edge or monitor; it follows the pointer as you drag (a notch slides along the top) |
 | `Win+Alt+Space` | Open with the keyboard (`Tab`, `Enter`, `←`/`→` on sliders, `Esc`) |
 | Right-click the orb or tray icon | Settings, modules, dock edge, pause, start with Windows |
 
@@ -120,7 +123,7 @@ listed in the sidebar (`Ctrl+Tab` moves to the next one):
 
 | Page | Options |
 |------|---------|
-| General | Start with Windows · reduce motion · hide from screenshots and screen sharing · sink to a thin line in fullscreen apps · hotkey · screen edge · monitor · position along the edge |
+| General | Start with Windows · reduce motion · hide from screenshots and screen sharing · sink to a thin line in fullscreen apps · move to another display during fullscreen apps · hotkey · look (orb or notch) · screen edge · monitor · position along the edge |
 | Modules | Turn each of the fourteen modules on or off and set the order of their tabs |
 | Media & clipboard | Pop-up for new tracks · volume step · clipboard tags |
 | Focus & commands | Timer presets · custom round length · long-command threshold |
@@ -128,10 +131,10 @@ listed in the sidebar (`Ctrl+Tab` moves to the next one):
 | Location & prayer | A city from the list (about 240 places: Indonesia in depth, Malaysia, Singapore, Brunei, the Middle East and large cities worldwide; Jakarta by default), your own coordinates, or **Use my location** · calculation method · Asr (standard or Hanafi) · reminder minutes |
 | Weather & updates | Disaster pop-ups on/off · earthquake radius · automatic update checks (check now from the right-click menu) |
 | Calendar | Link calendars by their secret iCal address (Google Calendar ▸ Settings ▸ your calendar ▸ Integrate calendar), name and colour; pick one to edit or remove it. Indonesian public holidays are linked by default · reminder minutes · days ahead |
-| Markets | Search box with live matches (shares, indices, crypto, currency pairs) · your watchlist with Move up / Move down / Remove |
+| Markets | Search box with live matches (shares, indices, crypto, currency pairs) · your watchlist with Move up / Move down / Remove · price-move tags and their step (%) · headline tags |
 
 Everything applies as soon as you press **Save**; nothing needs a restart.
-The tray menu also has quick toggles for modules, dock edge, pause and
+The tray menu also has quick toggles for modules, dock edge (and the notch), pause and
 Start with Windows.
 
 ## Configuration file
@@ -147,6 +150,13 @@ useful keys:
 edge = "left"            # left | right | top | bottom
 offset = 0.45            # position along the edge
 hotkey = "Win+Alt+Space"
+style = "orb"            # orb | notch (hangs from the top, drag left or right)
+move_in_fullscreen = true  # with two or more displays, move away from fullscreen apps
+
+[finance]
+price_alerts = true      # a tag when a watchlist symbol moves move_pct
+move_pct = 3.0
+news = true              # a tag for fresh headlines about the watchlist
 
 [modules]
 ports = false            # e.g. turn off what you don't use

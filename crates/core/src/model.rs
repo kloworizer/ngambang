@@ -25,6 +25,12 @@ pub const BREAK_REPEAT_MS: u64 = 30 * 60_000;
 pub const UNATTENDED_MS: u64 = 4000;
 pub const MAX_JOBS: usize = 8;
 pub const MAX_CAPTURES: usize = 5;
+/// A calendar reminder may show this early (timer rounding) or this late
+/// (the computer slept through it), in seconds.
+const CALENDAR_EARLY_S: i64 = 5;
+const CALENDAR_LATE_S: i64 = 15 * 60;
+/// "Waktu Dzuhur" still shows this many minutes late.
+const PRAYER_LATE_MIN: f64 = 20.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IslandState {
@@ -486,6 +492,11 @@ pub enum Event {
         exe: String,
         signals: Signals,
     },
+    /// The island moved to another display while a fullscreen app covers
+    /// its own (true), or came back (false).
+    Displaced(bool),
+    /// Headlines about the watchlist.
+    News(Vec<crate::finance::NewsItem>),
     /// Another window became the foreground (the user clicked elsewhere).
     OutsideFocus,
     /// The game's process has exited: end the session now, not after the grace period.
@@ -602,6 +613,8 @@ pub struct Model {
     pub keyboard_open: bool,
     pub paused: bool,
     pub fullscreen: Fullscreen,
+    /// Moved to another display, away from the fullscreen app.
+    pub displaced: bool,
     pub now_ms: u64,
 
     pub media: Vec<MediaSession>,
@@ -636,8 +649,16 @@ pub struct Model {
     /// The "Add task" field while it is open.
     pub todo_input: Option<String>,
     pub calendar: Vec<crate::calendar::CalEvent>,
-    calendar_reminded: BTreeSet<(i64, String)>,
+    /// Reminders already shown: (start, title, lead in seconds).
+    calendar_reminded: BTreeSet<(i64, String, i64)>,
+    /// Prayer moments already announced today: (date, minute, at the time).
+    prayer_announced: BTreeSet<((i32, u32, u32), i64, bool)>,
     pub quotes: Vec<crate::finance::Quote>,
+    /// Latest headlines about the watchlist, newest first.
+    pub news: Vec<crate::finance::NewsItem>,
+    news_seen: BTreeSet<String>,
+    /// Steps of `move_pct` already announced today, per symbol.
+    moves: BTreeMap<String, i32>,
 
     samplers: BTreeSet<Sampler>,
     rng: u64,
@@ -665,6 +686,7 @@ impl Model {
             keyboard_open: false,
             paused: false,
             fullscreen: Fullscreen::None,
+            displaced: false,
             now_ms,
             media: Vec::new(),
             media_selected: None,
@@ -694,7 +716,11 @@ impl Model {
             todo_input: None,
             calendar: Vec::new(),
             calendar_reminded: BTreeSet::new(),
+            prayer_announced: BTreeSet::new(),
             quotes: Vec::new(),
+            news: Vec::new(),
+            news_seen: BTreeSet::new(),
+            moves: BTreeMap::new(),
             samplers: BTreeSet::new(),
             rng: seed | 1,
         };
@@ -783,7 +809,7 @@ impl Model {
     fn rest_state(&self) -> IslandState {
         if self.paused {
             IslandState::Hidden
-        } else if self.fullscreen != Fullscreen::None && self.config.dock.hide_in_fullscreen {
+        } else if self.fullscreen != Fullscreen::None && self.config.dock.hide_in_fullscreen && !self.displaced {
             IslandState::Seam
         } else {
             IslandState::Orb
@@ -791,7 +817,7 @@ impl Model {
     }
 
     fn quiet(&self) -> bool {
-        self.fullscreen != Fullscreen::None || (self.config.timer.quiet_while_running && self.timer.is_running())
+        (self.fullscreen != Fullscreen::None && !self.displaced) || (self.config.timer.quiet_while_running && self.timer.is_running())
     }
 
     fn tag_allowed(&self, priority: u8) -> bool {
@@ -1072,12 +1098,18 @@ impl Model {
             Event::Calendar(list) => {
                 if self.enabled(ModuleId::Calendar) {
                     self.calendar = list;
-                    self.schedule_calendar(fx);
+                    self.calendar_alerts(fx);
                 }
             }
             Event::Quotes(list) => {
                 if self.enabled(ModuleId::Finance) {
+                    self.price_moves(&list, fx);
                     self.quotes = list;
+                }
+            }
+            Event::News(list) => {
+                if self.enabled(ModuleId::Finance) {
+                    self.new_headlines(list, fx);
                 }
             }
             Event::Timer(TimerId::Calendar) => self.calendar_alerts(fx),
@@ -1093,7 +1125,7 @@ impl Model {
             Event::Clock { year, month, day, minutes, utc_offset_min, unix } => {
                 self.clock = Some(Clock { year, month, day, minutes, at_ms: self.now_ms, utc_offset_min, unix });
                 self.compute_prayer(fx);
-                self.schedule_calendar(fx);
+                self.calendar_alerts(fx);
             }
             Event::Weather(w) => {
                 if self.enabled(ModuleId::Weather) {
@@ -1205,6 +1237,13 @@ impl Model {
                 }
             }
             Event::Fullscreen { active, exe, signals } => self.fullscreen_changed(active, exe, signals, fx),
+            Event::Displaced(on) => {
+                self.displaced = on;
+                if matches!(self.state, IslandState::Orb | IslandState::Seam) {
+                    let rest = self.rest_state();
+                    self.go(rest, fx);
+                }
+            }
             Event::Stats(s) => self.stats.merge(s),
             Event::Capture(c) => {
                 if !self.enabled(ModuleId::Captures) {
@@ -1242,7 +1281,11 @@ impl Model {
                 }
                 self.privacy = next;
             }
-            Event::Day(day) => self.playlog.roll(&day),
+            Event::Day(day) => {
+                self.playlog.roll(&day);
+                // A new trading day: moves count from the new close.
+                self.moves.clear();
+            }
             Event::Config(cfg) => {
                 let modules_before = self.config.modules.clone();
                 self.config = cfg;
@@ -1252,6 +1295,7 @@ impl Model {
                     }
                 }
                 self.compute_prayer(fx);
+                self.calendar_alerts(fx);
                 if !matches!(self.state, IslandState::Slips | IslandState::Tag) {
                     let rest = self.rest_state();
                     self.go(rest, fx);
@@ -1352,7 +1396,10 @@ impl Model {
                 self.calendar.clear();
                 fx.push(Effect::KillTimer(TimerId::Calendar));
             }
-            ModuleId::Finance => self.quotes.clear(),
+            ModuleId::Finance => {
+                self.quotes.clear();
+                self.news.clear();
+            }
         }
         if self.front == Some(m) {
             self.front = None;
@@ -1394,7 +1441,13 @@ impl Model {
             Action::SelectSlip(m) => {
                 if self.available_slips().contains(&m) && self.front != Some(m) {
                     self.front = Some(m);
-                    self.front_opened(fx);
+                    if self.state == IslandState::Slips {
+                        self.front_opened(fx);
+                    }
+                }
+                // From a tag ("Open"): open the slips at that module.
+                if self.state != IslandState::Slips {
+                    self.go(IslandState::Slips, fx);
                 }
             }
             Action::MediaSource(i) => {
@@ -1776,46 +1829,148 @@ impl Model {
         self.calendar.iter().find(|e| !e.all_day && e.start >= now && e.start - now <= secs)
     }
 
+    /// Every reminder of the linked events: (event, lead in seconds before its start).
+    fn calendar_reminders(&self) -> Vec<(&crate::calendar::CalEvent, i64)> {
+        let lead = self.config.calendar.reminder_min as i64 * 60;
+        let mut out = Vec::new();
+        for e in &self.calendar {
+            let mut leads = e.alarms.clone();
+            if lead > 0 && !e.all_day && !leads.contains(&lead) {
+                leads.push(lead);
+            }
+            out.extend(leads.into_iter().map(|l| (e, l)));
+        }
+        out
+    }
+
     fn schedule_calendar(&self, fx: &mut Vec<Effect>) {
         fx.push(Effect::KillTimer(TimerId::Calendar));
-        let (Some(now), lead) = (self.unix_now(), self.config.calendar.reminder_min as i64 * 60) else { return };
-        if lead == 0 {
-            return;
-        }
+        let Some(now) = self.unix_now() else { return };
         let next = self
-            .calendar
-            .iter()
-            .filter(|e| !e.all_day && !self.calendar_reminded.contains(&(e.start, e.title.clone())))
-            .map(|e| e.start - lead)
-            .filter(|at| *at > now - 60)
+            .calendar_reminders()
+            .into_iter()
+            .filter(|(e, lead)| !self.calendar_reminded.contains(&(e.start, e.title.clone(), *lead)))
+            .map(|(e, lead)| e.start - lead)
+            .filter(|at| *at > now + CALENDAR_EARLY_S)
             .min();
         if let Some(at) = next {
-            fx.push(Effect::SetTimer(TimerId::Calendar, ((at - now).max(0) as u64 * 1000).max(1)));
+            fx.push(Effect::SetTimer(TimerId::Calendar, ((at - now) as u64 * 1000).max(1)));
         }
     }
 
+    /// Shows reminders that are due, including ones a late timer (sleep,
+    /// a clock change) would otherwise skip, then waits for the next one.
     fn calendar_alerts(&mut self, fx: &mut Vec<Effect>) {
         let Some(now) = self.unix_now() else { return };
-        let lead = self.config.calendar.reminder_min as i64 * 60;
-        let due: Vec<crate::calendar::CalEvent> = self
-            .calendar
-            .iter()
-            .filter(|e| !e.all_day && e.start - lead <= now + 5 && e.start > now - 60)
-            .filter(|e| !self.calendar_reminded.contains(&(e.start, e.title.clone())))
-            .cloned()
+        let offset = self.clock.map(|c| c.utc_offset_min as i64 * 60).unwrap_or(0);
+        let due: Vec<(crate::calendar::CalEvent, i64)> = self
+            .calendar_reminders()
+            .into_iter()
+            .filter(|(e, lead)| {
+                let at = e.start - lead;
+                let pending = if e.all_day { e.end > now } else { e.start > now - 120 };
+                at <= now + CALENDAR_EARLY_S && at > now - CALENDAR_LATE_S && pending
+            })
+            .filter(|(e, lead)| !self.calendar_reminded.contains(&(e.start, e.title.clone(), *lead)))
+            .map(|(e, lead)| (e.clone(), lead))
             .collect();
-        for e in due {
-            self.calendar_reminded.insert((e.start, e.title.clone()));
-            let mins = ((e.start - now) as f64 / 60.0).round().max(0.0) as i64;
-            let when = if mins == 0 { "now".to_string() } else { format!("in {mins} min") };
+        for (e, lead) in due {
+            self.calendar_reminded.insert((e.start, e.title.clone(), lead));
+            let when = if e.all_day {
+                let day = |t: i64| (t + offset).div_euclid(86_400);
+                crate::calendar::day_label(day(e.start), day(now)).to_lowercase()
+            } else {
+                let mins = ((e.start - now) as f64 / 60.0).round().max(0.0) as i64;
+                match mins {
+                    0 => "now".to_string(),
+                    1..=90 => format!("in {mins} min"),
+                    _ if mins < 36 * 60 => format!("in {} h", (mins as f64 / 60.0).round()),
+                    _ => format!("in {} days", (mins as f64 / 1440.0).round()),
+                }
+            };
+            // Reminders the user asked for show even over a fullscreen app.
             let mut t =
-                self.tag(format!("{} · {when}", crate::format::ellipsize(&e.title, 40)), crate::theme::CODER, Icon::Calendar, 3, 15_000);
+                self.tag(format!("{} · {when}", crate::format::ellipsize(&e.title, 40)), crate::theme::CODER, Icon::Calendar, 2, 15_000);
             if e.location.starts_with("https://") {
                 t.action = Some(("Join".into(), Action::OpenUrl(e.location.clone())));
             }
             self.push_tag(t, fx);
         }
         self.schedule_calendar(fx);
+    }
+
+    /// A tag when a symbol crosses another step of `move_pct` since the previous close.
+    fn price_moves(&mut self, list: &[crate::finance::Quote], fx: &mut Vec<Effect>) {
+        let f = self.config.finance.clone();
+        for q in list {
+            let steps = crate::finance::move_steps(q.change_pct, f.move_pct as f64);
+            let before = self.moves.get(&q.symbol).copied().unwrap_or(0);
+            // Back near the close: a later move counts again.
+            if steps == 0 {
+                if q.change_pct.abs() < f.move_pct as f64 / 2.0 {
+                    self.moves.remove(&q.symbol);
+                }
+                continue;
+            }
+            let further = steps.signum() != before.signum() || steps.abs() > before.abs();
+            if !further {
+                continue;
+            }
+            self.moves.insert(q.symbol.clone(), steps);
+            if !f.price_alerts {
+                continue;
+            }
+            let name = f
+                .watchlist
+                .iter()
+                .find(|w| w.symbol.eq_ignore_ascii_case(&q.symbol) && !w.name.is_empty())
+                .map(|w| w.name.clone())
+                .unwrap_or_else(|| if q.name.is_empty() { q.symbol.clone() } else { q.name.clone() });
+            let up = q.change_pct > 0.0;
+            let text = format!(
+                "{} {} {:.1}% · {}",
+                crate::format::ellipsize(&name, 24),
+                if up { "▲" } else { "▼" },
+                q.change_pct.abs(),
+                crate::finance::format_price(q)
+            );
+            let color = if up { crate::theme::OK } else { crate::theme::PRIVACY };
+            let mut t = self.tag(text, color, Icon::Chart, 4, TAG_MS + 4000);
+            t.action = Some(("Open".into(), Action::SelectSlip(ModuleId::Finance)));
+            self.push_tag(t, fx);
+        }
+    }
+
+    /// Keep the newest headlines; pop up the freshest one not seen before.
+    fn new_headlines(&mut self, list: Vec<crate::finance::NewsItem>, fx: &mut Vec<Effect>) {
+        let now = self.unix_now();
+        let mut fresh: Vec<&crate::finance::NewsItem> = Vec::new();
+        for n in &list {
+            if self.news_seen.insert(n.id.clone()) && now.is_some_and(|now| now - n.time < crate::finance::NEWS_FRESH_S) {
+                fresh.push(n);
+            }
+        }
+        fresh.sort_by_key(|n| std::cmp::Reverse(n.time));
+        if let (Some(n), true) = (fresh.first(), self.config.finance.news) {
+            let more = fresh.len() - 1;
+            let mut t = self.tag(
+                format!("{} · {}", n.symbol.trim_start_matches('^'), crate::format::ellipsize(&n.title, 56)),
+                crate::theme::GAME,
+                Icon::Chart,
+                5,
+                12_000,
+            );
+            if more > 0 {
+                t.detail = Some(format!("+{more}"));
+            }
+            t.action = Some(("Read".into(), Action::OpenUrl(n.link.clone())));
+            self.push_tag(t, fx);
+        }
+        let mut list = list;
+        list.sort_by_key(|n| std::cmp::Reverse(n.time));
+        list.dedup_by(|a, b| a.id == b.id);
+        list.truncate(8);
+        self.news = list;
     }
 
     /// Unix seconds now, from the last clock sync.
@@ -1883,9 +2038,11 @@ impl Model {
             return;
         };
         let (p, l) = (&self.config.prayer, &self.config.location);
-        self.prayer_day =
-            Some(crate::prayer::compute(c.year, c.month, c.day, l.latitude, l.longitude, c.utc_offset_min as f64 / 60.0, p.method, p.asr));
-        self.schedule_prayer(fx);
+        let day = crate::prayer::compute(c.year, c.month, c.day, l.latitude, l.longitude, c.utc_offset_min as f64 / 60.0, p.method, p.asr);
+        self.prayer_announced.retain(|(date, _, _)| *date == (c.year, c.month, c.day));
+        self.prayer_day = Some(day);
+        // Catch up on a moment a late timer skipped, then wait for the next.
+        self.prayer_alerts(fx);
     }
 
     /// Reminder and prayer moments today, in local minutes.
@@ -1907,22 +2064,34 @@ impl Model {
 
     fn schedule_prayer(&self, fx: &mut Vec<Effect>) {
         let Some(now) = self.local_minute() else { return };
-        if let Some((t, _, _)) = self.prayer_moments().into_iter().find(|(t, _, _)| *t > now + 0.01) {
+        if let Some((t, _, _)) = self.prayer_moments().into_iter().find(|(t, _, _)| *t > now + 0.05) {
             fx.push(Effect::SetTimer(TimerId::Prayer, ((t - now) * 60_000.0).ceil().max(1.0) as u64));
         }
     }
 
     fn prayer_alerts(&mut self, fx: &mut Vec<Effect>) {
-        let Some(now) = self.local_minute() else { return };
-        let due: Vec<_> = self.prayer_moments().into_iter().filter(|(t, _, _)| *t <= now + 0.05 && *t > now - 1.5).collect();
+        fx.push(Effect::KillTimer(TimerId::Prayer));
+        let (Some(now), Some(c)) = (self.local_minute(), self.clock) else { return };
+        let date = (c.year, c.month, c.day);
+        let before = self.config.prayer.reminder_min as f64;
+        // Due now, or missed by a timer that woke late: the time itself is
+        // still worth a tag for a while, a reminder only before the prayer.
+        let due: Vec<_> = self
+            .prayer_moments()
+            .into_iter()
+            .filter(|(t, _, at_time)| *t <= now + 0.05 && if *at_time { now - t < PRAYER_LATE_MIN } else { t + before > now })
+            .filter(|(t, _, at_time)| !self.prayer_announced.contains(&(date, *t as i64, *at_time)))
+            .collect();
         for (t, p, at_time) in due {
+            self.prayer_announced.insert((date, t as i64, at_time));
             let text = if at_time {
                 format!("Waktu {} · {}", p.name(), crate::prayer::hhmm(t))
             } else {
-                format!("{} in {} min", p.name(), self.config.prayer.reminder_min)
+                let left = (t + before - now).round().max(1.0);
+                format!("{} in {left:.0} min", p.name())
             };
-            let prio = if at_time { 2 } else { 4 };
-            let tag = self.tag(text, crate::theme::OK, Icon::Moon, prio, if at_time { 15_000 } else { 8000 });
+            // Prayer times show even over a fullscreen app or a focus round.
+            let tag = self.tag(text, crate::theme::OK, Icon::Moon, 2, if at_time { 15_000 } else { 10_000 });
             self.push_tag(tag, fx);
         }
         self.schedule_prayer(fx);
@@ -2525,6 +2694,146 @@ mod tests {
         assert!(m.available_slips().contains(&ModuleId::Prayer));
         // Off by default.
         assert!(!Config::default().modules.prayer);
+    }
+
+    #[test]
+    fn prayer_reminders_show_over_fullscreen_and_after_a_late_timer() {
+        let mut m = model();
+        m.update(0, Event::SetModule(ModuleId::Prayer, true));
+        m.update(0, Event::Clock { year: 2025, month: 1, day: 1, minutes: 11.0 * 60.0, utc_offset_min: 420, unix: 1_735_704_000 });
+        let dzuhur = m.prayer_day.unwrap().get(crate::prayer::Prayer::Dzuhur).unwrap().ceil();
+        m.update(10, Event::Fullscreen { active: true, exe: "C:\\Tools\\video.exe".into(), signals: Signals::default() });
+        assert_eq!(m.state, IslandState::Seam);
+        // The computer slept: the timer fires five minutes late.
+        let late = ((dzuhur - 5.0 - 660.0) * 60_000.0) as u64;
+        m.update(late, Event::Timer(TimerId::Prayer));
+        let t = m.current_tag().expect("reminder despite the fullscreen app");
+        assert_eq!(t.text, "Dzuhur in 5 min");
+        assert_eq!(m.state, IslandState::Tag);
+        // A clock sync right after does not repeat it.
+        let n = m.tags.len();
+        m.update(late + 10, Event::Clock { year: 2025, month: 1, day: 1, minutes: dzuhur - 5.0, utc_offset_min: 420, unix: 1_735_704_000 });
+        assert_eq!(m.tags.len(), n);
+        // No timer at all (modern standby): the next clock sync catches the prayer time.
+        let after = late + 7 * 60_000;
+        m.update(after, Event::Clock { year: 2025, month: 1, day: 1, minutes: dzuhur + 2.0, utc_offset_min: 420, unix: 1_735_704_000 });
+        assert!(m.tags.iter().any(|t| t.text.starts_with("Waktu Dzuhur")), "{:?}", m.tags);
+    }
+
+    fn event(title: &str, start: i64, alarms: Vec<i64>) -> crate::calendar::CalEvent {
+        crate::calendar::CalEvent {
+            title: title.into(),
+            location: String::new(),
+            start,
+            end: start + 3600,
+            all_day: false,
+            feed: 0,
+            alarms,
+        }
+    }
+
+    #[test]
+    fn calendar_reminders_use_the_events_own_alarms() {
+        let mut m = model();
+        let unix = 1_792_911_900;
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 14.0 * 60.0, utc_offset_min: 420, unix });
+        let fx = m.update(0, Event::Calendar(vec![event("Dentist", unix + 3600, vec![1800])]));
+        let wait = fx.iter().find_map(|e| if let Effect::SetTimer(TimerId::Calendar, ms) = e { Some(*ms) } else { None }).unwrap();
+        assert_eq!(wait, 1800 * 1000, "the event's own 30-minute reminder comes first");
+        m.update(5, Event::Fullscreen { active: true, exe: "C:\\Tools\\video.exe".into(), signals: Signals::default() });
+        m.update(wait, Event::Timer(TimerId::Calendar));
+        assert_eq!(m.current_tag().unwrap().text, "Dentist · in 30 min");
+        // Then the configured 10 minutes before.
+        m.update(wait + 20 * 60_000, Event::Timer(TimerId::Calendar));
+        assert!(m.tags.iter().any(|t| t.text == "Dentist · in 10 min"), "{:?}", m.tags);
+        // A refresh of the feed repeats nothing.
+        let n = m.tags.len();
+        m.update(wait + 20 * 60_000 + 10, Event::Calendar(vec![event("Dentist", unix + 3600, vec![1800])]));
+        assert_eq!(m.tags.len(), n);
+    }
+
+    #[test]
+    fn calendar_event_added_close_to_its_start_is_reminded_at_once() {
+        let mut m = model();
+        let unix = 1_792_911_900;
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 14.0 * 60.0, utc_offset_min: 420, unix });
+        m.update(0, Event::Calendar(vec![event("Standup", unix + 4 * 60, vec![])]));
+        assert_eq!(m.current_tag().unwrap().text, "Standup · in 4 min");
+        // Long past events stay quiet.
+        let mut m = model();
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 14.0 * 60.0, utc_offset_min: 420, unix });
+        m.update(0, Event::Calendar(vec![event("Old", unix - 3600, vec![])]));
+        assert!(m.current_tag().is_none());
+    }
+
+    #[test]
+    fn moved_to_another_display_the_island_stays_an_orb() {
+        let mut m = model();
+        m.update(0, Event::Displaced(true));
+        m.update(0, Event::Fullscreen { active: true, exe: "C:\\Tools\\video.exe".into(), signals: Signals::default() });
+        assert_eq!(m.state, IslandState::Orb, "no need to sink on a display without the fullscreen app");
+        m.update(10, Event::Notice("Build finished".into()));
+        assert_eq!(m.state, IslandState::Tag, "tags still show");
+        m.update(20_000, Event::Timer(TimerId::TagHide));
+        m.update(20_000, Event::Displaced(false));
+        assert_eq!(m.state, IslandState::Seam, "back on the fullscreen display it sinks again");
+        m.update(30_000, Event::Fullscreen { active: false, exe: String::new(), signals: Signals::default() });
+        assert_eq!(m.state, IslandState::Orb);
+    }
+
+    fn quote(symbol: &str, change_pct: f64) -> crate::finance::Quote {
+        crate::finance::Quote {
+            symbol: symbol.into(),
+            name: String::new(),
+            price: 80_785.0,
+            change_pct,
+            currency: "USD".into(),
+            kind: "CRYPTOCURRENCY".into(),
+            points: vec![],
+        }
+    }
+
+    #[test]
+    fn big_price_moves_tag_once_per_step() {
+        let mut m = model();
+        m.update(0, Event::Quotes(vec![quote("BTC-USD", 1.0)]));
+        assert!(m.current_tag().is_none());
+        m.update(10, Event::Quotes(vec![quote("BTC-USD", 3.4)]));
+        let t = m.current_tag().expect("a 3 % move");
+        assert_eq!(t.text, "Bitcoin ▲ 3.4% · $80,785");
+        let action = t.action.clone().unwrap().1;
+        m.tags.clear();
+        m.update(20, Event::Quotes(vec![quote("BTC-USD", 4.1)]));
+        assert!(m.current_tag().is_none(), "same step: quiet");
+        m.update(30, Event::Quotes(vec![quote("BTC-USD", 6.2)]));
+        assert!(m.current_tag().unwrap().text.contains("▲ 6.2%"));
+        m.tags.clear();
+        m.update(40, Event::Quotes(vec![quote("BTC-USD", -3.1)]));
+        assert!(m.current_tag().unwrap().text.contains("▼ 3.1%"), "a turn the other way");
+        // "Open" opens the Markets slip.
+        m.update(50, Event::Click(action));
+        assert_eq!((m.state, m.front), (IslandState::Slips, Some(ModuleId::Finance)));
+        // Turned off: quiet.
+        let mut m = model();
+        m.config.finance.price_alerts = false;
+        m.update(0, Event::Quotes(vec![quote("BTC-USD", 9.0)]));
+        assert!(m.current_tag().is_none());
+    }
+
+    #[test]
+    fn fresh_headlines_pop_up_once() {
+        let mut m = model();
+        let unix = 1_792_975_000;
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 26, minutes: 600.0, utc_offset_min: 420, unix });
+        let news = crate::finance::parse_news(include_str!("../testdata/yahoo_news.json"), "AAPL");
+        m.update(10, Event::News(news.clone()));
+        let t = m.current_tag().expect("a fresh headline");
+        assert!(t.text.starts_with("AAPL · Apple seeks more iPhone Duo"), "{}", t.text);
+        assert_eq!(t.action.as_ref().unwrap().1, Action::OpenUrl(news[0].link.clone()));
+        assert_eq!(m.news.len(), 3);
+        m.tags.clear();
+        m.update(20, Event::News(news));
+        assert!(m.current_tag().is_none(), "seen already");
     }
 
     #[test]

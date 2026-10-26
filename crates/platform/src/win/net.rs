@@ -132,6 +132,11 @@ pub struct NetConfig {
     pub calendars: Vec<String>,
     pub calendar_days: u32,
     pub symbols: Vec<String>,
+    /// Watchlist names, for headlines when a symbol has none of its own.
+    pub names: Vec<String>,
+    /// Keep an eye on prices in the background (move alerts).
+    pub price_alerts: bool,
+    pub news: bool,
 }
 
 /// Search Yahoo Finance for symbols (Settings ▸ Markets).
@@ -166,6 +171,25 @@ fn fetch_quotes(symbols: &[String]) -> Vec<finance::Quote> {
     symbols.iter().filter_map(|s| http_get(&finance::chart_url(s)).ok().and_then(|j| finance::parse_chart(&j))).collect()
 }
 
+/// Headlines for each symbol (by name when Yahoo has none for the symbol);
+/// None when nothing could be read.
+fn fetch_news(symbols: &[String], names: &[String]) -> Option<Vec<finance::NewsItem>> {
+    let mut out = Vec::new();
+    let mut any = false;
+    for (i, sym) in symbols.iter().take(10).enumerate() {
+        let Ok(json) = http_get(&finance::news_url(sym)) else { continue };
+        any = true;
+        let mut items = finance::parse_news(&json, sym);
+        if items.is_empty() {
+            if let Some(name) = names.get(i).filter(|n| !n.trim().is_empty()) {
+                items = http_get(&finance::news_url(name)).map(|j| finance::parse_news(&j, sym)).unwrap_or_default();
+            }
+        }
+        out.extend(items);
+    }
+    any.then_some(out)
+}
+
 enum Msg {
     Config(NetConfig),
     /// Quotes on (the watchlist is open) or off.
@@ -197,6 +221,7 @@ impl NetWorker {
             let (mut weather_fails, mut alert_fails) = (0usize, 0usize);
             let (mut next_calendar, mut calendar_fails) = (now, 0usize);
             let (mut quotes_on, mut next_quotes) = (false, now);
+            let mut next_news = now + Duration::from_secs(20);
             let retry = |fails: usize| RETRY[fails.min(RETRY.len() - 1)];
             loop {
                 let now = Instant::now();
@@ -207,8 +232,11 @@ impl NetWorker {
                 if !cfg.calendars.is_empty() {
                     due = due.min(next_calendar);
                 }
-                if quotes_on && !cfg.symbols.is_empty() {
+                if (quotes_on || cfg.price_alerts) && !cfg.symbols.is_empty() {
                     due = due.min(next_quotes);
+                }
+                if cfg.news && !cfg.symbols.is_empty() {
+                    due = due.min(next_news);
                 }
                 // Offline, due work waits for the next connectivity check
                 // instead of spinning on a deadline that has already passed.
@@ -226,6 +254,7 @@ impl NetWorker {
                         }
                         if c.symbols != cfg.symbols {
                             next_quotes = Instant::now();
+                            next_news = Instant::now();
                         }
                         cfg = c;
                         if moved {
@@ -330,12 +359,20 @@ impl NetWorker {
                         }
                     }
                 }
-                if quotes_on && !cfg.symbols.is_empty() && now >= next_quotes {
+                if (quotes_on || cfg.price_alerts) && !cfg.symbols.is_empty() && now >= next_quotes {
                     let quotes = fetch_quotes(&cfg.symbols);
                     if !quotes.is_empty() {
                         bus.send(Event::Quotes(quotes));
                     }
-                    next_quotes = Instant::now() + Duration::from_millis(finance::REFRESH_MS);
+                    // Every minute while the watchlist is open, else now and then.
+                    let every = if quotes_on { finance::REFRESH_MS } else { finance::WATCH_MS };
+                    next_quotes = Instant::now() + Duration::from_millis(every);
+                }
+                if cfg.news && !cfg.symbols.is_empty() && now >= next_news {
+                    if let Some(news) = fetch_news(&cfg.symbols, &cfg.names) {
+                        bus.send(Event::News(news));
+                    }
+                    next_news = Instant::now() + Duration::from_millis(finance::NEWS_MS);
                 }
                 if now >= next_update && (cfg.auto_update || manual_update) {
                     match check_update() {

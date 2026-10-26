@@ -1,7 +1,7 @@
 //! Notification-area icon and its menu: turn modules on or off, move the
 //! island, pause, autostart, open the config file, quit.
 
-use ngambang_core::config::{Config, ModuleId};
+use ngambang_core::config::{Config, ModuleId, Style};
 use ngambang_core::geometry::Edge;
 use windows::core::{w, Result, HSTRING};
 use windows::Win32::Foundation::{HWND, POINT};
@@ -15,6 +15,7 @@ use super::util::WM_APP_TRAY;
 
 pub const CMD_MODULE: u32 = 1000;
 pub const CMD_EDGE: u32 = 1100;
+pub const CMD_NOTCH: u32 = 1110;
 pub const CMD_PAUSE: u32 = 1200;
 pub const CMD_AUTOSTART: u32 = 1201;
 pub const CMD_CONFIG: u32 = 1202;
@@ -136,9 +137,12 @@ impl Tray {
                     Edge::Top => "Top",
                     Edge::Bottom => "Bottom",
                 };
-                let flags = if cfg.dock.edge == *e { MF_STRING | MF_CHECKED } else { MF_STRING };
+                let flags = if cfg.dock.style == Style::Orb && cfg.dock.edge == *e { MF_STRING | MF_CHECKED } else { MF_STRING };
                 let _ = AppendMenuW(edges, flags, (CMD_EDGE + i as u32) as usize, &HSTRING::from(label));
             }
+            let _ = AppendMenuW(edges, MF_SEPARATOR, 0, None);
+            let flags = if cfg.dock.style == Style::Notch { MF_STRING | MF_CHECKED } else { MF_STRING };
+            let _ = AppendMenuW(edges, flags, CMD_NOTCH as usize, w!("Notch at the top"));
             let title = HSTRING::from(format!("Ngambang {}", ngambang_core::VERSION));
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &title);
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);

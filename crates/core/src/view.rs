@@ -351,6 +351,67 @@ fn seam_colors(m: &Model) -> Vec<Color> {
 }
 
 pub fn build(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
+    let scene = build_shape(m, edge, tm);
+    if m.config.dock.style != crate::config::Style::Notch {
+        return scene;
+    }
+    match scene.kind {
+        SceneKind::Hidden | SceneKind::Seam => scene,
+        SceneKind::Orb => notch(m),
+        _ => hang_from_top(scene),
+    }
+}
+
+/// The notch at rest: a dark tab hanging from the top of the screen, with
+/// the tide ring on the left and the status dot on the right.
+fn notch(m: &Model) -> Scene {
+    let (w, h) = (NOTCH_W, NOTCH_H);
+    let c = Point::new(6.0 + RING_R + 2.5, h / 2.0);
+    let ring = ring_spec(m, c);
+    let dot = ring.map(|r| r.color).unwrap_or(TRACK);
+    let mut prims = surface(Rect::new(0.0, 0.0, w, h), h / 2.0).to_vec();
+    let mut scene = Scene {
+        kind: SceneKind::Orb,
+        size: Size::new(w, h),
+        flush: true,
+        clip_radius: 0.0,
+        prims: Vec::new(),
+        hits: vec![Hit { rect: Rect::new(0.0, 0.0, w, h), kind: HitKind::Click(Action::ToggleSlips), label: "Ngambang".into() }],
+        ring,
+    };
+    prims.extend(soft::well_circle(c.x, c.y, RING_R + 2.5));
+    // A grip in the middle says it slides left and right.
+    prims.push(Prim::RoundRect { rect: Rect::new(w / 2.0 - 16.0, h - 8.0, 32.0, 3.0), radius: 1.5, fill: Some(TRACK), stroke: None });
+    let dx = w - 6.0 - RING_R - 2.5;
+    if ring.is_some() {
+        prims.push(Prim::Circle { cx: dx, cy: c.y, r: 6.0, fill: Some(dot.with_alpha(0x40)), stroke: None });
+    }
+    let d = Rect::new(dx - 3.5, c.y - 3.5, 7.0, 7.0);
+    prims.push(Prim::Gradient { rect: d, radius: 3.5, from: accent_light(dot), to: accent_deep(dot), diagonal: true });
+    scene.prims = prims;
+    hang_from_top(scene)
+}
+
+/// Square the top corners so the shape grows out of the screen's top edge.
+fn hang_from_top(mut scene: Scene) -> Scene {
+    let (w, h) = (scene.size.w, scene.size.h);
+    let ph = (h / 2.0).min(24.0);
+    let patch = Prim::Gradient {
+        rect: Rect::new(0.0, 0.0, w, ph),
+        radius: 0.0,
+        from: SURFACE_TOP,
+        to: SURFACE_TOP.mix(SURFACE_BOTTOM, ph / h.max(1.0)),
+        diagonal: false,
+    };
+    // Right above the body's sheen and outline, under everything else.
+    let at = scene.prims.len().min(2);
+    scene.prims.insert(at, patch);
+    scene.flush = true;
+    scene.clip_radius = 0.0;
+    scene
+}
+
+fn build_shape(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
     match m.state {
         IslandState::Hidden => Scene {
             kind: SceneKind::Hidden,
@@ -677,6 +738,10 @@ struct B<'a> {
     /// The full content area, for switching between the columns.
     x0: f32,
     full_w: f32,
+    /// Content may reach down to here without making the slip any taller.
+    fill: f32,
+    /// Docked left or right: a narrow, taller slip.
+    vertical: bool,
 }
 
 /// Space between the two columns of a slip.
@@ -797,7 +862,9 @@ impl B<'_> {
         }
         let c = Point::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
         let fg = if action.is_none() { fg.with_alpha(0x55) } else { fg };
-        self.icon(icon, Rect::new(c.x - 8.0, c.y - 8.0, 16.0, 16.0), fg);
+        // Larger buttons carry larger icons.
+        let i = (r.h * 0.38).round().clamp(16.0, 22.0);
+        self.icon(icon, Rect::new(c.x - i / 2.0, c.y - i / 2.0, i, i), fg);
         if let Some(a) = action {
             self.hits.push(Hit { rect: r, kind: HitKind::Click(a), label: label.into() });
         }
@@ -939,8 +1006,9 @@ fn module_icon(m: ModuleId) -> (Icon, Color) {
 }
 
 /// Lays out one module's content: returns where it ends and what it drew.
-fn slip_body<'a>(m: &Model, front: ModuleId, tm: &'a dyn TextMeasure, two: bool, max_h: f32, floor: f32) -> (f32, B<'a>) {
+fn slip_body<'a>(m: &Model, front: ModuleId, tm: &'a dyn TextMeasure, edge: Edge, two: bool, max_h: f32, floor: f32) -> (f32, B<'a>) {
     let pad = SLIP_PAD;
+    let min_h = if edge.is_vertical() { SLIP_MIN_V } else { SLIP_MIN_H };
     let w = if two { SLIP_W2 } else { SLIP_W };
     let mut b = B {
         prims: Vec::new(),
@@ -953,6 +1021,8 @@ fn slip_body<'a>(m: &Model, front: ModuleId, tm: &'a dyn TextMeasure, two: bool,
         two,
         x0: pad,
         full_w: w - 2.0 * pad,
+        fill: min_h - pad,
+        vertical: edge.is_vertical(),
     };
     let bottom = match front {
         ModuleId::Media => media_slip(m, &mut b, pad),
@@ -982,10 +1052,10 @@ fn slip_shape(m: &Model, front: ModuleId, edge: Edge, tm: &dyn TextMeasure) -> (
     let (two, min_h, max_h) = if edge.is_vertical() {
         (false, SLIP_MIN_V, SLIP_MAX_V)
     } else {
-        let natural = slip_body(m, front, tm, false, 10_000.0, 0.0).0 + SLIP_PAD;
+        let natural = slip_body(m, front, tm, edge, false, 10_000.0, 0.0).0 + SLIP_PAD;
         (natural > SLIP_MAX_H, SLIP_MIN_H, SLIP_MAX_H)
     };
-    let bottom = slip_body(m, front, tm, two, max_h, 0.0).0;
+    let bottom = slip_body(m, front, tm, edge, two, max_h, 0.0).0;
     (two, (bottom + SLIP_PAD).ceil().clamp(min_h, max_h))
 }
 
@@ -995,7 +1065,7 @@ fn slips(m: &Model, front: ModuleId, edge: Edge, tm: &dyn TextMeasure) -> Scene 
     // edge: one shape, the same place to look, and it never hangs past the body.
     let (two, slip_h) = slip_shape(m, front, edge, tm);
     let max_h = if edge.is_vertical() { SLIP_MAX_V } else { SLIP_MAX_H };
-    let (_, mut b) = slip_body(m, front, tm, two, max_h, slip_h - SLIP_PAD);
+    let (_, mut b) = slip_body(m, front, tm, edge, two, max_h, slip_h - SLIP_PAD);
     let slip_w = if two { SLIP_W2 } else { SLIP_W };
     let content: Vec<Prim> = std::mem::take(&mut b.prims);
     let n = tabs.len().max(1);
@@ -1065,17 +1135,57 @@ fn slips(m: &Model, front: ModuleId, edge: Edge, tm: &dyn TextMeasure) -> Scene 
 }
 
 fn media_slip(m: &Model, b: &mut B, top: f32) -> f32 {
-    let now = m.now_ms;
     let Some(s) = m.front_media() else {
         let y = b.header(top, MEDIA, "Media", None);
         return b.empty(y + 14.0, "Nothing is playing");
     };
     let label = if m.media.len() > 1 { format!("Media · {} sources", m.media.len()) } else { format!("Media · {}", s.app) };
     let y0 = b.header(top, MEDIA, &label, None) + 14.0;
-    // The cover, large in a wide slip.
     b.full();
-    let side = if b.two { (b.limit - y0).min(214.0) } else { 140.0 };
+    if b.vertical {
+        return media_stacked(m, s, b, y0);
+    }
+    // Docked top or bottom: the cover fills the slip's height, the details
+    // and the controls stand beside it.
+    let side = if b.two { (b.limit - y0).min(214.0) } else { (b.fill - y0).clamp(140.0, 200.0) };
     let art = Rect::new(b.x, y0, side, side);
+    media_art(b, s, art);
+    b.full();
+    b.x += side + GUTTER;
+    b.w -= side + GUTTER;
+    let y = media_sources(m, s, b, y0);
+    let y = media_titles(s, b, y);
+    // The controls sit at the bottom of the cover; the progress just above them.
+    let controls_y = (y0 + side - MEDIA_BTN_H).max(y + 46.0);
+    media_progress(m, s, b, controls_y - 46.0);
+    media_controls(s, b, controls_y);
+    (controls_y + MEDIA_BTN_H).max(y0 + side)
+}
+
+/// Height of the media slip's player buttons.
+const MEDIA_BTN_H: f32 = 52.0;
+
+/// Docked left or right: the cover and titles on top, then the progress
+/// across the full width and large controls below.
+fn media_stacked(m: &Model, s: &MediaSession, b: &mut B, y0: f32) -> f32 {
+    let side = 168.0;
+    media_art(b, s, Rect::new(b.x, y0, side, side));
+    b.x += side + GUTTER;
+    b.w -= side + GUTTER;
+    let y = media_sources(m, s, b, y0);
+    let y = media_titles(s, b, y);
+    // The app under the titles, while there is room beside the cover.
+    if y + 20.0 <= y0 + side && m.media.len() <= 1 {
+        b.text(Rect::new(b.x, y0 + side - 18.0, b.w, 18.0), s.app.to_uppercase(), TextStyle::LABEL, LABEL);
+    }
+    b.full();
+    let y = (y0 + side + 18.0).max(y + 12.0);
+    let y = media_progress(m, s, b, y);
+    media_controls(s, b, y);
+    y + MEDIA_BTN_H
+}
+
+fn media_art(b: &mut B, s: &MediaSession, art: Rect) {
     match &s.art {
         Some(a) => {
             // The cover floats a little above the surface.
@@ -1084,69 +1194,83 @@ fn media_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         }
         None => {
             b.prims.extend(soft::well(art, 14.0));
-            b.icon(Icon::Note, Rect::new(art.x + side / 2.0 - 24.0, art.y + side / 2.0 - 24.0, 48.0, 48.0), MEDIA);
+            let i = (art.w * 0.34).round();
+            b.icon(Icon::Note, Rect::new(art.x + (art.w - i) / 2.0, art.y + (art.h - i) / 2.0, i, i), MEDIA);
         }
     }
-    // Right of the cover: sources, title, progress and the controls.
-    b.full();
-    b.x += side + GUTTER;
-    b.w -= side + GUTTER;
-    let mut y = y0;
-    if m.media.len() > 1 {
-        let chips: Vec<_> = m
-            .media
-            .iter()
-            .take(3)
-            .enumerate()
-            .map(|(i, x)| {
-                let name = if x.playing { x.app.clone() } else { format!("{} · paused", x.app) };
-                (format::ellipsize(&name, 14), if x.id == s.id { MEDIA } else { TEXT_2 }, Action::MediaSource(i))
-            })
-            .collect();
-        y = b.chips(y, chips) + 14.0;
+}
+
+/// Chips to switch between apps that play, when there are several.
+fn media_sources(m: &Model, s: &MediaSession, b: &mut B, y: f32) -> f32 {
+    if m.media.len() <= 1 {
+        return y;
     }
-    b.text(Rect::new(b.x, y, b.w, 26.0), if s.title.is_empty() { s.app.clone() } else { s.title.clone() }, TextStyle::TITLE, TEXT);
+    let chips: Vec<_> = m
+        .media
+        .iter()
+        .take(3)
+        .enumerate()
+        .map(|(i, x)| {
+            let name = if x.playing { x.app.clone() } else { format!("{} · paused", x.app) };
+            (format::ellipsize(&name, 14), if x.id == s.id { MEDIA } else { TEXT_2 }, Action::MediaSource(i))
+        })
+        .collect();
+    b.chips(y, chips) + 14.0
+}
+
+fn media_titles(s: &MediaSession, b: &mut B, y: f32) -> f32 {
+    let title_style = TextStyle { size: 19.0, weight: Weight::Semibold, mono: false };
+    b.text(Rect::new(b.x, y, b.w, 28.0), if s.title.is_empty() { s.app.clone() } else { s.title.clone() }, title_style, TEXT);
     let artist = if s.artist.is_empty() { s.app.clone() } else { s.artist.clone() };
-    b.text(Rect::new(b.x, y + 26.0, b.w, 20.0), artist, TextStyle::SMALL, TEXT_2);
-    y += 60.0;
-    let pos = s.position_at(now);
-    if s.duration_ms > 0 {
-        let frac = s.progress_at(now).unwrap_or(0.0);
-        let played = (b.w * frac).max(0.0);
-        let cy = y + 8.0;
-        if played > 2.0 {
-            let pts = if s.playing { wave_points(b.x, cy, played, 3.5) } else { vec![Point::new(b.x, cy), Point::new(b.x + played, cy)] };
-            b.prims.push(Prim::Polyline { points: pts, width: 2.0, color: MEDIA, closed: false });
-        }
-        b.prims.push(Prim::Circle { cx: b.x + played + 3.0, cy, r: 3.0, fill: Some(TEXT), stroke: None });
-        if played + 8.0 < b.w {
-            b.rect(Rect::new(b.x + played + 8.0, cy - 1.0, b.w - played - 8.0, 2.0), 1.0, TRACK);
-        }
-        if s.can_seek {
-            b.hits.push(Hit {
-                rect: Rect::new(b.x, y - 6.0, b.w, 28.0),
-                kind: HitKind::Slider(SliderTarget::MediaSeek),
-                label: "Seek".into(),
-            });
-        }
-        y += 20.0;
-        b.text(Rect::new(b.x, y, 80.0, 16.0), format::clock(pos / 1000), TextStyle::LABEL, LABEL);
-        b.text_end(Rect::new(b.x + b.w - 80.0, y, 80.0, 16.0), format::clock(s.duration_ms / 1000), TextStyle::LABEL, LABEL);
-        y += 26.0;
+    b.text(Rect::new(b.x, y + 28.0, b.w, 22.0), artist, TextStyle::BODY, TEXT_2);
+    y + 56.0
+}
+
+/// The played part as a wave, the rest as a track, with the times under it.
+/// Takes 46 from `y`.
+fn media_progress(m: &Model, s: &MediaSession, b: &mut B, y: f32) -> f32 {
+    let now = m.now_ms;
+    if s.duration_ms == 0 {
+        return y;
     }
+    let frac = s.progress_at(now).unwrap_or(0.0);
+    let played = (b.w * frac).max(0.0);
+    let cy = y + 8.0;
+    if played > 2.0 {
+        let pts = if s.playing { wave_points(b.x, cy, played, 3.5) } else { vec![Point::new(b.x, cy), Point::new(b.x + played, cy)] };
+        b.prims.push(Prim::Polyline { points: pts, width: 2.0, color: MEDIA, closed: false });
+    }
+    b.prims.push(Prim::Circle { cx: b.x + played + 3.0, cy, r: 3.5, fill: Some(TEXT), stroke: None });
+    if played + 8.0 < b.w {
+        b.rect(Rect::new(b.x + played + 8.0, cy - 1.0, b.w - played - 8.0, 2.0), 1.0, TRACK);
+    }
+    if s.can_seek {
+        b.hits.push(Hit { rect: Rect::new(b.x, y - 6.0, b.w, 28.0), kind: HitKind::Slider(SliderTarget::MediaSeek), label: "Seek".into() });
+    }
+    let t = y + 20.0;
+    b.text(Rect::new(b.x, t, 80.0, 16.0), format::clock(s.position_at(now) / 1000), TextStyle::LABEL, LABEL);
+    b.text_end(Rect::new(b.x + b.w - 80.0, t, 80.0, 16.0), format::clock(s.duration_ms / 1000), TextStyle::LABEL, LABEL);
+    y + 46.0
+}
+
+/// Previous, play/pause and next, large and centred.
+fn media_controls(s: &MediaSession, b: &mut B, y: f32) {
+    let h = MEDIA_BTN_H;
+    let (side, play) = (h, 76.0);
+    let gap = 14.0;
     let cx = b.x + b.w / 2.0;
     let prev = s.can_prev.then_some(Action::MediaPrev);
     let next = s.can_next.then_some(Action::MediaNext);
-    b.icon_button(Rect::new(cx - 28.0 - 52.0, y, 44.0, 44.0), Icon::Prev, TEXT, None, prev, "Previous track");
+    b.icon_button(Rect::new(cx - play / 2.0 - gap - side, y, side, h), Icon::Prev, TEXT, Some(SURFACE_3), prev, "Previous track");
     let (icon, label) = if s.playing { (Icon::Pause, "Pause") } else { (Icon::Play, "Play") };
     let pc = if s.can_play_pause { MEDIA } else { TRACK };
-    b.prims.extend(soft::raised_grad(Rect::new(cx - 28.0, y, 56.0, 44.0), 22.0, accent_light(pc), accent_deep(pc), 3.0));
-    b.icon(icon, Rect::new(cx - 9.0, y + 13.0, 18.0, 18.0), SURFACE);
+    let r = Rect::new(cx - play / 2.0, y, play, h);
+    b.prims.extend(soft::raised_grad(r, h / 2.0, accent_light(pc), accent_deep(pc), 3.0));
+    b.icon(icon, Rect::new(cx - 11.0, y + h / 2.0 - 11.0, 22.0, 22.0), SURFACE);
     if s.can_play_pause {
-        b.hits.push(Hit { rect: Rect::new(cx - 28.0, y, 56.0, 44.0), kind: HitKind::Click(Action::MediaPlayPause), label: label.into() });
+        b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::MediaPlayPause), label: label.into() });
     }
-    b.icon_button(Rect::new(cx + 28.0 + 8.0, y, 44.0, 44.0), Icon::Next, TEXT, None, next, "Next track");
-    (y + 44.0).max(y0 + side)
+    b.icon_button(Rect::new(cx + play / 2.0 + gap, y, side, h), Icon::Next, TEXT, Some(SURFACE_3), next, "Next track");
 }
 
 fn mixer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -2111,6 +2235,47 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         }
     }
     let _ = y;
+    // Headlines beside the prices in a wide slip (when the right column is
+    // free), else under them, as many as fit.
+    let room = |b: &B, y: f32| y + 44.0 <= b.limit - 28.0;
+    let beside = b.two && fit <= b.rows(y0, 62.0, 20.0);
+    let start = if beside {
+        b.col(1);
+        y0
+    } else {
+        b.full();
+        bottom + 16.0
+    };
+    if !m.news.is_empty() && room(b, start + 22.0) {
+        let mut y = start;
+        b.text(Rect::new(b.x, y, b.w, 16.0), "HEADLINES", TextStyle::LABEL, LABEL);
+        y += 22.0;
+        let now = m.unix_now();
+        for n in m.news.iter().take(3) {
+            if !room(b, y) {
+                break;
+            }
+            let r = Rect::new(b.x, y, b.w, 40.0);
+            b.rect(Rect::new(r.x, r.y + 4.0, 3.0, r.h - 8.0), 1.5, GAME);
+            b.text(Rect::new(r.x + 12.0, r.y + 1.0, r.w - 12.0, 20.0), n.title.clone(), TextStyle::SMALL, TEXT);
+            let age = now
+                .map(|now| match (now - n.time).max(60) / 60 {
+                    m if m < 60 => format!(" · {m}m ago"),
+                    m if m < 48 * 60 => format!(" · {}h ago", m / 60),
+                    m => format!(" · {}d ago", m / 1440),
+                })
+                .unwrap_or_default();
+            b.text(
+                Rect::new(r.x + 12.0, r.y + 21.0, r.w - 12.0, 16.0),
+                format!("{} · {}{age}", n.symbol.trim_start_matches('^'), n.publisher),
+                TextStyle { size: 11.0, weight: Weight::Regular, mono: true },
+                LABEL,
+            );
+            b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(n.link.clone())), label: n.title.clone() });
+            y += 44.0;
+            bottom = bottom.max(y - 4.0);
+        }
+    }
     b.full();
     let y = b.pin(bottom + 12.0, 16.0);
     if list.len() > fit {
@@ -2442,7 +2607,36 @@ mod tests {
                 out.push((format!("{slip:?} {edge:?}"), build(&m, edge, &ApproxMeasure)));
             }
         }
+        // The notch style hangs everything from the top edge.
+        m.config.dock.style = crate::config::Style::Notch;
+        m.state = IslandState::Orb;
+        out.push(("notch rest Top".into(), build(&m, Edge::Top, &ApproxMeasure)));
+        m.state = IslandState::Tag;
+        out.push(("notch tag Top".into(), build(&m, Edge::Top, &ApproxMeasure)));
+        m.state = IslandState::Slips;
+        for slip in m.available_slips() {
+            m.front = Some(slip);
+            out.push((format!("notch {slip:?} Top"), build(&m, Edge::Top, &ApproxMeasure)));
+        }
         out
+    }
+
+    #[test]
+    fn notch_scenes_hang_from_the_top_edge() {
+        for (name, s) in all_scenes().into_iter().filter(|(n, _)| n.starts_with("notch")) {
+            assert!(s.flush, "{name}: flush with the edge");
+            assert_eq!(s.clip_radius, 0.0, "{name}");
+            // A square patch covers the top corners.
+            assert!(
+                s.prims
+                    .iter()
+                    .any(|p| matches!(p, Prim::Gradient { rect, radius, .. } if *radius == 0.0 && rect.y == 0.0 && rect.w == s.size.w)),
+                "{name}: square top"
+            );
+        }
+        let rest = all_scenes().into_iter().find(|(n, _)| n == "notch rest Top").unwrap().1;
+        assert_eq!((rest.kind, rest.size), (SceneKind::Orb, Size::new(NOTCH_W, NOTCH_H)));
+        assert_eq!(rest.hits[0].kind, HitKind::Click(Action::ToggleSlips));
     }
 
     #[test]

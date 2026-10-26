@@ -121,11 +121,56 @@ pub struct DockConfig {
     pub hotkey: String,
     /// Sink to the 3 px Seam while a fullscreen app has focus.
     pub hide_in_fullscreen: bool,
+    /// With more than one display, move to another one while a fullscreen
+    /// app (a video, a game) covers this one, and come back afterwards.
+    pub move_in_fullscreen: bool,
+    pub style: Style,
 }
 
 impl Default for DockConfig {
     fn default() -> Self {
-        DockConfig { edge: Edge::Left, offset: 0.45, monitor: "primary".into(), hotkey: "Win+Alt+Space".into(), hide_in_fullscreen: true }
+        DockConfig {
+            edge: Edge::Left,
+            offset: 0.45,
+            monitor: "primary".into(),
+            hotkey: "Win+Alt+Space".into(),
+            hide_in_fullscreen: true,
+            move_in_fullscreen: true,
+            style: Style::Orb,
+        }
+    }
+}
+
+impl DockConfig {
+    /// The edge the island really uses: a notch always hangs from the top.
+    pub fn edge(&self) -> Edge {
+        match self.style {
+            Style::Notch => Edge::Top,
+            Style::Orb => self.edge,
+        }
+    }
+}
+
+/// How the island looks at rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Style {
+    /// A small orb on any edge that grows into tags and slips.
+    #[default]
+    Orb,
+    /// A notch hanging from the top of the screen, dragged left or right,
+    /// that widens for tags and drops slips down from it.
+    Notch,
+}
+
+impl Style {
+    pub const ALL: [Style; 2] = [Style::Orb, Style::Notch];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Style::Orb => "orb",
+            Style::Notch => "notch",
+        }
     }
 }
 
@@ -439,12 +484,23 @@ pub struct WatchItem {
 #[serde(default)]
 pub struct FinanceConfig {
     pub watchlist: Vec<WatchItem>,
+    /// A tag when a symbol moves `move_pct` since the previous close, and
+    /// again at every further step.
+    pub price_alerts: bool,
+    pub move_pct: f32,
+    /// A tag for fresh headlines about the watchlist.
+    pub news: bool,
 }
 
 impl Default for FinanceConfig {
     fn default() -> Self {
         let item = |symbol: &str, name: &str| WatchItem { symbol: symbol.into(), name: name.into() };
-        FinanceConfig { watchlist: vec![item("^JKSE", "IDX Composite"), item("BTC-USD", "Bitcoin"), item("USDIDR=X", "USD/IDR")] }
+        FinanceConfig {
+            watchlist: vec![item("^JKSE", "IDX Composite"), item("BTC-USD", "Bitcoin"), item("USDIDR=X", "USD/IDR")],
+            price_alerts: true,
+            move_pct: 3.0,
+            news: true,
+        }
     }
 }
 
@@ -478,6 +534,8 @@ offset = 0.45              # 0.0 = start of the edge, 1.0 = end
 monitor = "primary"        # or a device name like \\.\DISPLAY2
 hotkey = "Win+Alt+Space"
 hide_in_fullscreen = true  # sink to a 3 px line while a fullscreen app has focus
+move_in_fullscreen = true  # with two or more displays, move to another one meanwhile
+style = "orb"              # orb (any edge) | notch (top of the screen, drag left or right)
 
 [modules]
 media = true       # now playing from every app with media controls
@@ -552,6 +610,9 @@ days = 7                   # days ahead shown
 
 [finance]                  # add symbols in Settings ▸ Markets (search by name)
 watchlist = [{ symbol = "^JKSE", name = "IDX Composite" }, { symbol = "BTC-USD", name = "Bitcoin" }, { symbol = "USDIDR=X", name = "USD/IDR" }]
+price_alerts = true        # a tag when a symbol moves move_pct, and at every further step
+move_pct = 3.0             # percent since the previous close
+news = true                # a tag for fresh headlines about your watchlist
 
 [update]
 auto_check = true          # look for a new release on GitHub once a day
@@ -637,6 +698,10 @@ impl Config {
             self.timer.presets_min = TimerConfig::default().presets_min;
         }
         self.timer.presets_min.truncate(3);
+        if !(0.5..=50.0).contains(&self.finance.move_pct) {
+            warnings.push("finance.move_pct must be 0.5–50".into());
+            self.finance.move_pct = if self.finance.move_pct.is_nan() { 3.0 } else { self.finance.move_pct.clamp(0.5, 50.0) };
+        }
         if !(1..=240).contains(&self.timer.custom_min) {
             warnings.push("timer.custom_min must be 1–240".into());
             self.timer.custom_min = self.timer.custom_min.clamp(1, 240);

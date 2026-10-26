@@ -22,7 +22,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{
     SHQueryUserNotificationState, ShellExecuteW, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, SW_SHOWNORMAL};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetClassNameW, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsZoomed, GWL_STYLE, SW_SHOWNORMAL,
+    WS_CAPTION,
+};
 
 use super::util::{process_path, Bus};
 
@@ -38,6 +41,12 @@ pub fn fullscreen_app(ours: HWND, island_monitor: windows::Win32::Graphics::Gdi:
         let n = GetClassNameW(fg, &mut class) as usize;
         let class = String::from_utf16_lossy(&class[..n]);
         if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+            return None;
+        }
+        // A maximized window with a title bar covers the screen only when the
+        // taskbar hides itself; that is ordinary work, not a fullscreen app.
+        let style = GetWindowLongW(fg, GWL_STYLE) as u32;
+        if IsZoomed(fg).as_bool() && style & WS_CAPTION.0 == WS_CAPTION.0 {
             return None;
         }
         let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONULL);

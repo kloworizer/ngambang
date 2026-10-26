@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 
-use ngambang_core::config::{set_toml_value, Config, ModuleId, DEFAULT_TOML};
+use ngambang_core::config::{set_toml_value, Config, ModuleId, Style, DEFAULT_TOML};
 use ngambang_core::geometry::{Edge, Rect};
 use ngambang_core::hotkey::Hotkey;
 use ngambang_core::layout;
@@ -56,6 +56,10 @@ const TRIM_AFTER_MS: u32 = 30_000;
 /// games often resize after they take focus, which raises no event.
 const TIMER_FULLSCREEN: usize = 303;
 const FULLSCREEN_POLL_MS: u32 = 1500;
+/// Compares the model's clock with Windows' now and then: a time sync, a zone
+/// change or a sleep that sent no message would otherwise shift reminders.
+const TIMER_CLOCK: usize = 304;
+const CLOCK_CHECK_MS: u32 = 60_000;
 /// A fullscreen app that did not look like a game is measured again this often
 /// (games often load with a quiet GPU).
 const REPROBE_MS: u64 = 10_000;
@@ -165,7 +169,14 @@ struct App {
     bx: Rect,
     work: Rect,
     scale: f32,
+    /// The display the island is on now.
     monitor: HMONITOR,
+    /// The display it docks to (config); a fullscreen app there may move it.
+    home: HMONITOR,
+    /// Moved to this display while a fullscreen app covers the home one.
+    displaced: Option<HMONITOR>,
+    /// A fullscreen app (not an overlay) covers the home display.
+    covered: bool,
     tracking: bool,
     press: Option<Press>,
     slider: Option<(SliderTarget, Rect)>,
@@ -344,6 +355,10 @@ fn pick_monitor(name: &str) -> HMONITOR {
     if name.eq_ignore_ascii_case("primary") || name.is_empty() {
         return primary;
     }
+    all_monitors().into_iter().find(|m| monitor_name(*m).is_some_and(|n| n.eq_ignore_ascii_case(name))).unwrap_or(primary)
+}
+
+fn all_monitors() -> Vec<HMONITOR> {
     unsafe extern "system" fn collect(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> windows::core::BOOL {
         let v = &mut *(data.0 as *mut Vec<HMONITOR>);
         v.push(m);
@@ -353,7 +368,14 @@ fn pick_monitor(name: &str) -> HMONITOR {
     unsafe {
         let _ = EnumDisplayMonitors(None, None, Some(collect), LPARAM(&mut all as *mut _ as isize));
     }
-    all.into_iter().find(|m| monitor_name(*m).is_some_and(|n| n.eq_ignore_ascii_case(name))).unwrap_or(primary)
+    all
+}
+
+/// Another display to wait on while `home` shows a fullscreen app: the
+/// primary one, or else the first other.
+fn other_monitor(home: HMONITOR) -> Option<HMONITOR> {
+    let others: Vec<HMONITOR> = all_monitors().into_iter().filter(|m| *m != home).collect();
+    others.iter().copied().find(|m| is_primary(*m)).or_else(|| others.first().copied())
 }
 
 /// (scale, work area in DIPs) of a monitor.
@@ -400,6 +422,9 @@ impl App {
             work: Rect::default(),
             scale: 1.0,
             monitor: HMONITOR::default(),
+            home: HMONITOR::default(),
+            displaced: None,
+            covered: false,
             tracking: false,
             press: None,
             slider: None,
@@ -502,6 +527,20 @@ impl App {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             SetTimer(Some(self.hwnd), TIMER_TRIM, TRIM_AFTER_MS, None);
             SetTimer(Some(self.hwnd), TIMER_FULLSCREEN, FULLSCREEN_POLL_MS, None);
+            SetTimer(Some(self.hwnd), TIMER_CLOCK, CLOCK_CHECK_MS, None);
+        }
+    }
+
+    /// Re-sync the model's clock when it has drifted from Windows' clock.
+    fn check_clock(&mut self) {
+        let ev = clock_event();
+        let Event::Clock { year, month, day, utc_offset_min, unix, .. } = &ev else { return };
+        let synced = self.model.clock.is_some_and(|c| {
+            (c.year, c.month, c.day, c.utc_offset_min) == (*year, *month, *day, *utc_offset_min)
+                && self.model.unix_now().is_some_and(|u| (u - unix).abs() <= 20)
+        });
+        if !synced {
+            self.dispatch(ev);
         }
     }
 
@@ -529,9 +568,10 @@ impl App {
 
     fn place_window(&mut self) {
         let dock = &self.model.config.dock;
-        self.monitor = pick_monitor(&dock.monitor);
+        self.home = pick_monitor(&dock.monitor);
+        self.monitor = self.displaced.unwrap_or(self.home);
         let (scale, work) = monitor_metrics(self.monitor);
-        let bx = layout::window_box(dock.edge, dock.offset, work);
+        let bx = layout::window_box(dock.edge(), dock.offset, work);
         // Moving along the same edge keeps the drawn scene; only a new size or scale redraws.
         let resized = scale != self.scale || bx.w != self.bx.w || bx.h != self.bx.h || self.scene.is_none();
         self.scale = scale;
@@ -558,7 +598,8 @@ impl App {
     }
 
     fn render(&mut self) {
-        let edge = self.model.config.dock.edge;
+        let edge = self.model.config.dock.edge();
+        let notch = self.model.config.dock.style == Style::Notch;
         let mut scene = view::build(&self.model, edge, &self.gfx);
         if let Some(i) = self.focus.filter(|_| self.model.keyboard_open) {
             if let Some(h) = scene.hits.get(i) {
@@ -571,6 +612,8 @@ impl App {
         let reduce = self.reduce_motion || self.model.config.motion.reduce;
         // Hover and press feedback on the orb.
         let feedback = match scene.kind {
+            // The notch hangs from the edge: growing would lift it off.
+            SceneKind::Orb if notch => 1.0,
             SceneKind::Orb if self.press.is_some() && !self.dragging => 0.92,
             SceneKind::Orb if self.model.hover && !self.dragging => 1.1,
             _ => 1.0,
@@ -675,7 +718,7 @@ impl App {
                 SceneKind::Seam => {
                     // A few extra pixels so the edge is easy to hit.
                     let pad = 6.0;
-                    let r = match self.model.config.dock.edge {
+                    let r = match self.model.config.dock.edge() {
                         Edge::Left => Rect::new(local.x, local.y, local.w + pad, local.h),
                         Edge::Right => Rect::new(local.x - pad, local.y, local.w + pad, local.h),
                         Edge::Top => Rect::new(local.x, local.y, local.w, local.h + pad),
@@ -720,6 +763,9 @@ impl App {
         let cfg = self.applied.clone();
         if first || old.dock != cfg.dock {
             self.place_window();
+            if !first {
+                self.update_displaced();
+            }
         }
         if first || old.dock.hotkey != cfg.dock.hotkey {
             unsafe {
@@ -804,6 +850,9 @@ impl App {
             calendars: if on(ModuleId::Calendar) { c.calendar.feeds.iter().map(|f| f.url.clone()).collect() } else { Vec::new() },
             calendar_days: c.calendar.days,
             symbols: if on(ModuleId::Finance) { c.finance.watchlist.iter().map(|w| w.symbol.clone()).collect() } else { Vec::new() },
+            names: c.finance.watchlist.iter().map(|w| w.name.clone()).collect(),
+            price_alerts: c.finance.price_alerts,
+            news: c.finance.news,
         };
         match &self.workers.net {
             Some(n) => n.configure(net),
@@ -966,8 +1015,25 @@ impl App {
         }
     }
 
+    /// Move to another display while a fullscreen app covers the home one
+    /// (when that is on and there is another display), or back home.
+    fn update_displaced(&mut self) {
+        let want = if self.covered && self.model.config.dock.move_in_fullscreen { other_monitor(self.home) } else { None };
+        if want == self.displaced {
+            return;
+        }
+        let was = self.displaced.is_some();
+        self.displaced = want;
+        self.place_window();
+        if was != want.is_some() {
+            self.dispatch(Event::Displaced(want.is_some()));
+        } else {
+            self.render();
+        }
+    }
+
     fn check_fullscreen(&mut self) {
-        let app = system::fullscreen_app(self.hwnd, self.monitor);
+        let app = system::fullscreen_app(self.hwnd, self.home);
         let path = app.as_ref().map(|(p, _)| p.clone());
         if path == self.last_fullscreen {
             // Same app: a quiet one may still turn out to be a game once it loads.
@@ -983,6 +1049,8 @@ impl App {
         let previous_pid = std::mem::replace(&mut self.last_fullscreen_pid, app.as_ref().map(|(_, pid)| *pid));
         let Some((path, pid)) = app else {
             self.dispatch(Event::Fullscreen { active: false, exe: String::new(), signals: Default::default() });
+            self.covered = false;
+            self.update_displaced();
             // A game that closed ends its session as soon as its process is gone.
             if let (Some(pid), true) = (previous_pid, self.model.game.is_some()) {
                 watch_exit(pid, self.bus.clone());
@@ -991,6 +1059,11 @@ impl App {
         };
         // Decide right away from the path and the exclusive-mode flag ...
         let signals = ngambang_core::games::Signals { exclusive_d3d: system::exclusive_d3d(), gpu_3d_pct: None };
+        // Overlays (Snipping Tool, Start) don't move the island; anything else
+        // moves it away first, so it never sinks or drops its tags meanwhile.
+        let kind = ngambang_core::games::classify(&path, signals, &self.model.config.game);
+        self.covered = kind != ngambang_core::games::FullscreenKind::Ignore;
+        self.update_displaced();
         self.dispatch(Event::Fullscreen { active: true, exe: path.clone(), signals });
         // ... then measure the app's own 3D load; a busy GPU makes it a game.
         self.probe_gpu(path, pid);
@@ -999,7 +1072,7 @@ impl App {
     fn probe_gpu(&mut self, path: String, pid: u32) {
         self.last_probe_ms = now_ms();
         let exclusive = system::exclusive_d3d();
-        let (bus, ours, monitor) = (self.bus.clone(), self.hwnd.0 as isize, self.monitor.0 as isize);
+        let (bus, ours, monitor) = (self.bus.clone(), self.hwnd.0 as isize, self.home.0 as isize);
         let _ = std::thread::Builder::new().name("ngambang-gpu-probe".into()).spawn(move || {
             let gpu = system::process_gpu_3d(pid);
             let still = system::fullscreen_app(HWND(ours as *mut _), HMONITOR(monitor as *mut _)).is_some_and(|(p, _)| p == path);
@@ -1053,21 +1126,34 @@ impl App {
     }
 
     /// Where the cursor would dock the island: edge, offset and monitor name.
-    fn dock_at_cursor() -> (Edge, f32, String) {
+    /// A notch only slides along the top edge.
+    fn dock_at_cursor(notch: Option<Edge>) -> (Edge, f32, String) {
         let mut pt = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut pt);
         }
         let mon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
         let (scale, work) = monitor_metrics(mon);
-        let (edge, offset) = layout::nearest_edge(work, pt.x as f32 / scale, pt.y as f32 / scale);
+        let (mut edge, mut offset) = layout::nearest_edge(work, pt.x as f32 / scale, pt.y as f32 / scale);
+        if let Some(keep) = notch {
+            edge = keep;
+            offset = (((pt.x as f32 / scale - work.x) / work.w.max(1.0)).clamp(0.0, 1.0) * 1000.0).round() / 1000.0;
+        }
         let monitor = if is_primary(mon) { "primary".to_string() } else { monitor_name(mon).unwrap_or_else(|| "primary".into()) };
         (edge, offset, monitor)
     }
 
     /// Follow the cursor while dragging: the island moves along the nearest edge as you go.
     fn drag_to_cursor(&mut self) {
-        let (edge, offset, monitor) = Self::dock_at_cursor();
+        let notch = (self.model.config.dock.style == Style::Notch).then_some(self.model.config.dock.edge);
+        let (edge, offset, monitor) = Self::dock_at_cursor(notch);
+        // Dropped somewhere new: that is home now, fullscreen app or not.
+        if self.displaced.take().is_some() {
+            self.covered = false;
+            self.last_fullscreen = None;
+            self.dispatch(Event::Fullscreen { active: false, exe: String::new(), signals: Default::default() });
+            self.dispatch(Event::Displaced(false));
+        }
         let d = &self.model.config.dock;
         if d.edge == edge && d.offset == offset && d.monitor == monitor {
             return;
@@ -1155,9 +1241,19 @@ impl App {
             }
             c if (tray::CMD_EDGE..tray::CMD_EDGE + 4).contains(&c) => {
                 let edge = Edge::ALL[(c - tray::CMD_EDGE) as usize];
-                edit_config(&[("dock", "edge", format!("\"{}\"", edge.name()))]);
+                edit_config(&[("dock", "edge", format!("\"{}\"", edge.name())), ("dock", "style", "\"orb\"".into())]);
                 let mut cfg = self.model.config.clone();
                 cfg.dock.edge = edge;
+                cfg.dock.style = Style::Orb;
+                self.dispatch(Event::Config(cfg));
+            }
+            tray::CMD_NOTCH => {
+                // A notch starts in the middle of the top edge.
+                edit_config(&[("dock", "style", "\"notch\"".into()), ("dock", "offset", "0.5".into())]);
+                let mut cfg = self.model.config.clone();
+                cfg.dock.style = Style::Notch;
+                cfg.dock.offset = 0.5;
+                self.scene = None;
                 self.dispatch(Event::Config(cfg));
             }
             tray::CMD_SETTINGS => super::settings::open(self.hwnd, &self.model.config, 0),
@@ -1231,6 +1327,8 @@ impl App {
                     let _ = self.renderer.drop_outgoing();
                 } else if id == TIMER_FULLSCREEN {
                     self.check_fullscreen();
+                } else if id == TIMER_CLOCK {
+                    self.check_clock();
                 } else if id == TIMER_TRIM {
                     unsafe {
                         let _ = KillTimer(Some(self.hwnd), id);
@@ -1509,6 +1607,15 @@ impl App {
                 zero
             }
             WM_DISPLAYCHANGE | WM_DPICHANGED => {
+                if msg == WM_DISPLAYCHANGE && self.displaced.is_some() {
+                    // Displays came or went: wait on one that still exists.
+                    self.displaced = None;
+                    self.place_window();
+                    self.update_displaced();
+                    if self.displaced.is_none() {
+                        self.dispatch(Event::Displaced(false));
+                    }
+                }
                 self.place_window();
                 self.render();
                 if msg == WM_DPICHANGED {

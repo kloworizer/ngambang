@@ -50,7 +50,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "ngambang"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "lexopt",
  "ngambang-core",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "ngambang-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "ngambang-platform"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "ngambang-core",
  "serde",

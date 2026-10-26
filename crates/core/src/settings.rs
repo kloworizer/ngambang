@@ -14,6 +14,8 @@ pub struct Form {
     pub monitor: String,
     pub hotkey: String,
     pub hide_in_fullscreen: bool,
+    pub move_in_fullscreen: bool,
+    pub style: crate::config::Style,
     pub reduce_motion: bool,
     pub hide_from_capture: bool,
     pub modules: Modules,
@@ -42,6 +44,10 @@ pub struct Form {
     pub calendar_reminder: String,
     pub calendar_days: String,
     pub watchlist: Vec<WatchItem>,
+    pub price_alerts: bool,
+    /// Percent, 0.5–50.
+    pub move_pct: String,
+    pub news: bool,
 }
 
 /// Colours offered for calendars, with names for the list.
@@ -91,6 +97,8 @@ impl Form {
             monitor: c.dock.monitor.clone(),
             hotkey: c.dock.hotkey.clone(),
             hide_in_fullscreen: c.dock.hide_in_fullscreen,
+            move_in_fullscreen: c.dock.move_in_fullscreen,
+            style: c.dock.style,
             reduce_motion: c.motion.reduce,
             hide_from_capture: c.privacy.hide_from_capture,
             modules: c.modules.clone(),
@@ -117,6 +125,9 @@ impl Form {
             calendar_reminder: c.calendar.reminder_min.to_string(),
             calendar_days: c.calendar.days.to_string(),
             watchlist: c.finance.watchlist.clone(),
+            price_alerts: c.finance.price_alerts,
+            move_pct: format!("{}", c.finance.move_pct),
+            news: c.finance.news,
         }
     }
 
@@ -168,6 +179,10 @@ impl Form {
                 return Err(format!("Calendar address: \"{}\" must start with https:// or webcal://", f.name));
             }
         }
+        let move_pct: f32 = self.move_pct.trim().replace(',', ".").parse().map_err(|_| "Price move: enter a percent like 3".to_string())?;
+        if !(0.5..=50.0).contains(&move_pct) {
+            return Err("Price move: use a percent from 0.5 to 50".into());
+        }
         let watch: Vec<String> = self
             .watchlist
             .iter()
@@ -185,6 +200,8 @@ impl Form {
             ("dock", "monitor", toml_str(if self.monitor.trim().is_empty() { "primary" } else { self.monitor.trim() })),
             ("dock", "hotkey", toml_str(self.hotkey.trim())),
             ("dock", "hide_in_fullscreen", b(self.hide_in_fullscreen)),
+            ("dock", "move_in_fullscreen", b(self.move_in_fullscreen)),
+            ("dock", "style", toml_str(self.style.name())),
             ("motion", "reduce", b(self.reduce_motion)),
             ("privacy", "hide_from_capture", b(self.hide_from_capture)),
             ("media", "track_tags", b(self.track_tags)),
@@ -210,6 +227,9 @@ impl Form {
             ("calendar", "reminder_min", cal_reminder.to_string()),
             ("calendar", "days", cal_days.to_string()),
             ("finance", "watchlist", format!("[{}]", watch.join(", "))),
+            ("finance", "price_alerts", b(self.price_alerts)),
+            ("finance", "move_pct", format!("{move_pct:?}")),
+            ("finance", "news", b(self.news)),
         ];
         for m in ModuleId::ALL {
             out.push(("modules", m.key(), b(self.modules.get(m))));
@@ -259,6 +279,11 @@ mod tests {
         form.update_check = false;
         form.weather_alerts = false;
         form.quake_radius_km = "500".into();
+        form.style = crate::config::Style::Notch;
+        form.move_in_fullscreen = false;
+        form.price_alerts = false;
+        form.move_pct = "2,5".into();
+        form.news = false;
         let (c, w) = Config::parse(&apply(DEFAULT_TOML, &form.edits().unwrap()));
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(c.dock.edge, Edge::Top);
@@ -277,6 +302,14 @@ mod tests {
         assert!(!c.update.auto_check);
         assert!(!c.weather.alerts);
         assert_eq!(c.weather.quake_radius_km, 500);
+        assert_eq!(c.dock.style, crate::config::Style::Notch);
+        assert_eq!(c.dock.edge(), Edge::Top);
+        assert!(!c.dock.move_in_fullscreen);
+        assert!(!c.finance.price_alerts && !c.finance.news);
+        assert_eq!(c.finance.move_pct, 2.5);
+        let mut bad = Form::from_config(&Config::default(), true);
+        bad.move_pct = "90".into();
+        assert!(bad.edits().unwrap_err().starts_with("Price move"));
     }
 
     #[test]

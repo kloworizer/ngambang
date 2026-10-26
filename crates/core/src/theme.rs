@@ -67,6 +67,9 @@ pub const SLIP_MAX_H: f32 = 330.0;
 pub const TAB_ROW_H: f32 = 40.0;
 /// A now-playing tag is wider: it carries the player controls.
 pub const MEDIA_TAG_MAX_W: f32 = 420.0;
+/// The notch at rest (the notch style), hanging from the top of the screen.
+pub const NOTCH_W: f32 = 184.0;
+pub const NOTCH_H: f32 = 30.0;
 pub const SEAM_T: f32 = 3.0;
 pub const SEAM_L: f32 = 92.0;
 /// The fixed window box around the anchor (SPEC §4.2): every state fits inside.
