@@ -6,6 +6,21 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The glance shows everything worth knowing.** Hovering the orb (or the
+  Seam) no longer shows one thing: it lists what matters now (mic or camera
+  in use, the game, the focus round, a running build, the song with a
+  play/pause button, the next event, the next prayer, a fresh warning, the
+  weather, the next task and the watchlist's biggest move). Docked top or
+  bottom it widens to the left and right; docked left or right it grows up
+  and down. Click an item to open its slip.
+- **Focus, Weather and Sholat without boxes.** The focus clock stands on its
+  own between round − and + buttons; the weather is a large icon and
+  temperature with readings and the next hours as plain columns; prayer
+  times sit along a line that fills up as the day goes, the next one lit.
+- Slips docked left or right can be shorter (from 200 px) so short modules
+  carry less empty space.
+
 ## [0.1.8] - 2026-10-26
 
 ### Added
