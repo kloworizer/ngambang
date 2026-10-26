@@ -478,3 +478,24 @@ pub fn secondary_monitors() -> Vec<String> {
     }
     v
 }
+
+/// Windows 11's focus session (Do not disturb and a quiet taskbar) on or
+/// off. Older Windows has no such API; nothing happens there.
+pub fn focus_session(on: bool) {
+    use windows::UI::Shell::FocusSessionManager;
+    let run = || -> windows::core::Result<()> {
+        if !FocusSessionManager::IsSupported()? {
+            return Ok(());
+        }
+        let m = FocusSessionManager::GetDefault()?;
+        if on {
+            m.TryStartFocusSession()?;
+        } else {
+            m.DeactivateFocus()?;
+        }
+        Ok(())
+    };
+    if let Err(e) = run() {
+        log_info!("focus session: {e}");
+    }
+}

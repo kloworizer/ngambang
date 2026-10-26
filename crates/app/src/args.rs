@@ -17,6 +17,7 @@ USAGE:
         --ttl <ms>         How long the tag stays (1000–60000)
     ngambang done <id> (--ok | --fail) [--code <n>] [--duration <secs>]
     ngambang clear <id>
+    ngambang note <text…>                 Keep a quick note on the island
     ngambang run [--id <id>] -- <command> [args…]
                                           Run a command and report how it ended
     ngambang hook <powershell|bash|zsh>   Print a shell snippet for long commands
@@ -25,7 +26,7 @@ USAGE:
     ngambang doctor                       Show what the island can see (for bug reports)
     ngambang --version | --help
 
-Add --quiet to notify/done/clear to stay silent when the island is not running.";
+Add --quiet to notify/done/clear/note to stay silent when the island is not running.";
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -155,6 +156,21 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
             }
             Ok(Command::Send { req: Request::Clear { id: id.ok_or("clear needs an id")? }, quiet })
         }
+        "note" => {
+            let (mut words, mut quiet) = (Vec::new(), false);
+            while let Some(a) = p.next().map_err(|e| e.to_string())? {
+                match a {
+                    Long("quiet") | Short('q') => quiet = true,
+                    Value(v) => words.push(v.into_string().map_err(|_| "note: not valid text")?),
+                    other => return Err(other.unexpected().to_string()),
+                }
+            }
+            let text = words.join(" ");
+            if text.trim().is_empty() {
+                return Err("note needs some text: ngambang note \"…\"".into());
+            }
+            Ok(Command::Send { req: Request::Note { text }, quiet })
+        }
         "run" => {
             let mut id = None;
             let mut argv = Vec::new();
@@ -206,6 +222,13 @@ pub fn command_line(argv: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn note_joins_its_words() {
+        let c = parse(vec!["note".into(), "call".into(), "Budi".into(), "-q".into()]).unwrap();
+        assert_eq!(c, Command::Send { req: Request::Note { text: "call Budi".into() }, quiet: true });
+        assert!(parse(vec!["note".into()]).is_err());
+    }
+
     use super::*;
 
     fn args(s: &[&str]) -> Vec<String> {

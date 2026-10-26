@@ -141,14 +141,7 @@ fn title(m: &Model, front: ModuleId) -> (String, Option<(String, Color)>) {
             ),
             None => ("Clipboard".into(), None),
         },
-        ModuleId::Timer => {
-            let state = match m.timer {
-                FocusTimer::Idle => "ready",
-                FocusTimer::Running { .. } => "running",
-                FocusTimer::Paused { .. } => "paused",
-            };
-            (format!("Focus · {state}"), None)
-        }
+        ModuleId::Timer => (focus_title(m), focus_rounds(m)),
         ModuleId::Game => {
             let now = m.now_ms;
             let today = format!(
@@ -174,6 +167,9 @@ fn title(m: &Model, front: ModuleId) -> (String, Option<(String, Color)>) {
         ModuleId::Finance => {
             ("Markets".into(), detail(format!("{} symbols · Yahoo Finance, may be delayed", m.config.finance.watchlist.len())))
         }
+        ModuleId::Notes => ("Notes".into(), (!m.notes.is_empty()).then(|| (m.notes.len().to_string(), TEXT_2))),
+        ModuleId::Power => ("Battery & network".into(), None),
+        ModuleId::Launch => ("Quick launch".into(), detail("drop files here to pin".into())),
     }
 }
 
@@ -209,6 +205,9 @@ pub(super) fn strip(m: &Model, front: ModuleId, tm: &dyn TextMeasure) -> Scene {
         ModuleId::Todo => todo(m, &mut b),
         ModuleId::Calendar => calendar(m, &mut b),
         ModuleId::Finance => finance(m, &mut b),
+        ModuleId::Notes => notes(m, &mut b),
+        ModuleId::Power => power(m, &mut b),
+        ModuleId::Launch => launch(m, &mut b),
     };
     let content: Vec<Prim> = std::mem::take(&mut b.prims);
     // As tall as the content, never more than the strip may be.
@@ -217,7 +216,7 @@ pub(super) fn strip(m: &Model, front: ModuleId, tm: &dyn TextMeasure) -> Scene {
     b.prims.extend(surface(Rect::new(0.0, 0.0, w, h), 16.0));
 
     // Tabs: small icons on the right of the header row.
-    let (tab_w, gap) = (26.0, 3.0);
+    let (tab_w, gap) = (24.0, 2.0);
     let n = tabs.len() as f32;
     let tabs_w = n * tab_w + (n - 1.0).max(0.0) * gap;
     let mut tx = w - PAD - tabs_w;
@@ -535,15 +534,28 @@ fn ports(m: &Model, b: &mut B) -> f32 {
 }
 
 fn clip(m: &Model, b: &mut B) -> f32 {
-    let Some(c) = &m.clip else { return empty(b, "Copy a JWT, JSON, UUID, timestamp, colour or link") };
-    let cols = columns(PAD, b.full_w, &[2.0, 1.0]);
+    let cols = columns(PAD, b.full_w, &[1.0, 1.3]);
+    b.at(cols[1]);
+    let history = super::more::clip_history(m, b, TOP);
+    b.at(cols[0]);
+    let Some(c) = &m.clip else {
+        b.text(Rect::new(b.x, TOP, b.w, 36.0), "Copy a JWT, JSON, UUID, timestamp, colour or link", S_SMALL, TEXT_2);
+        return history.max(TOP + 36.0);
+    };
+    detected(b, c, cols[0]).max(history)
+}
+
+/// The detected format in a column: a preview and its actions.
+fn detected(b: &mut B, c: &ClipState, col: (f32, f32)) -> f32 {
+    let cols = [col, col];
     let (x, w) = cols[0];
     let preview = clipboard::preview(&c.text, &c.kind, c.unix_at);
     let per_line = ((w - 20.0) / 6.8).max(8.0) as usize;
-    let max_lines = ((ROOM - 16.0) / 15.0).floor() as usize;
+    // Room for the actions under it.
+    let max_lines = 4;
     let shown: String = format::ellipsize(&preview, 400).lines().take(max_lines).collect::<Vec<_>>().join("\n");
     let lines: usize = shown.lines().map(|l| l.chars().count().div_ceil(per_line).max(1)).sum::<usize>().min(max_lines);
-    let box_h = (lines as f32 * 15.0 + 16.0).clamp(44.0, ROOM);
+    let box_h = (lines as f32 * 15.0 + 16.0).clamp(36.0, ROOM - 34.0);
     b.rect(Rect::new(x, TOP, w, box_h), 8.0, SURFACE_2);
     let mut tx = x + 10.0;
     if let ClipKind::HexColor { r, g, b: bl, a } = c.kind {
@@ -566,100 +578,26 @@ fn clip(m: &Model, b: &mut B) -> f32 {
     });
     b.at(cols[1]);
     let chips = c.kind.actions().iter().map(|a| (a.label().to_string(), CODER, Action::Clip(*a))).collect();
-    b.mini_chips(TOP, chips).max(TOP + box_h)
+    b.mini_chips(TOP + box_h + 8.0, chips)
 }
 
 fn timer(m: &Model, b: &mut B) -> f32 {
-    let now = m.now_ms;
-    let cols = columns(PAD, b.full_w, &[1.0, 1.4]);
-    let (hx, hw) = cols[0];
-    let hero_h = 104.0;
-    let card = Rect::new(hx, TOP, hw, hero_h);
-    b.hero_s(card, GAME);
-    let mid = card.y + hero_h / 2.0;
-    let buttons: Vec<(Icon, String, Btn, Action)> = match m.timer {
-        FocusTimer::Idle => {
-            let custom = m.config.timer.custom_min;
-            b.icon_button(
-                Rect::new(card.x + 10.0, mid - 16.0, 32.0, 32.0),
-                Icon::Minus,
-                TEXT,
-                Some(SURFACE_3),
-                Some(Action::TimerCustom(-1)),
-                "Shorter",
-            );
-            b.icon_button(
-                Rect::new(card.right() - 42.0, mid - 16.0, 32.0, 32.0),
-                Icon::Plus,
-                TEXT,
-                Some(SURFACE_3),
-                Some(Action::TimerCustom(1)),
-                "Longer",
-            );
-            b.prims.push(Prim::Text {
-                rect: Rect::new(card.x + 44.0, mid - 26.0, card.w - 88.0, 40.0),
-                text: format!("{custom}:00"),
-                style: TextStyle { size: 34.0, weight: Weight::Semibold, mono: true },
-                color: TEXT,
-                align: Align::Center,
-                wrap: false,
-            });
-            b.prims.push(Prim::Text {
-                rect: Rect::new(card.x + 44.0, mid + 14.0, card.w - 88.0, 14.0),
-                text: "custom".into(),
-                style: S_TINY,
-                color: LABEL,
-                align: Align::Center,
-                wrap: false,
-            });
-            let mut all: Vec<(Icon, String, Btn, Action)> = m
-                .config
-                .timer
-                .presets_min
-                .iter()
-                .take(3)
-                .map(|p| (Icon::Play, format!("{p} min"), Btn::Primary(GAME), Action::TimerStart(*p)))
-                .collect();
-            all.push((Icon::Play, format!("{custom} min"), Btn::Secondary, Action::TimerStart(custom)));
-            all
-        }
-        _ => {
-            let rem = m.timer.remaining(now).unwrap_or(0);
-            let frac = m.timer.progress(now).unwrap_or(0.0);
-            b.prims.push(Prim::Text {
-                rect: Rect::new(card.x, mid - 30.0, card.w, 46.0),
-                text: format::clock(rem.div_ceil(1000)),
-                style: TextStyle { size: 38.0, weight: Weight::Semibold, mono: true },
-                color: TEXT,
-                align: Align::Center,
-                wrap: false,
-            });
-            b.meter(Rect::new(card.x + 18.0, card.bottom() - 18.0, card.w - 36.0, 5.0), frac, GAME);
-            let main = if m.timer.is_running() {
-                (Icon::Pause, "Pause".to_string(), Btn::Primary(GAME), Action::TimerPause)
-            } else {
-                (Icon::Play, "Resume".to_string(), Btn::Primary(GAME), Action::TimerResume)
-            };
-            vec![
-                main,
-                (Icon::Plus, "5 min".into(), Btn::Secondary, Action::TimerAdd(5)),
-                (Icon::Stop, "Stop".into(), Btn::Secondary, Action::TimerStop),
-            ]
-        }
-    };
-    // The buttons in a 2×2 grid (or a column of three) beside the hero.
+    let cols = columns(PAD, b.full_w, &[1.0, 1.3]);
+    let (fx, fw) = cols[0];
+    // The clock, unboxed, centred in the strip's height.
+    let (end, buttons) = timer_face(m, b, fx, TOP + 14.0, fw);
     let (bx, bw) = cols[1];
     let per_row = 2;
     let rows = buttons.len().div_ceil(per_row);
     let gap = 10.0;
-    let bh = ((hero_h - gap * (rows as f32 - 1.0)) / rows as f32).min(44.0);
+    let bh = 36.0;
+    let top = TOP + 14.0 + (68.0 - (rows as f32 * bh + (rows as f32 - 1.0) * gap)) / 2.0;
     let cw = (bw - gap) / 2.0;
     for (i, (icon, label, kind, action)) in buttons.into_iter().enumerate() {
         let (r, c) = (i / per_row, i % per_row);
-        let r = Rect::new(bx + c as f32 * (cw + gap), TOP + r as f32 * (bh + gap), cw, bh);
-        b.pill(r, Some(icon), &label, kind, action);
+        b.pill(Rect::new(bx + c as f32 * (cw + gap), top + r as f32 * (bh + gap), cw, bh), Some(icon), &label, kind, action);
     }
-    TOP + hero_h
+    end
 }
 
 fn game(m: &Model, b: &mut B) -> f32 {
@@ -729,7 +667,7 @@ fn game(m: &Model, b: &mut B) -> f32 {
         let r = Rect::new(rx, y, rw, 30.0);
         b.rect(r, 8.0, SURFACE_2);
         let what = if c.kind == CaptureKind::Clip { "Clip saved" } else { "Screenshot" };
-        b.icon(if c.kind == CaptureKind::Clip { Icon::Play } else { Icon::Image }, Rect::new(r.x + 8.0, r.y + 8.0, 14.0, 14.0), PORTS);
+        b.icon(capture_icon(c.kind), Rect::new(r.x + 8.0, r.y + 8.0, 14.0, 14.0), PORTS);
         b.line(Rect::new(r.x + 28.0, r.y, r.w - 60.0, 30.0), what, S_SMALL, TEXT);
         b.mini_icon(Rect::new(r.right() - 28.0, r.y + 3.0, 24.0, 24.0), Icon::Copy, TEXT, Some(Action::CaptureCopy(0)), "Copy capture");
     }
@@ -738,10 +676,21 @@ fn game(m: &Model, b: &mut B) -> f32 {
 
 fn captures(m: &Model, b: &mut B) -> f32 {
     let now = m.now_ms;
-    if m.captures.is_empty() {
-        return empty(b, "New screenshots and clips show up here");
+    if m.captures.is_empty() && m.downloads.is_empty() {
+        return empty(b, "New screenshots, clips and downloads show up here");
     }
-    let cols = columns(PAD, b.full_w, &[1.0, 1.0]);
+    let all = columns(PAD, b.full_w, &[1.0, 1.0]);
+    // Downloads in progress take the first column.
+    let cols: Vec<(f32, f32)> = if m.downloads.is_empty() {
+        all.clone()
+    } else {
+        b.at(all[0]);
+        super::more::downloads(m, b, TOP);
+        vec![all[1]]
+    };
+    if m.captures.is_empty() {
+        return TOP + 34.0 * m.downloads.len() as f32;
+    }
     let row_h = 38.0;
     let rows = fit_rows(row_h, 0.0);
     let mut bottom = TOP;
@@ -750,11 +699,7 @@ fn captures(m: &Model, b: &mut B) -> f32 {
         bottom = bottom.max(y + row_h);
         let tile = Rect::new(x, y + 2.0, 44.0, 30.0);
         b.rect(tile, 6.0, SURFACE_2);
-        b.icon(
-            if c.kind == CaptureKind::Clip { Icon::Play } else { Icon::Image },
-            Rect::new(tile.x + 15.0, tile.y + 8.0, 14.0, 14.0),
-            TEXT,
-        );
+        b.icon(capture_icon(c.kind), Rect::new(tile.x + 15.0, tile.y + 8.0, 14.0, 14.0), TEXT);
         b.hits.push(Hit { rect: tile, kind: HitKind::Click(Action::CaptureOpen(i)), label: format!("Open {}", c.name) });
         let tw = w - 52.0 - 60.0;
         b.line(Rect::new(x + 52.0, y + 1.0, tw, 18.0), c.name.clone(), S_BODY, TEXT);
@@ -806,156 +751,34 @@ fn privacy(m: &Model, b: &mut B) -> f32 {
 }
 
 fn prayer(m: &Model, b: &mut B) -> f32 {
-    use crate::prayer::{hhmm, Prayer};
     let (Some(day), Some(now)) = (m.prayer_day, m.local_minute()) else { return empty(b, "Waiting for the clock…") };
-    let cols = columns(PAD, b.full_w, &[1.0, 2.0]);
-    let hero_h = 108.0;
+    let cols = columns(PAD, b.full_w, &[1.0, 2.2]);
     let (hx, hw) = cols[0];
-    let card = Rect::new(hx, TOP, hw, hero_h);
-    b.hero_s(card, OK);
-    let next = day.next(now);
-    match next {
-        Some((p, t)) => {
-            let left = ((t - now) * 60.0).max(0.0) as u64;
-            b.line(Rect::new(card.x + 14.0, card.y + 10.0, card.w - 28.0, 14.0), "NEXT", S_TINY, LABEL);
-            b.line(
-                Rect::new(card.x + 14.0, card.y + 24.0, card.w - 28.0, 36.0),
-                p.name(),
-                TextStyle { size: 26.0, weight: Weight::Semibold, mono: false },
-                TEXT,
-            );
-            b.line(
-                Rect::new(card.x + 14.0, card.y + 62.0, card.w - 28.0, 24.0),
-                hhmm(t),
-                TextStyle { size: 18.0, weight: Weight::Semibold, mono: true },
-                OK,
-            );
-            b.line(Rect::new(card.x + 14.0, card.y + 86.0, card.w - 28.0, 14.0), format!("in {}", format::clock(left)), S_TINY, TEXT_2);
-        }
-        None => b.line(Rect::new(card.x + 14.0, card.y + 36.0, card.w - 28.0, 30.0), "Until Subuh", S_TITLE, TEXT),
-    }
-    let next_p = next.map(|(p, _)| p);
-    let (gx, gw) = cols[1];
-    let gap = 8.0;
-    let cell_h = (hero_h - gap) / 2.0;
-    for (row, items) in [&Prayer::ALL[..4], &Prayer::ALL[4..]].into_iter().enumerate() {
-        let n = 4.0;
-        let w = (gw - gap * (n - 1.0)) / n;
-        for (i, p) in items.iter().enumerate() {
-            let r = Rect::new(gx + i as f32 * (w + gap), TOP + row as f32 * (cell_h + gap), w, cell_h);
-            let active = Some(*p) == next_p;
-            if active {
-                b.prims.extend(soft::raised_grad(r, 10.0, accent_light(OK), accent_deep(OK), 2.0));
-            } else {
-                b.rect(r, 10.0, SURFACE_2);
-            }
-            let (k, v) = if active { (SURFACE, SURFACE) } else { (LABEL, TEXT) };
-            b.line(
-                Rect::new(r.x + 10.0, r.y + 6.0, r.w - 12.0, 14.0),
-                p.name(),
-                TextStyle { size: 10.0, weight: Weight::Medium, mono: false },
-                k,
-            );
-            let t = day.get(*p).map(hhmm).unwrap_or_else(|| "—".into());
-            b.line(
-                Rect::new(r.x + 10.0, r.y + 22.0, r.w - 12.0, 22.0),
-                t,
-                TextStyle { size: 14.0, weight: Weight::Semibold, mono: true },
-                v,
-            );
-        }
-    }
-    TOP + hero_h
+    let end = prayer_headline(b, m, day, now, hx, TOP + 4.0, hw);
+    let (tx, tw) = cols[1];
+    let end = prayer_timeline(b, day, now, tx, TOP + 22.0, tw).max(end);
+    prayer_footer(b, m, tx, end + 14.0, tw)
 }
 
 fn weather(m: &Model, b: &mut B) -> f32 {
-    let unix = m.unix_now();
     let offline = m.online == Some(false);
     let cols = columns(PAD, b.full_w, &[1.05, 1.15, 1.0]);
-    let hero_h = 108.0;
     let (hx, hw) = cols[0];
     let mut bottom = TOP + 22.0;
     match &m.weather {
         Some(w) => {
-            let card = Rect::new(hx, TOP, hw, hero_h);
-            b.hero_s(card, PORTS);
-            b.icon_tile(Rect::new(card.x + 12.0, card.y + 14.0, 40.0, 40.0), condition_icon(w.condition), PORTS);
-            b.line(
-                Rect::new(card.x + 62.0, card.y + 8.0, card.w - 70.0, 44.0),
-                format!("{:.0}°", w.temp_c),
-                TextStyle { size: 34.0, weight: Weight::Semibold, mono: false },
-                TEXT,
-            );
-            b.line(Rect::new(card.x + 14.0, card.y + 60.0, card.w - 28.0, 18.0), w.description.clone(), S_BODY_M, TEXT_2);
-            let mut extra = Vec::new();
-            if let (Some(lo), Some(hi)) = (w.min_c, w.max_c) {
-                extra.push(format!("↓{lo:.0}° ↑{hi:.0}°"));
-            }
-            if let Some(r) = w.rain_chance {
-                extra.push(format!("rain {r}%"));
-            }
-            b.line(Rect::new(card.x + 14.0, card.y + 82.0, card.w - 28.0, 16.0), extra.join(" · "), S_TINY, TEXT_2);
-            b.mini_icon(
-                Rect::new(card.right() - 32.0, card.y + 8.0, 24.0, 24.0),
-                Icon::Refresh,
-                TEXT_2,
-                Some(Action::RefreshWeather),
-                "Refresh weather",
-            );
-            // Middle: readings, then the next hours.
+            bottom = weather_now(b, w, hx, TOP + 8.0, hw);
             let (mx, mw) = cols[1];
-            let stats: Vec<(Icon, String)> = [
-                w.feels_c.map(|f| (Icon::Thermo, format!("{f:.0}°"))),
-                w.humidity.map(|h| (Icon::Drop, format!("{h}%"))),
-                w.wind_kmh.map(|k| (Icon::Wind, format!("{k:.0} km/h"))),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
-            let mut y = TOP;
-            if !stats.is_empty() {
-                let n = stats.len() as f32;
-                let gap = 6.0;
-                let sw = (mw - gap * (n - 1.0)) / n;
-                for (i, (icon, v)) in stats.into_iter().enumerate() {
-                    let r = Rect::new(mx + i as f32 * (sw + gap), y, sw, 26.0);
-                    b.prims.extend(soft::well(r, 9.0));
-                    b.icon(icon, Rect::new(r.x + 7.0, r.y + 7.0, 12.0, 12.0), PORTS);
-                    b.line(Rect::new(r.x + 22.0, r.y, r.w - 24.0, 26.0), v, S_SMALL, TEXT);
-                }
-                y += 34.0;
-            }
-            let n = w.next.len().min(4);
-            if n > 0 {
-                let gap = 6.0;
-                let tw = (mw - gap * (n as f32 - 1.0)) / n as f32;
-                let th = TOP + hero_h - y;
-                for (i, slot) in w.next.iter().take(n).enumerate() {
-                    let r = Rect::new(mx + i as f32 * (tw + gap), y, tw, th);
-                    b.prims.extend(soft::raised_grad(r, 10.0, SURFACE_TOP, SURFACE, 2.0));
-                    let center = |t: String, yy: f32, h: f32, style: TextStyle, c: Color| Prim::Text {
-                        rect: Rect::new(r.x, yy, r.w, h),
-                        text: t,
-                        style,
-                        color: c,
-                        align: Align::Center,
-                        wrap: false,
-                    };
-                    b.prims.push(center(slot.time.clone(), r.y + 5.0, 14.0, S_TINY, LABEL));
-                    b.icon(condition_icon(slot.condition), Rect::new(r.x + r.w / 2.0 - 8.0, r.y + 22.0, 16.0, 16.0), PORTS);
-                    b.prims.push(center(format!("{:.0}°", slot.temp_c), r.y + 42.0, 18.0, S_BODY_M, TEXT));
-                }
-            }
-            bottom = TOP + hero_h;
+            let y = weather_hours(b, w, mx, TOP, mw, 66.0) + 14.0;
+            bottom = bottom.max(weather_readings(b, w, mx, y, mw));
         }
         None => {
             let msg = if offline { "No connection. Weather loads once you're online." } else { "Loading weather…" };
-            b.at(cols[0]);
             b.text(Rect::new(hx, TOP, hw + cols[1].1, 22.0), msg, S_BODY, TEXT_2);
-            b.mini_icon(Rect::new(hx, TOP + 30.0, 26.0, 26.0), Icon::Refresh, TEXT_2, Some(Action::RefreshWeather), "Refresh weather");
-            bottom = bottom.max(TOP + 56.0);
         }
     }
+    b.mini_icon(Rect::new(hx + hw - 24.0, TOP + 80.0, 24.0, 24.0), Icon::Refresh, TEXT_2, Some(Action::RefreshWeather), "Refresh weather");
+    bottom = bottom.max(TOP + 104.0);
     // Right: early warnings.
     let (ax, aw) = cols[2];
     let alerts = m.relevant_alerts(2);
@@ -969,36 +792,13 @@ fn weather(m: &Model, b: &mut B) -> f32 {
         b.line(Rect::new(ax, y, aw, 18.0), msg, S_SMALL, TEXT_2);
         y += 24.0;
     }
-    let l = &m.config.location;
     for a in alerts {
-        let r = Rect::new(ax, y, aw, 36.0);
-        b.prims.extend(soft::well(r, 9.0));
-        b.prims.push(Prim::RoundRect {
-            rect: Rect::new(r.x + 6.0, r.y + 8.0, 3.0, r.h - 16.0),
-            radius: 1.5,
-            fill: Some(level_color(a.level)),
-            stroke: None,
-        });
-        let km = crate::weather::distance_km(a.lat, a.lon, l.latitude, l.longitude);
-        let ago = unix.map(|u| format::relative(a.time - u)).unwrap_or_default();
-        let title = if a.tsunami { format!("Tsunami · {}", a.title) } else { a.title.clone() };
-        b.line(Rect::new(r.x + 16.0, r.y + 2.0, r.w - 20.0, 18.0), title, S_SMALL, TEXT);
-        b.line(Rect::new(r.x + 16.0, r.y + 19.0, r.w - 20.0, 14.0), format!("{km:.0} km · {ago}"), S_TINY, LABEL);
-        b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(a.url.clone())), label: format!("Open report: {}", a.title) });
-        y += 42.0;
+        y = weather_alert(b, m, &a, Rect::new(ax, y, aw, 34.0)) + 6.0;
     }
-    // Where it comes from, at the bottom of the right column.
-    let age = m.weather.as_ref().and_then(|w| unix.map(|u| u - w.fetched));
-    let fresh = match age {
-        _ if offline => "offline".to_string(),
-        Some(a) if a < 90 => "just now".to_string(),
-        Some(a) => format::relative(-a),
-        None => String::new(),
-    };
-    let sy = (TOP + hero_h - 12.0).max(y);
+    let sy = (TOP + 92.0).max(y);
     b.line(
         Rect::new(ax, sy, aw, 12.0),
-        format!("Open-Meteo · GDACS · USGS {fresh}"),
+        weather_source(m),
         TextStyle { size: 8.5, weight: Weight::Regular, mono: true },
         if offline { MEDIA } else { LABEL },
     );
@@ -1038,7 +838,7 @@ fn todo(m: &Model, b: &mut B) -> f32 {
     let rows = fit_rows(row_h, 0.0);
     let mut bottom = TOP;
     // Typing: the field in the first column, the list in the second.
-    if let Some(input) = &m.todo_input {
+    if let Some(input) = m.typing(InputFor::Todo) {
         let (x, w) = cols[0];
         let field = Rect::new(x, TOP, w, 34.0);
         b.prims.extend(soft::well(field, 10.0));
@@ -1047,7 +847,7 @@ fn todo(m: &Model, b: &mut B) -> f32 {
             b.line(Rect::new(tx, TOP, tw, 34.0), "What needs doing?", S_BODY, LABEL);
             b.rect(Rect::new(tx, TOP + 9.0, 2.0, 16.0), 1.0, OK);
         } else {
-            let mut shown = input.clone();
+            let mut shown = input.to_string();
             while b.tm.width(&shown, S_BODY) > tw - 6.0 && !shown.is_empty() {
                 shown.remove(0);
             }
@@ -1226,8 +1026,17 @@ fn calendar(m: &Model, b: &mut B) -> f32 {
         let pw = b.tm.width(&place, S_TINY).ceil().min(ew * 0.3);
         b.line(Rect::new(r.x + 100.0, r.y, r.w - 110.0 - pw - 8.0, r.h), e.title.clone(), S_BODY_M, TEXT);
         b.text_end(Rect::new(r.right() - 8.0 - pw, r.y, pw, r.h), place, S_TINY, LABEL);
-        if e.location.starts_with("https://") {
-            b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(e.location.clone())), label: format!("Join {}", e.title) });
+        if !e.link.is_empty() {
+            // The meeting link: the whole row joins it.
+            b.prims.push(Prim::Text {
+                rect: Rect::new(r.right() - 64.0, r.bottom() - 18.0, 56.0, 14.0),
+                text: "Join ›".into(),
+                style: TextStyle { size: 10.5, weight: Weight::Semibold, mono: false },
+                color: CODER,
+                align: Align::End,
+                wrap: false,
+            });
+            b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(e.link.clone())), label: format!("Join {}", e.title) });
         }
         y += row_h + 2.0;
     }
@@ -1338,4 +1147,73 @@ pub(super) fn ago(secs: i64) -> String {
         m if m < 48 * 60 => format!("{}h ago", m / 60),
         m => format!("{}d ago", m / 1440),
     }
+}
+
+fn notes(m: &Model, b: &mut B) -> f32 {
+    let cols = columns(PAD, b.full_w, &[1.0, 2.2]);
+    let (x, w) = cols[0];
+    let end = match m.typing(InputFor::Note) {
+        Some(text) => {
+            super::more::field(b, Rect::new(x, TOP, w, 32.0), text, "Write a note…", OK);
+            let bw = (w - 8.0) / 2.0;
+            b.pill(Rect::new(x, TOP + 40.0, bw, 30.0), Some(Icon::Check), "Save", Btn::Primary(OK), Action::TodoSubmit);
+            b.pill(Rect::new(x + bw + 8.0, TOP + 40.0, bw, 30.0), Some(Icon::Cross), "Cancel", Btn::Secondary, Action::TodoCancel);
+            b.line(Rect::new(x, TOP + 78.0, w, 14.0), "Enter saves · Esc cancels", S_TINY, LABEL);
+            TOP + 92.0
+        }
+        None => {
+            b.line(
+                Rect::new(x, TOP - 4.0, w, 34.0),
+                m.notes.len().to_string(),
+                TextStyle { size: 26.0, weight: Weight::Semibold, mono: false },
+                OK,
+            );
+            b.line(Rect::new(x, TOP + 28.0, w, 14.0), "NOTES", S_TINY, LABEL);
+            b.pill(Rect::new(x, TOP + 48.0, w, 30.0), Some(Icon::Plus), "New note", Btn::Primary(OK), Action::NoteAdd);
+            TOP + 78.0
+        }
+    };
+    b.at(cols[1]);
+    if m.notes.is_empty() {
+        b.line(Rect::new(b.x, TOP, b.w, 20.0), "No notes yet. ngambang note \"…\" adds one from a terminal.", S_SMALL, TEXT_2);
+        return end.max(TOP + 20.0);
+    }
+    // Typing: the list stays beside the field (the shared list skips its own field).
+    let typing = m.typing(InputFor::Note).is_some();
+    let y = if typing { notes_list(m, b) } else { super::more::notes(m, b, TOP, false) };
+    y.max(end)
+}
+
+/// The notes alone (while the field in the first column is open).
+fn notes_list(m: &Model, b: &mut B) -> f32 {
+    let mut y = TOP;
+    for n in m.notes.iter().take(fit_rows(38.0, 0.0)) {
+        b.rect(Rect::new(b.x, y + 5.0, 3.0, 24.0), 1.5, OK);
+        b.line(Rect::new(b.x + 12.0, y, b.w - 12.0, 34.0), n.text.clone(), S_BODY, TEXT);
+        y += 38.0;
+    }
+    y
+}
+
+fn power(m: &Model, b: &mut B) -> f32 {
+    let cols = columns(PAD, b.full_w, &[1.0, 1.2]);
+    b.at(cols[0]);
+    let a = super::more::power_now(m, b, TOP);
+    b.at(cols[1]);
+    let c = super::more::power_plans(m, b, TOP, 28.0);
+    if m.power_plans.is_empty() {
+        b.line(Rect::new(b.x, TOP, b.w, 18.0), "Power plans load in a moment…", S_SMALL, TEXT_2);
+    }
+    a.max(c)
+}
+
+fn launch(m: &Model, b: &mut B) -> f32 {
+    let items = !m.config.launch.items.is_empty();
+    if items {
+        let label = if m.launch_edit { "Done" } else { "Edit" };
+        let icon = if m.launch_edit { Icon::Check } else { Icon::Pencil };
+        b.pill(Rect::new(PAD + b.full_w - 72.0, TOP, 72.0, 26.0), Some(icon), label, Btn::Secondary, Action::LaunchEdit);
+    }
+    b.at((PAD, if items { b.full_w - 84.0 } else { b.full_w }));
+    super::more::launch(m, b, TOP, 58.0, 7)
 }

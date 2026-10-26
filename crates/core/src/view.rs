@@ -11,6 +11,8 @@ use crate::model::*;
 use crate::soft;
 use crate::theme::*;
 
+mod glance;
+mod more;
 mod strip;
 pub use strip::STRIP_MAX_H;
 
@@ -249,7 +251,13 @@ pub fn summary(m: &Model) -> Option<Summary> {
         return Some(Summary {
             icon: Icon::Clock,
             color: GAME,
-            text: if paused { "Focus paused".into() } else { "Focus".into() },
+            text: if m.on_break {
+                "Break".into()
+            } else if paused {
+                "Focus paused".into()
+            } else {
+                "Focus".into()
+            },
             detail: Some(format::clock(rem / 1000)),
             wave: false,
         });
@@ -318,8 +326,9 @@ pub fn ring(m: &Model) -> Option<(Color, f32, f32)> {
     if !m.privacy.is_empty() {
         return Some((PRIVACY, 1.0, 0.0));
     }
+    let focus = if m.on_break { OK } else { GAME };
     match m.timer {
-        FocusTimer::Running { total_ms, .. } => return Some((GAME, m.timer.progress(now)?, 1.0 / total_ms.max(1) as f32)),
+        FocusTimer::Running { total_ms, .. } => return Some((focus, m.timer.progress(now)?, 1.0 / total_ms.max(1) as f32)),
         FocusTimer::Paused { .. } => return Some((GAME, m.timer.progress(now)?, 0.0)),
         FocusTimer::Idle => {}
     }
@@ -490,6 +499,11 @@ fn notch_line(m: &Model) -> Option<NotchLine> {
         }
         Glance::Prayer => {
             let (day, now) = (m.prayer_day?, m.local_minute()?);
+            if let Some((what, t)) = m.fasting() {
+                let left = (t - now).max(0.0).round() as i64;
+                let detail = if left < 60 { format!("in {left}m") } else { format!("in {}h{:02}", left / 60, left % 60) };
+                return Some((Icon::Moon, OK, format!("{what} {}", crate::prayer::hhmm(t.rem_euclid(1440.0))), Some((detail, OK)), false));
+            }
             let (p, t) = day.next(now)?;
             let left = (t - now).max(0.0).round() as i64;
             let detail = if left < 60 { format!("in {left}m") } else { format!("in {}h{:02}", left / 60, left % 60) };
@@ -744,6 +758,13 @@ fn media_tag(m: &Model, s: &MediaSession, edge: Edge, tm: &dyn TextMeasure) -> S
 }
 
 fn tag(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
+    // Hovered: everything worth knowing now, when there is more than one thing.
+    if m.hover_tag {
+        let items = glance::items(m);
+        if items.len() > 1 {
+            return glance::glance(m, edge, tm, items);
+        }
+    }
     let media_shown = match (m.hover_tag, m.current_tag()) {
         (false, Some(t)) => t.media,
         _ => summary(m).is_some_and(|s| s.icon == Icon::Note),
@@ -1110,6 +1131,9 @@ fn module_icon(m: ModuleId) -> (Icon, Color) {
         ModuleId::Todo => (Icon::Todo, OK),
         ModuleId::Calendar => (Icon::Calendar, CODER),
         ModuleId::Finance => (Icon::Chart, GAME),
+        ModuleId::Notes => (Icon::Pencil, OK),
+        ModuleId::Power => (Icon::Battery, OK),
+        ModuleId::Launch => (Icon::Grid, PORTS),
     }
 }
 
@@ -1147,6 +1171,9 @@ fn slip_body<'a>(m: &Model, front: ModuleId, tm: &'a dyn TextMeasure, edge: Edge
         ModuleId::Todo => todo_slip(m, &mut b, pad),
         ModuleId::Calendar => calendar_slip(m, &mut b, pad),
         ModuleId::Finance => finance_slip(m, &mut b, pad),
+        ModuleId::Notes => notes_slip(m, &mut b, pad),
+        ModuleId::Power => power_slip(m, &mut b, pad),
+        ModuleId::Launch => launch_slip(m, &mut b, pad),
     };
     (bottom, b)
 }
@@ -1585,10 +1612,40 @@ fn ports_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     bottom
 }
 
+fn notes_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let y = b.header(top, OK, "Notes", (!m.notes.is_empty()).then(|| (m.notes.len().to_string(), TEXT_2))) + 12.0;
+    b.full();
+    more::notes(m, b, y, true)
+}
+
+fn power_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let y = b.header(top, OK, "Battery & network", None) + 12.0;
+    b.full();
+    let y = more::power_now(m, b, y) + 10.0;
+    more::power_plans(m, b, y, 30.0)
+}
+
+fn launch_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let y = b.header(top, PORTS, "Quick launch", None);
+    if !m.config.launch.items.is_empty() {
+        let label = if m.launch_edit { "Done" } else { "Edit" };
+        b.ibutton(
+            Rect::new(b.x + b.w - 64.0, top - 8.0, 64.0, 30.0),
+            if m.launch_edit { Some(Icon::Check) } else { Some(Icon::Pencil) },
+            label,
+            Btn::Ghost,
+            Action::LaunchEdit,
+        );
+    }
+    b.full();
+    more::launch(m, b, y + 14.0, 70.0, 4)
+}
+
 fn clipboard_slip(m: &Model, b: &mut B, top: f32) -> f32 {
-    let Some(c) = &m.clip else {
-        let y = b.header(top, CODER, "Clipboard", None);
-        return b.empty(y + 12.0, "Copy a JWT, JSON, UUID, timestamp, colour or link");
+    let Some(c) = m.clip.as_ref().filter(|_| m.typing(InputFor::ClipSearch).is_none()) else {
+        let y = b.header(top, CODER, "Clipboard", None) + 12.0;
+        b.full();
+        return more::clip_history(m, b, y);
     };
     let status = clipboard::status(&c.kind, c.unix_at).map(|s| {
         let col = if s.starts_with("expired") { PRIVACY_TEXT } else { TEXT_2 };
@@ -1604,7 +1661,8 @@ fn clipboard_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let per_line = ((b.w - 24.0) / 7.6).max(8.0) as usize;
     let lines: usize = shown.lines().map(|l| l.chars().count().div_ceil(per_line).max(1)).sum();
     let room = b.limit - y0 - if b.two { 0.0 } else { 110.0 };
-    let max_lines = ((room - 24.0) / 18.0).max(1.0) as usize;
+    // A short preview: the history follows under it.
+    let max_lines = (((room - 24.0) / 18.0).max(1.0) as usize).min(3);
     let lines = lines.min(max_lines);
     let shown: String = shown.lines().take(max_lines).collect::<Vec<_>>().join("\n");
     let natural_h = (lines as f32 * 18.0 + 24.0).max(64.0);
@@ -1632,113 +1690,117 @@ fn clipboard_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let _ = y;
     let cy = b.side(y0, y0 + box_h);
     let chips = c.kind.actions().iter().map(|a| (a.label().to_string(), CODER, Action::Clip(*a))).collect();
-    b.chips(cy, chips).max(y0 + if b.two { natural_h } else { box_h })
+    let y = b.chips(cy, chips).max(y0 + if b.two { natural_h } else { box_h });
+    b.full();
+    more::clip_history(m, b, y + 14.0)
 }
 
 fn timer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
+    let y0 = b.header(top, GAME, &focus_title(m), focus_rounds(m)) + 10.0;
+    b.full();
+    let (y, buttons) = timer_face(m, b, b.x, y0, b.w);
+    let row = buttons.iter().map(|(i, l, k, a)| (*i, l.as_str(), *k, a.clone())).collect();
+    b.ibutton_row(y + 14.0, row)
+}
+
+/// "Focus · running", "Break · 5 min"…
+fn focus_title(m: &Model) -> String {
+    match (m.on_break, m.timer) {
+        (true, _) => "Break".into(),
+        (_, FocusTimer::Idle) => "Focus · ready".into(),
+        (_, FocusTimer::Running { .. }) => "Focus · running".into(),
+        (_, FocusTimer::Paused { .. }) => "Focus · paused".into(),
+    }
+}
+
+/// Rounds finished today, for the header.
+fn focus_rounds(m: &Model) -> Option<(String, Color)> {
+    (m.focus_rounds > 0).then(|| (format!("{} done today", m.focus_rounds), TEXT_2))
+}
+
+/// The focus clock, large and unboxed: the round's length between round
+/// − and + buttons when idle, the time left over a thin progress line while
+/// running. Returns where it ends and the buttons that go with it.
+fn timer_face(m: &Model, b: &mut B, x: f32, y: f32, w: f32) -> (f32, Vec<(Icon, String, Btn, Action)>) {
     let now = m.now_ms;
-    let state = match m.timer {
-        FocusTimer::Idle => "ready",
-        FocusTimer::Running { .. } => "running",
-        FocusTimer::Paused { .. } => "paused",
-    };
-    let y0 = b.header(top, GAME, &format!("Focus · {state}"), None) + 14.0;
-    // The hero is as tall as the buttons beside it (two columns) or compact.
-    let stacked = |n: usize| n as f32 * 54.0 - 10.0;
+    let big = TextStyle { size: 48.0, weight: Weight::Semibold, mono: true };
     match m.timer {
         FocusTimer::Idle => {
             let custom = m.config.timer.custom_min;
-            let presets: Vec<u32> = m.config.timer.presets_min.iter().copied().take(3).collect();
-            let hero_h = if b.two { stacked(presets.len() + 1) } else { 104.0 };
-            // Hero: the custom length, large, between − and +.
-            b.col(0);
-            let card = Rect::new(b.x, y0, b.w, hero_h);
-            b.hero(card, GAME);
-            let mid = card.y + hero_h / 2.0;
-            b.icon_button(
-                Rect::new(card.x + 12.0, mid - 22.0, 44.0, 44.0),
-                Icon::Minus,
-                TEXT,
-                Some(SURFACE_3),
-                Some(Action::TimerCustom(-1)),
-                "Shorter",
-            );
-            b.icon_button(
-                Rect::new(card.right() - 56.0, mid - 22.0, 44.0, 44.0),
-                Icon::Plus,
-                TEXT,
-                Some(SURFACE_3),
-                Some(Action::TimerCustom(1)),
-                "Longer",
-            );
+            let mid = y + 30.0;
+            round_button(b, x + 22.0, mid, 18.0, Icon::Minus, Action::TimerCustom(-1), "Shorter");
+            round_button(b, x + w - 22.0, mid, 18.0, Icon::Plus, Action::TimerCustom(1), "Longer");
             b.prims.push(Prim::Text {
-                rect: Rect::new(card.x + 60.0, mid - 30.0, card.w - 120.0, 46.0),
+                rect: Rect::new(x + 48.0, y, w - 96.0, 56.0),
                 text: format!("{custom}:00"),
-                style: TextStyle { size: 40.0, weight: Weight::Semibold, mono: true },
+                style: big,
                 color: TEXT,
                 align: Align::Center,
                 wrap: false,
             });
             b.prims.push(Prim::Text {
-                rect: Rect::new(card.x + 60.0, mid + 16.0, card.w - 120.0, 16.0),
-                text: "custom".into(),
+                rect: Rect::new(x + 48.0, y + 54.0, w - 96.0, 14.0),
+                text: "CUSTOM ROUND".into(),
                 style: TextStyle::LABEL,
                 color: LABEL,
                 align: Align::Center,
                 wrap: false,
             });
-            // Then the presets and the custom round.
-            let y = b.side(y0, y0 + hero_h);
-            let mut all: Vec<(Icon, String, Btn, Action)> =
-                presets.iter().map(|p| (Icon::Play, format!("{p} min"), Btn::Primary(GAME), Action::TimerStart(*p))).collect();
+            let mut all: Vec<(Icon, String, Btn, Action)> = m
+                .config
+                .timer
+                .presets_min
+                .iter()
+                .take(3)
+                .map(|p| (Icon::Play, format!("{p} min"), Btn::Primary(GAME), Action::TimerStart(*p)))
+                .collect();
             all.push((Icon::Play, format!("{custom} min"), Btn::Secondary, Action::TimerStart(custom)));
-            if !b.two {
-                let row = all.iter().map(|(i, l, k, a)| (*i, l.as_str(), *k, a.clone())).collect();
-                return b.ibutton_row(y, row);
-            }
-            let mut y = y;
-            for (i, l, k, a) in &all {
-                y = b.ibutton_row(y, vec![(*i, l.as_str(), *k, a.clone())]) + 10.0;
-            }
-            (y - 10.0).max(y0 + hero_h)
+            (y + 68.0, all)
         }
         _ => {
             let rem = m.timer.remaining(now).unwrap_or(0);
             let frac = m.timer.progress(now).unwrap_or(0.0);
-            let hero_h = if b.two { stacked(3) } else { 104.0 };
-            b.col(0);
-            let card = Rect::new(b.x, y0, b.w, hero_h);
-            b.hero(card, GAME);
-            let mid = card.y + hero_h / 2.0 - 8.0;
             b.prims.push(Prim::Text {
-                rect: Rect::new(card.x, mid - 28.0, card.w, 56.0),
+                rect: Rect::new(x, y - 2.0, w, 60.0),
                 text: format::clock(rem.div_ceil(1000)),
-                style: TextStyle { size: 48.0, weight: Weight::Semibold, mono: true },
+                style: TextStyle { size: 52.0, ..big },
                 color: TEXT,
                 align: Align::Center,
                 wrap: false,
             });
-            b.meter(Rect::new(card.x + 20.0, card.bottom() - 22.0, card.w - 40.0, 6.0), frac, GAME);
-            let y = b.side(y0, y0 + hero_h);
+            let accent = if m.on_break { OK } else { GAME };
+            b.meter(Rect::new(x + w * 0.15, y + 62.0, w * 0.7, 3.0), frac, accent);
+            if m.on_break {
+                return (
+                    y + 68.0,
+                    vec![
+                        (Icon::Next, "Skip break".into(), Btn::Primary(OK), Action::TimerSkipBreak),
+                        (Icon::Plus, "5 min".into(), Btn::Secondary, Action::TimerAdd(5)),
+                    ],
+                );
+            }
             let main = if m.timer.is_running() {
-                (Icon::Pause, "Pause", Btn::Primary(GAME), Action::TimerPause)
+                (Icon::Pause, "Pause".to_string(), Btn::Primary(GAME), Action::TimerPause)
             } else {
-                (Icon::Play, "Resume", Btn::Primary(GAME), Action::TimerResume)
+                (Icon::Play, "Resume".to_string(), Btn::Primary(GAME), Action::TimerResume)
             };
-            let rest =
-                [(Icon::Plus, "5 min", Btn::Secondary, Action::TimerAdd(5)), (Icon::Stop, "Stop", Btn::Secondary, Action::TimerStop)];
-            if !b.two {
-                let mut row = vec![main];
-                row.extend(rest);
-                return b.ibutton_row(y, row);
-            }
-            let mut y = b.ibutton_row(y, vec![main]) + 10.0;
-            for r in rest {
-                y = b.ibutton_row(y, vec![r]) + 10.0;
-            }
-            (y - 10.0).max(y0 + hero_h)
+            (
+                y + 68.0,
+                vec![
+                    main,
+                    (Icon::Plus, "5 min".into(), Btn::Secondary, Action::TimerAdd(5)),
+                    (Icon::Stop, "Stop".into(), Btn::Secondary, Action::TimerStop),
+                ],
+            )
         }
     }
+}
+
+/// A round raised button with an icon.
+fn round_button(b: &mut B, cx: f32, cy: f32, r: f32, icon: Icon, action: Action, label: &str) {
+    b.prims.extend(soft::raised_circle(cx, cy, r, SURFACE, 2.0));
+    b.icon(icon, Rect::new(cx - 7.0, cy - 7.0, 14.0, 14.0), TEXT);
+    b.hits.push(Hit { rect: Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r), kind: HitKind::Click(action), label: label.into() });
 }
 
 fn game_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -1844,18 +1906,16 @@ fn game_slip(m: &Model, b: &mut B, top: f32) -> f32 {
 
 fn captures_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let now = m.now_ms;
-    let y0 = b.header(top, PORTS, "Captures", None) + 12.0;
+    let y0 = b.header(top, PORTS, "Captures & downloads", None) + 12.0;
+    b.full();
+    let y0 = more::downloads(m, b, y0);
     let mut bottom = y0 + 10.0;
     for (i, c) in m.captures.iter().enumerate() {
         let Some(y) = b.flow(i, y0, 54.0, 0.0) else { break };
         bottom = bottom.max(y + 54.0);
         let tile = Rect::new(b.x, y, 64.0, 44.0);
         b.rect(tile, 6.0, SURFACE_2);
-        b.icon(
-            if c.kind == CaptureKind::Clip { Icon::Play } else { Icon::Image },
-            Rect::new(tile.x + 22.0, tile.y + 12.0, 20.0, 20.0),
-            TEXT,
-        );
+        b.icon(capture_icon(c.kind), Rect::new(tile.x + 22.0, tile.y + 12.0, 20.0, 20.0), TEXT);
         b.hits.push(Hit { rect: tile, kind: HitKind::Click(Action::CaptureOpen(i)), label: format!("Open {}", c.name) });
         let tw = b.w - 64.0 - 12.0 - 2.0 * 50.0;
         b.text(Rect::new(b.x + 76.0, y + 2.0, tw, 20.0), c.name.clone(), TextStyle::BODY, TEXT);
@@ -1883,6 +1943,14 @@ fn captures_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         );
     }
     bottom - 10.0
+}
+
+fn capture_icon(k: CaptureKind) -> Icon {
+    match k {
+        CaptureKind::Clip => Icon::Play,
+        CaptureKind::Screenshot => Icon::Image,
+        CaptureKind::Download => Icon::Download,
+    }
 }
 
 fn privacy_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -1925,80 +1993,147 @@ fn privacy_slip(m: &Model, b: &mut B, top: f32) -> f32 {
 }
 
 fn prayer_slip(m: &Model, b: &mut B, top: f32) -> f32 {
-    use crate::prayer::{hhmm, Prayer};
     let city = format::ellipsize(&m.config.location.city, 28);
     let y0 = b.header(top, OK, &format!("Sholat · {city}"), Some((m.config.prayer.method.label().to_string(), TEXT_2))) + 14.0;
     let (Some(day), Some(now)) = (m.prayer_day, m.local_minute()) else {
         return b.empty(y0 + 4.0, "Waiting for the clock…");
     };
-    let cell_h = 54.0;
-    let gap = 8.0;
-    let grid_h = 2.0 * cell_h + gap;
-    // Hero: the next prayer, as tall as the times beside (or under) it.
-    b.col(0);
-    let card = Rect::new(b.x, y0, b.w, grid_h);
-    b.hero(card, OK);
-    let next = day.next(now);
-    match next {
+    b.full();
+    let y = prayer_headline(b, m, day, now, b.x, y0, b.w);
+    let y = prayer_timeline(b, day, now, b.x, y + 18.0, b.w);
+    prayer_footer(b, m, b.x, y + 12.0, b.w)
+}
+
+/// The Hijri date on the left, the qibla direction on the right.
+fn prayer_footer(b: &mut B, m: &Model, x: f32, y: f32, w: f32) -> f32 {
+    if let Some(h) = m.hijri() {
+        b.text(Rect::new(x, y, w * 0.6, 16.0), crate::prayer::hijri_label(h), TextStyle::MONO_SMALL, TEXT_2);
+    }
+    let l = &m.config.location;
+    let q = crate::prayer::qibla(l.latitude, l.longitude);
+    let label = format!("Kiblat {q:.0}° {}", crate::prayer::compass(q));
+    let lw = b.tm.width(&label, TextStyle::MONO_SMALL).ceil();
+    b.text_end(Rect::new(x + w - lw, y, lw, 16.0), label, TextStyle::MONO_SMALL, TEXT_2);
+    // A small needle pointing that way (north up).
+    let (c, r) = (Point::new(x + w - lw - 12.0, y + 8.0), 6.0);
+    let a = (q as f32).to_radians();
+    let tip = Point::new(c.x + r * a.sin(), c.y - r * a.cos());
+    let tail = Point::new(c.x - r * a.sin(), c.y + r * a.cos());
+    b.prims.push(Prim::Polyline { points: vec![tail, tip], width: 1.5, color: OK, closed: false });
+    b.prims.push(Prim::Circle { cx: tip.x, cy: tip.y, r: 2.0, fill: Some(OK), stroke: None });
+    y + 16.0
+}
+
+/// The next prayer, large, with its time and how long until it. No card:
+/// just type. Returns where it ends.
+fn prayer_headline(b: &mut B, m: &Model, day: crate::prayer::Day, now: f64, x: f32, y: f32, w: f32) -> f32 {
+    use crate::prayer::hhmm;
+    // In Ramadan the fast leads: imsak before dawn, buka during the day.
+    if let (Some((what, t)), Some(n)) = (m.fasting(), m.ramadan_day()) {
+        let left = ((t - now) * 60.0).max(0.0) as u64;
+        b.text(Rect::new(x, y, w, 14.0), format!("RAMADAN · DAY {n}"), TextStyle::LABEL, OK);
+        b.text(Rect::new(x, y + 14.0, w * 0.6, 42.0), what, TextStyle { size: 32.0, weight: Weight::Semibold, mono: false }, TEXT);
+        b.text_end(
+            Rect::new(x + w * 0.4, y + 16.0, w * 0.6, 30.0),
+            hhmm(t.rem_euclid(1440.0)),
+            TextStyle { size: 24.0, weight: Weight::Semibold, mono: true },
+            OK,
+        );
+        b.text_end(Rect::new(x + w * 0.4, y + 44.0, w * 0.6, 16.0), format!("in {}", format::clock(left)), TextStyle::MONO_SMALL, TEXT_2);
+        return y + 60.0;
+    }
+    match day.next(now) {
         Some((p, t)) => {
             let left = ((t - now) * 60.0).max(0.0) as u64;
-            b.icon_tile(Rect::new(card.x + 14.0, card.y + 14.0, 30.0, 30.0), Icon::Moon, OK);
-            b.text(Rect::new(card.x + 54.0, card.y + 14.0, card.w - 64.0, 30.0), "Next", TextStyle::SMALL, TEXT_2);
-            b.text(
-                Rect::new(card.x + 16.0, card.y + 50.0, card.w * 0.55, 46.0),
-                p.name(),
-                TextStyle { size: 32.0, weight: Weight::Semibold, mono: false },
-                TEXT,
-            );
+            b.text(Rect::new(x, y, w, 14.0), "NEXT PRAYER", TextStyle::LABEL, LABEL);
+            b.text(Rect::new(x, y + 14.0, w * 0.6, 42.0), p.name(), TextStyle { size: 32.0, weight: Weight::Semibold, mono: false }, TEXT);
             b.text_end(
-                Rect::new(card.x + card.w * 0.5, card.y + 52.0, card.w * 0.5 - 16.0, 26.0),
+                Rect::new(x + w * 0.4, y + 16.0, w * 0.6, 30.0),
                 hhmm(t),
-                TextStyle { size: 22.0, weight: Weight::Semibold, mono: true },
+                TextStyle { size: 24.0, weight: Weight::Semibold, mono: true },
                 OK,
             );
             b.text_end(
-                Rect::new(card.x + card.w * 0.5, card.y + 80.0, card.w * 0.5 - 16.0, 18.0),
+                Rect::new(x + w * 0.4, y + 44.0, w * 0.6, 16.0),
                 format!("in {}", format::clock(left)),
                 TextStyle::MONO_SMALL,
                 TEXT_2,
             );
+            y + 60.0
         }
         None => {
-            b.icon_tile(Rect::new(card.x + 14.0, card.y + 14.0, 30.0, 30.0), Icon::Moon, OK);
-            b.text(Rect::new(card.x + 16.0, card.y + 56.0, card.w - 32.0, 30.0), "Until Subuh", TextStyle::TITLE, TEXT);
+            b.text(Rect::new(x, y, w, 14.0), "NEXT PRAYER", TextStyle::LABEL, LABEL);
+            b.text(
+                Rect::new(x, y + 14.0, w, 36.0),
+                "Subuh, tomorrow",
+                TextStyle { size: 24.0, weight: Weight::Semibold, mono: false },
+                TEXT,
+            );
+            y + 54.0
         }
     }
-    // Then every time today: four on top, three below, each row full width.
-    let gy = b.side(y0, card.bottom());
-    let next_p = next.map(|(p, _)| p);
-    for (row, items) in [&Prayer::ALL[..4], &Prayer::ALL[4..]].into_iter().enumerate() {
-        let n = items.len() as f32;
-        let w = (b.w - gap * (n - 1.0)) / n;
-        for (i, p) in items.iter().enumerate() {
-            let r = Rect::new(b.x + i as f32 * (w + gap), gy + row as f32 * (cell_h + gap), w, cell_h);
-            let active = Some(*p) == next_p;
-            if active {
-                b.prims.extend(soft::raised_grad(r, 12.0, accent_light(OK), accent_deep(OK), 2.0));
-            } else {
-                b.rect(r, 12.0, SURFACE_2);
-            }
-            let (k, v) = if active { (SURFACE, SURFACE) } else { (LABEL, TEXT) };
-            b.text(
-                Rect::new(r.x + 10.0, r.y + 7.0, r.w - 12.0, 16.0),
-                p.name(),
-                TextStyle { size: 11.0, weight: Weight::Medium, mono: false },
-                k,
-            );
-            let t = day.get(*p).map(hhmm).unwrap_or_else(|| "—".into());
-            b.text(
-                Rect::new(r.x + 10.0, r.y + 25.0, r.w - 12.0, 22.0),
-                t,
-                TextStyle { size: 15.0, weight: Weight::Semibold, mono: true },
-                v,
-            );
-        }
+}
+
+/// The day's prayers along a line: a dot for each, filled once it has
+/// passed, the next one lit; names and times under the dots.
+fn prayer_timeline(b: &mut B, day: crate::prayer::Day, now: f64, x: f32, y: f32, w: f32) -> f32 {
+    use crate::prayer::{hhmm, Prayer};
+    let n = Prayer::ALL.len();
+    let step = w / n as f32;
+    let cx = |i: usize| x + step * (i as f32 + 0.5);
+    let next = day.next(now).map(|(p, _)| p);
+    let next_i = next.and_then(|p| Prayer::ALL.iter().position(|q| *q == p)).unwrap_or(n);
+    // The line, lit up to the next prayer.
+    b.prims.push(Prim::RoundRect { rect: Rect::new(cx(0), y - 1.0, cx(n - 1) - cx(0), 2.0), radius: 1.0, fill: Some(TRACK), stroke: None });
+    if next_i > 0 {
+        let to = if next_i >= n { cx(n - 1) } else { cx(next_i) };
+        b.prims.push(Prim::Gradient {
+            rect: Rect::new(cx(0), y - 1.0, to - cx(0), 2.0),
+            radius: 1.0,
+            from: accent_deep(OK),
+            to: accent_light(OK),
+            diagonal: true,
+        });
     }
-    (gy + grid_h).max(card.bottom())
+    for (i, p) in Prayer::ALL.iter().enumerate() {
+        let c = cx(i);
+        let passed = day.get(*p).is_some_and(|t| t < now) && i != next_i;
+        let is_next = i == next_i;
+        if is_next {
+            b.prims.push(Prim::Circle { cx: c, cy: y, r: 8.0, fill: Some(OK.with_alpha(0x33)), stroke: None });
+            b.prims.push(Prim::Circle { cx: c, cy: y, r: 4.5, fill: Some(OK), stroke: None });
+        } else if passed {
+            b.prims.push(Prim::Circle { cx: c, cy: y, r: 3.5, fill: Some(accent_deep(OK)), stroke: None });
+        } else {
+            b.prims.push(Prim::Circle { cx: c, cy: y, r: 3.5, fill: Some(SURFACE), stroke: Some((TRACK, 1.5)) });
+        }
+        let (nc, tc) = if is_next {
+            (OK, OK)
+        } else if passed {
+            (LABEL, TEXT_2)
+        } else {
+            (LABEL, TEXT)
+        };
+        let left = c - step / 2.0;
+        let center = |t: String, yy: f32, h: f32, style: TextStyle, color: Color| Prim::Text {
+            rect: Rect::new(left, yy, step, h),
+            text: t,
+            style,
+            color,
+            align: Align::Center,
+            wrap: false,
+        };
+        b.prims.push(center(p.name().into(), y + 12.0, 14.0, TextStyle { size: 10.0, weight: Weight::Medium, mono: false }, nc));
+        let t = day.get(*p).map(hhmm).unwrap_or_else(|| "—".into());
+        b.prims.push(center(
+            t,
+            y + 26.0,
+            18.0,
+            TextStyle { size: 13.0, weight: if is_next { Weight::Semibold } else { Weight::Regular }, mono: true },
+            tc,
+        ));
+    }
+    y + 44.0
 }
 
 fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
@@ -2008,7 +2143,7 @@ fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let mut y = y0;
     // The field for a new task sits in the left column while it is open.
     b.col(0);
-    if let Some(input) = &m.todo_input {
+    if let Some(input) = m.typing(InputFor::Todo) {
         let field = Rect::new(b.x, y, b.w, 44.0);
         b.prims.extend(soft::well(field, 12.0));
         let tx = field.x + 14.0;
@@ -2019,7 +2154,7 @@ fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         } else {
             // Show the end of long text, with the caret after it.
             let shown: String = {
-                let mut t = input.clone();
+                let mut t = input.to_string();
                 while b.tm.width(&t, TextStyle::BODY) > tw - 6.0 && !t.is_empty() {
                     t.remove(0);
                 }
@@ -2043,7 +2178,7 @@ fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     // the right column only, otherwise they flow through both.
     let mut list: Vec<&TodoItem> = m.todos.iter().filter(|t| !t.done).collect();
     list.extend(m.todos.iter().filter(|t| t.done));
-    let typing = m.todo_input.is_some();
+    let typing = m.typing(InputFor::Todo).is_some();
     // Typing in two columns: the list beside the field.
     let beside = typing && b.two;
     let input_end = y;
@@ -2269,8 +2404,17 @@ fn calendar_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             TextStyle { size: 11.0, weight: Weight::Regular, mono: false },
             LABEL,
         );
-        if e.location.starts_with("https://") {
-            b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(e.location.clone())), label: format!("Join {}", e.title) });
+        if !e.link.is_empty() {
+            // The meeting link: the whole row joins it.
+            b.prims.push(Prim::Text {
+                rect: Rect::new(r.right() - 64.0, r.bottom() - 18.0, 56.0, 14.0),
+                text: "Join ›".into(),
+                style: TextStyle { size: 10.5, weight: Weight::Semibold, mono: false },
+                color: CODER,
+                align: Align::End,
+                wrap: false,
+            });
+            b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(e.link.clone())), label: format!("Join {}", e.title) });
         }
         y += 54.0;
     }
@@ -2285,20 +2429,20 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
         return b.ibutton_row(y, vec![(Icon::Plus, "Add symbols", Btn::Primary(GAME), Action::OpenSettings(ModuleId::Finance))]);
     }
     let y0 = y;
-    let capacity = b.rows(y0, 62.0, 20.0) * b.cols();
+    let capacity = b.rows(y0, 50.0, 20.0) * b.cols();
     let fit = if list.len() > capacity { capacity.saturating_sub(1) } else { list.len() };
     let mut bottom = y0;
     for (i, item) in list.iter().take(fit).enumerate() {
-        let Some(row_y) = b.flow(i, y0, 62.0, 20.0) else { break };
+        let Some(row_y) = b.flow(i, y0, 50.0, 20.0) else { break };
         y = row_y;
-        bottom = bottom.max(y + 52.0);
+        bottom = bottom.max(y + 42.0);
         let q = m.quotes.iter().find(|q| q.symbol.eq_ignore_ascii_case(&item.symbol));
-        let r = Rect::new(b.x, y, b.w, 52.0);
+        let r = Rect::new(b.x, y, b.w, 42.0);
         b.raised(r, 14.0, SURFACE);
         let name = if item.name.is_empty() { q.map(|q| q.name.clone()).unwrap_or_default() } else { item.name.clone() };
-        b.text(Rect::new(r.x + 14.0, r.y + 7.0, 112.0, 20.0), name, TextStyle::BODY_MEDIUM, TEXT);
+        b.text(Rect::new(r.x + 14.0, r.y + 4.0, 112.0, 18.0), name, TextStyle::BODY_MEDIUM, TEXT);
         b.text(
-            Rect::new(r.x + 14.0, r.y + 27.0, 112.0, 16.0),
+            Rect::new(r.x + 14.0, r.y + 22.0, 112.0, 14.0),
             item.symbol.clone(),
             TextStyle { size: 11.0, weight: Weight::Regular, mono: true },
             LABEL,
@@ -2308,7 +2452,7 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                 let up = q.change_pct >= 0.0;
                 let color = if up { OK } else { PRIVACY_TEXT };
                 // Sparkline in a groove.
-                let spark = Rect::new(r.x + 130.0, r.y + 10.0, 60.0, 32.0);
+                let spark = Rect::new(r.x + 130.0, r.y + 7.0, 60.0, 28.0);
                 b.prims.extend(soft::well(spark, 8.0));
                 if q.points.len() >= 2 {
                     let (lo, hi) = q.points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
@@ -2324,13 +2468,13 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                     b.prims.push(Prim::Polyline { points, width: 1.5, color, closed: false });
                 }
                 b.text_end(
-                    Rect::new(r.x + 196.0, r.y + 7.0, r.w - 210.0, 20.0),
+                    Rect::new(r.x + 196.0, r.y + 4.0, r.w - 210.0, 18.0),
                     crate::finance::format_price(q),
                     TextStyle { size: 14.0, weight: Weight::Medium, mono: true },
                     TEXT,
                 );
                 b.text_end(
-                    Rect::new(r.x + 196.0, r.y + 27.0, r.w - 210.0, 16.0),
+                    Rect::new(r.x + 196.0, r.y + 22.0, r.w - 210.0, 14.0),
                     crate::finance::format_change(q.change_pct),
                     TextStyle { size: 11.5, weight: Weight::Medium, mono: true },
                     color,
@@ -2345,8 +2489,8 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     let _ = y;
     // Headlines beside the prices in a wide slip (when the right column is
     // free), else under them, as many as fit.
-    let room = |b: &B, y: f32| y + 44.0 <= b.limit - 28.0;
-    let beside = b.two && fit <= b.rows(y0, 62.0, 20.0);
+    let room = |b: &B, y: f32| y + 40.0 <= b.limit - 20.0;
+    let beside = b.two && fit <= b.rows(y0, 50.0, 20.0);
     let start = if beside {
         b.col(1);
         y0
@@ -2363,7 +2507,7 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
             if !room(b, y) {
                 break;
             }
-            let r = Rect::new(b.x, y, b.w, 40.0);
+            let r = Rect::new(b.x, y, b.w, 36.0);
             b.rect(Rect::new(r.x, r.y + 4.0, 3.0, r.h - 8.0), 1.5, GAME);
             b.text(Rect::new(r.x + 12.0, r.y + 1.0, r.w - 12.0, 20.0), n.title.clone(), TextStyle::SMALL, TEXT);
             let age = now
@@ -2374,13 +2518,13 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                 })
                 .unwrap_or_default();
             b.text(
-                Rect::new(r.x + 12.0, r.y + 21.0, r.w - 12.0, 16.0),
+                Rect::new(r.x + 12.0, r.y + 19.0, r.w - 12.0, 15.0),
                 format!("{} · {}{age}", n.symbol.trim_start_matches('^'), n.publisher),
                 TextStyle { size: 11.0, weight: Weight::Regular, mono: true },
                 LABEL,
             );
             b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(n.link.clone())), label: n.title.clone() });
-            y += 44.0;
+            y += 40.0;
             bottom = bottom.max(y - 4.0);
         }
     }
@@ -2417,170 +2561,163 @@ fn level_color(l: crate::weather::Level) -> Color {
 }
 
 fn weather_slip(m: &Model, b: &mut B, top: f32) -> f32 {
-    let unix = m.unix_now();
     let offline = m.online == Some(false);
     let place = format::ellipsize(&m.config.location.city, 24);
     let mut y = b.header(top, PORTS, &format!("Weather · {place}"), None);
     // Refresh: an icon in the header's corner.
     b.icon_button(
-        Rect::new(b.x + b.w - 36.0, top - 10.0, 36.0, 36.0),
+        Rect::new(b.x + b.w - 30.0, top - 7.0, 30.0, 30.0),
         Icon::Refresh,
         TEXT_2,
-        Some(SURFACE_3),
+        None,
         Some(Action::RefreshWeather),
         "Refresh weather",
     );
-    y += 16.0;
-    let y0 = y;
-    b.col(0);
-    let left_end;
+    y += 14.0;
+    b.full();
     match &m.weather {
         Some(w) => {
-            // Hero: the sky, the temperature and what it is like.
-            let card = Rect::new(b.x, y, b.w, 96.0);
-            b.hero(card, PORTS);
-            b.icon_tile(Rect::new(card.x + 14.0, card.y + 18.0, 60.0, 60.0), condition_icon(w.condition), PORTS);
-            let tx = card.x + 88.0;
-            b.text(
-                Rect::new(tx, card.y + 12.0, 120.0, 46.0),
-                format!("{:.0}°", w.temp_c),
-                TextStyle { size: 40.0, weight: Weight::Semibold, mono: false },
-                TEXT,
-            );
-            b.text(Rect::new(tx, card.y + 58.0, card.w - 88.0 - 90.0, 22.0), w.description.clone(), TextStyle::BODY_MEDIUM, TEXT_2);
-            if let (Some(lo), Some(hi)) = (w.min_c, w.max_c) {
-                b.text_end(
-                    Rect::new(card.right() - 110.0, card.y + 22.0, 96.0, 20.0),
-                    format!("↓{lo:.0}° ↑{hi:.0}°"),
-                    TextStyle::MONO_SMALL,
-                    TEXT_2,
-                );
-            }
-            if let Some(r) = w.rain_chance {
-                let c = if r >= 60 { PORTS } else { TEXT_2 };
-                let tw = b.tm.width(&format!("{r}%"), TextStyle::MONO_SMALL).ceil();
-                b.text_end(Rect::new(card.right() - 110.0, card.y + 48.0, 96.0, 20.0), format!("{r}%"), TextStyle::MONO_SMALL, c);
-                b.icon(Icon::Drop, Rect::new(card.right() - 14.0 - tw - 18.0, card.y + 51.0, 14.0, 14.0), c);
-            }
-            y = card.bottom() + 10.0;
-            // Small readings: an icon and a value each.
-            let stats: Vec<(Icon, String)> = [
-                w.feels_c.map(|f| (Icon::Thermo, format!("{f:.0}°"))),
-                w.humidity.map(|h| (Icon::Drop, format!("{h}%"))),
-                w.wind_kmh.map(|k| (Icon::Wind, format!("{k:.0} km/h"))),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
-            if !stats.is_empty() {
-                let n = stats.len() as f32;
-                let gap = 8.0;
-                let sw = (b.w - gap * (n - 1.0)) / n;
-                for (i, (icon, v)) in stats.into_iter().enumerate() {
-                    let r = Rect::new(b.x + i as f32 * (sw + gap), y, sw, 34.0);
-                    b.prims.extend(soft::well(r, 12.0));
-                    b.icon(icon, Rect::new(r.x + 10.0, r.y + 10.0, 14.0, 14.0), PORTS);
-                    b.text(
-                        Rect::new(r.x + 30.0, r.y, r.w - 34.0, 34.0),
-                        v,
-                        TextStyle { size: 13.0, weight: Weight::Medium, mono: false },
-                        TEXT,
-                    );
-                }
-                y += 34.0 + 10.0;
-            }
-            left_end = y - 12.0;
-            // Then the next hours as raised cards.
-            y = b.side(y0, left_end - 4.0);
-            if !w.next.is_empty() {
-                let n = w.next.len().min(4);
-                let gap = 8.0;
-                let tw = (b.w - gap * (n as f32 - 1.0)) / n as f32;
-                for (i, slot) in w.next.iter().take(n).enumerate() {
-                    let r = Rect::new(b.x + i as f32 * (tw + gap), y, tw, 62.0);
-                    b.prims.extend(soft::raised_grad(r, 14.0, SURFACE_TOP, SURFACE, 3.0));
-                    let center = |t: String, yy: f32, h: f32, style: TextStyle, c: Color| Prim::Text {
-                        rect: Rect::new(r.x, yy, r.w, h),
-                        text: t,
-                        style,
-                        color: c,
-                        align: Align::Center,
-                        wrap: false,
-                    };
-                    b.prims.push(center(
-                        slot.time.clone(),
-                        r.y + 6.0,
-                        16.0,
-                        TextStyle { size: 10.5, weight: Weight::Regular, mono: true },
-                        LABEL,
-                    ));
-                    b.icon(condition_icon(slot.condition), Rect::new(r.x + r.w / 2.0 - 8.0, r.y + 21.0, 16.0, 16.0), PORTS);
-                    b.prims.push(center(
-                        format!("{:.0}°", slot.temp_c),
-                        r.y + 39.0,
-                        20.0,
-                        TextStyle { size: 13.0, weight: Weight::Medium, mono: false },
-                        TEXT,
-                    ));
-                }
-                y += 72.0;
-            }
+            y = weather_now(b, w, b.x, y, b.w) + 14.0;
+            y = weather_readings(b, w, b.x, y, b.w) + 14.0;
+            b.prims.push(Prim::RoundRect { rect: Rect::new(b.x, y - 7.0, b.w, 1.0), radius: 0.5, fill: Some(HAIRLINE), stroke: None });
+            y = weather_hours(b, w, b.x, y + 4.0, b.w, 58.0) + 12.0;
         }
         None => {
             let msg = if offline { "No connection. Weather loads once you're online." } else { "Loading weather…" };
             y = b.empty(y, msg) + 14.0;
-            left_end = y;
         }
     }
     // Then the early warnings.
     let alerts = m.relevant_alerts(3);
     let count = (!alerts.is_empty()).then(|| (alerts.len().to_string(), MEDIA));
-    y = b.header(y, if alerts.is_empty() { OK } else { MEDIA }, "Early warnings", count) + 10.0;
+    y = b.header(y, if alerts.is_empty() { OK } else { MEDIA }, "Early warnings", count) + 8.0;
     if alerts.is_empty() {
         let msg = if offline && m.alerts.is_empty() { "Unavailable while offline".to_string() } else { format!("All clear near {place}") };
         b.text(Rect::new(b.x, y, b.w, 20.0), msg, TextStyle::SMALL, TEXT_2);
-        y += 26.0;
+        y += 24.0;
     }
-    let l = &m.config.location;
-    let fit = b.rows(y, 56.0, 20.0);
+    let fit = b.rows(y, 42.0, 20.0);
     for a in alerts.into_iter().take(fit) {
-        let r = Rect::new(b.x, y, b.w, 48.0);
-        b.prims.extend(soft::well(r, 12.0));
-        b.prims.push(Prim::RoundRect {
-            rect: Rect::new(r.x + 8.0, r.y + 10.0, 4.0, r.h - 20.0),
-            radius: 2.0,
-            fill: Some(level_color(a.level)),
-            stroke: None,
-        });
-        let km = crate::weather::distance_km(a.lat, a.lon, l.latitude, l.longitude);
-        let ago = unix.map(|u| format::relative(a.time - u)).unwrap_or_default();
-        let title = if a.tsunami { format!("Tsunami · {}", a.title) } else { a.title.clone() };
-        b.text(Rect::new(r.x + 22.0, r.y + 6.0, r.w - 30.0, 20.0), title, TextStyle::SMALL, TEXT);
-        b.text(
-            Rect::new(r.x + 22.0, r.y + 25.0, r.w - 30.0, 16.0),
-            format!("{km:.0} km · {ago} · {}", a.source),
-            TextStyle { size: 11.0, weight: Weight::Regular, mono: true },
-            LABEL,
-        );
-        b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(a.url.clone())), label: format!("Open report: {}", a.title) });
-        y += 56.0;
+        y = weather_alert(b, m, &a, Rect::new(b.x, y, b.w, 36.0)) + 6.0;
     }
-    // Where the data comes from and how fresh it is.
-    let age = m.weather.as_ref().and_then(|w| unix.map(|u| u - w.fetched));
+    let line = weather_source(m);
+    b.text(
+        Rect::new(b.x, y + 2.0, b.w, 16.0),
+        line,
+        TextStyle { size: 10.0, weight: Weight::Regular, mono: true },
+        if offline { MEDIA } else { LABEL },
+    );
+    y + 18.0
+}
+
+/// The sky now: a large icon, the temperature and what it is like, with the
+/// day's range and the chance of rain on the right. No card.
+fn weather_now(b: &mut B, w: &crate::weather::Weather, x: f32, y: f32, width: f32) -> f32 {
+    b.icon(condition_icon(w.condition), Rect::new(x, y + 6.0, 40.0, 40.0), PORTS);
+    b.text(
+        Rect::new(x + 52.0, y - 2.0, 110.0, 50.0),
+        format!("{:.0}°", w.temp_c),
+        TextStyle { size: 42.0, weight: Weight::Semibold, mono: false },
+        TEXT,
+    );
+    b.text(Rect::new(x + 52.0, y + 46.0, width - 52.0, 18.0), w.description.clone(), TextStyle::BODY_MEDIUM, TEXT_2);
+    let right = Rect::new(x + width * 0.5, y + 8.0, width * 0.5, 16.0);
+    if let (Some(lo), Some(hi)) = (w.min_c, w.max_c) {
+        b.text_end(right, format!("↓{lo:.0}°  ↑{hi:.0}°"), TextStyle::MONO_SMALL, TEXT_2);
+    }
+    if let Some(r) = w.rain_chance {
+        let c = if r >= 60 { PORTS } else { TEXT_2 };
+        b.text_end(Rect::new(right.x, right.y + 20.0, right.w, 16.0), format!("rain {r}%"), TextStyle::MONO_SMALL, c);
+    }
+    y + 64.0
+}
+
+/// Feels-like, humidity and wind: an icon and a value each, in a line.
+fn weather_readings(b: &mut B, w: &crate::weather::Weather, x: f32, y: f32, width: f32) -> f32 {
+    let stats: Vec<(Icon, String)> = [
+        w.feels_c.map(|f| (Icon::Thermo, format!("feels {f:.0}°"))),
+        w.humidity.map(|h| (Icon::Drop, format!("{h}%"))),
+        w.wind_kmh.map(|k| (Icon::Wind, format!("{k:.0} km/h"))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if stats.is_empty() {
+        return y;
+    }
+    let sw = width / stats.len() as f32;
+    for (i, (icon, v)) in stats.into_iter().enumerate() {
+        let sx = x + i as f32 * sw;
+        b.icon(icon, Rect::new(sx, y + 2.0, 14.0, 14.0), PORTS);
+        b.text(Rect::new(sx + 20.0, y, sw - 22.0, 18.0), v, TextStyle::SMALL, TEXT);
+    }
+    y + 18.0
+}
+
+/// The next hours as plain columns: time, sky, temperature.
+fn weather_hours(b: &mut B, w: &crate::weather::Weather, x: f32, y: f32, width: f32, h: f32) -> f32 {
+    let n = w.next.len().min(4);
+    if n == 0 {
+        return y;
+    }
+    let cw = width / n as f32;
+    for (i, slot) in w.next.iter().take(n).enumerate() {
+        let cx = x + i as f32 * cw;
+        let center = |t: String, yy: f32, hh: f32, style: TextStyle, c: Color| Prim::Text {
+            rect: Rect::new(cx, yy, cw, hh),
+            text: t,
+            style,
+            color: c,
+            align: Align::Center,
+            wrap: false,
+        };
+        b.prims.push(center(slot.time.clone(), y, 14.0, TextStyle::LABEL, LABEL));
+        b.icon(condition_icon(slot.condition), Rect::new(cx + cw / 2.0 - 9.0, y + 18.0, 18.0, 18.0), PORTS);
+        b.prims.push(center(
+            format!("{:.0}°", slot.temp_c),
+            y + h - 20.0,
+            20.0,
+            TextStyle { size: 14.0, weight: Weight::Medium, mono: false },
+            TEXT,
+        ));
+    }
+    y + h
+}
+
+/// One warning: a coloured bar, the title and how far and how long ago.
+fn weather_alert(b: &mut B, m: &Model, a: &crate::weather::Alert, r: Rect) -> f32 {
+    let l = &m.config.location;
+    b.prims.push(Prim::RoundRect {
+        rect: Rect::new(r.x, r.y + 4.0, 3.0, r.h - 8.0),
+        radius: 1.5,
+        fill: Some(level_color(a.level)),
+        stroke: None,
+    });
+    let km = crate::weather::distance_km(a.lat, a.lon, l.latitude, l.longitude);
+    let ago = m.unix_now().map(|u| format::relative(a.time - u)).unwrap_or_default();
+    let title = if a.tsunami { format!("Tsunami · {}", a.title) } else { a.title.clone() };
+    b.text(Rect::new(r.x + 12.0, r.y, r.w - 12.0, 18.0), title, TextStyle::SMALL, TEXT);
+    b.text(
+        Rect::new(r.x + 12.0, r.y + 18.0, r.w - 12.0, 14.0),
+        format!("{km:.0} km · {ago} · {}", a.source),
+        TextStyle { size: 10.5, weight: Weight::Regular, mono: true },
+        LABEL,
+    );
+    b.hits.push(Hit { rect: r, kind: HitKind::Click(Action::OpenUrl(a.url.clone())), label: format!("Open report: {}", a.title) });
+    r.bottom()
+}
+
+/// Where the weather comes from and how fresh it is.
+fn weather_source(m: &Model) -> String {
+    let offline = m.online == Some(false);
+    let age = m.weather.as_ref().and_then(|w| m.unix_now().map(|u| u - w.fetched));
     let fresh = match age {
         _ if offline => "offline".to_string(),
         Some(a) if a < 90 => "updated just now".to_string(),
         Some(a) => format!("updated {}", format::relative(-a)),
         None => String::new(),
     };
-    let line = ["Open-Meteo · GDACS · USGS".to_string(), fresh].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
-    b.text(
-        Rect::new(b.x, y + 2.0, b.w, 16.0),
-        line,
-        TextStyle { size: 10.5, weight: Weight::Regular, mono: true },
-        if offline { MEDIA } else { LABEL },
-    );
-    (y + 18.0).max(left_end)
+    ["Open-Meteo · GDACS · USGS".to_string(), fresh].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
 }
 
 /// Points for a static ring arc (used by tests and fallback renderers).
@@ -2747,6 +2884,12 @@ mod tests {
         assert_eq!(rest.hits[0].kind, HitKind::Click(Action::ToggleSlips));
     }
 
+    /// Rows in a slip's tab rail.
+    fn tab_rows(s: &Scene) -> f32 {
+        let tabs = s.hits.iter().filter(|h| matches!(h.kind, HitKind::Click(Action::SelectSlip(_)))).count();
+        tabs.div_ceil(14) as f32
+    }
+
     #[test]
     fn every_scene_fits_its_bounds_and_the_window_box() {
         for (name, s) in all_scenes() {
@@ -2777,8 +2920,8 @@ mod tests {
         for (name, s) in slips {
             let side = name.ends_with("Left") || name.ends_with("Right");
             if side {
-                // Height above the one row of tabs.
-                let h = s.size.h - TAB_ROW_H - 8.0;
+                // Height above the rows of tabs.
+                let h = s.size.h - tab_rows(s) * TAB_ROW_H - 8.0;
                 assert!((SLIP_MIN_V..=SLIP_MAX_V).contains(&h), "{name}: {h}");
                 assert_eq!(s.size.w, SLIP_W, "{name}");
             } else {
@@ -2796,7 +2939,7 @@ mod tests {
             if !matches!(s.kind, SceneKind::Slip(_)) || !(name.ends_with("Left") || name.ends_with("Right")) {
                 continue;
             }
-            let slip_h = s.size.h - TAB_ROW_H - 8.0;
+            let slip_h = s.size.h - tab_rows(&s) * TAB_ROW_H - 8.0;
             for p in &s.prims {
                 let r = match p {
                     Prim::RoundRect { rect, .. } | Prim::Text { rect, .. } | Prim::Image { rect, .. } | Prim::Gradient { rect, .. } => {
@@ -2899,6 +3042,26 @@ mod tests {
                 assert!(tabs[0].rect.y < 20.0, "{edge:?}: tabs in the strip's header row");
             }
         }
+    }
+
+    #[test]
+    fn the_glance_lists_what_matters_along_the_edge() {
+        let mut m = Model::new(Config::default(), 3, 0);
+        m.update(0, Event::SetModule(ModuleId::Prayer, true));
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 600.0, utc_offset_min: 420, unix: 1_792_911_900 });
+        m.update(0, Event::TodoAdded("Buy rice".into()));
+        m.state = IslandState::Tag;
+        m.hover_tag = true;
+        let row = build(&m, Edge::Top, &ApproxMeasure);
+        let col = build(&m, Edge::Left, &ApproxMeasure);
+        for s in [&row, &col] {
+            assert_eq!(s.kind, SceneKind::Tag);
+            let opens: Vec<_> =
+                s.hits.iter().filter_map(|h| if let HitKind::Click(Action::SelectSlip(m)) = h.kind { Some(m) } else { None }).collect();
+            assert_eq!(opens, vec![ModuleId::Prayer, ModuleId::Todo]);
+        }
+        assert!(row.size.w > 2.0 * row.size.h, "docked top: it widens");
+        assert!(col.size.h > 2.0 * 40.0 - 1.0 && col.size.w < 320.0, "docked left: it grows downwards");
     }
 
     #[test]

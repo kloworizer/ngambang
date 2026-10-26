@@ -69,6 +69,10 @@ pub enum Request {
     Clear {
         id: String,
     },
+    /// Keep a quick note (`ngambang note "…"`).
+    Note {
+        text: String,
+    },
     Ping,
 }
 
@@ -87,7 +91,7 @@ impl Request {
         match self {
             Request::Notify { id, title, .. } => Some(id.clone().unwrap_or_else(|| crate::format::slug(title))),
             Request::Done { id, .. } | Request::Clear { id } => Some(crate::format::slug(id)),
-            Request::Ping => None,
+            Request::Ping | Request::Note { .. } => None,
         }
     }
 }
@@ -169,6 +173,12 @@ fn sanitise(req: &mut Request) -> Result<(), String> {
                 return Err("id is empty".into());
             }
             *id = crate::format::slug(id);
+        }
+        Request::Note { text } => {
+            *text = clean_text(text, MAX_BODY);
+            if text.is_empty() {
+                return Err("note is empty".into());
+            }
         }
         Request::Ping => {}
     }

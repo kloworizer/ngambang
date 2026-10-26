@@ -17,6 +17,8 @@ pub const WM_APP_APPBAR: u32 = WM_APP + 3;
 pub const WM_APP_FOREGROUND: u32 = WM_APP + 4;
 /// The Settings window saved config.toml.
 pub const WM_APP_SETTINGS: u32 = WM_APP + 5;
+/// A network interface changed (from the IP helper's callback).
+pub const WM_APP_NET: u32 = WM_APP + 6;
 
 /// Monotonic milliseconds.
 pub fn now_ms() -> u64 {

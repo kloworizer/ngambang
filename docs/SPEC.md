@@ -66,6 +66,23 @@ it drifts by more than 20 s (checked every 60 s). Markets: quotes every
 5 min in the background when `finance.price_alerts` is on (60 s while the
 slip is open), headlines every 15 min from Yahoo's search endpoint.
 
+**0.1.9 notes.** New modules `notes`, `power`, `launch` (17 in all; side
+slips wrap the tab rail to two rows). Hijri dates use the tabular calendar
+shifted by `prayer.hijri_adjust`; Ramadan adds imsak to the prayer moments.
+Focus rounds alternate with breaks (`timer.break_min`, `long_break_min`,
+`long_every`) and drive `Windows.UI.Shell.FocusSessionManager` when
+`timer.focus_assist`. The clipboard history (20 unpinned + pinned, pinned
+saved in state.json) reuses the private-format checks; pasting writes the
+clipboard (marked as ours) and sends Ctrl+V to the foreground window.
+Battery comes from `GetSystemPowerStatus` on `WM_POWERBROADCAST`; the
+network from `NotifyIpInterfaceChange` plus `GetAdaptersAddresses` (a VPN is
+a PPP adapter or one whose name says so). Downloads watch the Downloads
+folder for browser temp files (.crdownload/.part/…) and poll their size
+once a second only while one exists. Quick launch pins arrive by
+`WM_DROPFILES`; icons via `SHGetFileInfo`. Watchlist items take `above` /
+`below`; calendar events carry a `link` from X-GOOGLE-CONFERENCE,
+LOCATION or DESCRIPTION.
+
 ### 1.2 Deliberately *not* in v0.1
 
 | Feature | Reason | Target |

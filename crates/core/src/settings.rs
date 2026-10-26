@@ -35,6 +35,17 @@ pub struct Form {
     pub prayer_method: crate::prayer::Method,
     pub prayer_asr: crate::prayer::Asr,
     pub prayer_reminder: String,
+    /// Days added to the Hijri date, −2…2.
+    pub hijri_adjust: String,
+    pub break_min: String,
+    pub long_break_min: String,
+    pub long_every: String,
+    pub focus_assist: bool,
+    /// Power plan GUIDs on battery / plugged in, or empty.
+    pub battery_plan: String,
+    pub plugged_plan: String,
+    pub low_battery: String,
+    pub network_tags: bool,
     pub update_check: bool,
     pub weather_alerts: bool,
     pub quake_radius_km: String,
@@ -65,6 +76,12 @@ pub fn feeds_literal(feeds: &[CalendarFeed]) -> String {
             inline_table(&[("name", &name), ("url", f.url.trim()), ("color", &color)])
         })
         .collect();
+    format!("[{}]", items.join(", "))
+}
+
+/// The `[launch] items` array as a TOML literal.
+pub fn launch_literal(items: &[crate::config::LaunchItem]) -> String {
+    let items: Vec<String> = items.iter().map(|i| inline_table(&[("name", i.name.trim()), ("path", i.path.trim())])).collect();
     format!("[{}]", items.join(", "))
 }
 
@@ -117,6 +134,15 @@ impl Form {
             prayer_method: c.prayer.method,
             prayer_asr: c.prayer.asr,
             prayer_reminder: c.prayer.reminder_min.to_string(),
+            hijri_adjust: c.prayer.hijri_adjust.to_string(),
+            break_min: c.timer.break_min.to_string(),
+            long_break_min: c.timer.long_break_min.to_string(),
+            long_every: c.timer.long_every.to_string(),
+            focus_assist: c.timer.focus_assist,
+            battery_plan: c.power.battery_plan.clone(),
+            plugged_plan: c.power.plugged_plan.clone(),
+            low_battery: c.power.low_battery.to_string(),
+            network_tags: c.power.network_tags,
             update_check: c.update.auto_check,
             weather_alerts: c.weather.alerts,
             quake_radius_km: c.weather.quake_radius_km.to_string(),
@@ -169,6 +195,19 @@ impl Form {
         let lat = coord("Latitude", &self.prayer_lat, 90.0)?;
         let lon = coord("Longitude", &self.prayer_lon, 180.0)?;
         let reminder = number("Prayer reminder", &self.prayer_reminder, 0, 60)?;
+        let hijri: i32 = self.hijri_adjust.trim().parse().map_err(|_| "Hijri date: enter a number of days from -2 to 2".to_string())?;
+        if !(-2..=2).contains(&hijri) {
+            return Err("Hijri date: use a number of days from -2 to 2".into());
+        }
+        let break_min = number("Break", &self.break_min, 0, 60)?;
+        let long_break = number("Long break", &self.long_break_min, 0, 120)?;
+        let long_every = number("Long break every", &self.long_every, 1, 12)?;
+        let low_battery = number("Low battery", &self.low_battery, 5, 50)?;
+        for (field, plan) in [("Battery plan", &self.battery_plan), ("Plugged-in plan", &self.plugged_plan)] {
+            if !plan.is_empty() && crate::format::parse_guid(plan).is_none() {
+                return Err(format!("{field}: pick one from the list"));
+            }
+        }
         let city = self.prayer_city.trim();
         let radius = number("Earthquake radius", &self.quake_radius_km, 10, 5000)?;
         let cal_reminder = number("Event reminder", &self.calendar_reminder, 0, 120)?;
@@ -188,7 +227,17 @@ impl Form {
             .iter()
             .filter(|w| !w.symbol.trim().is_empty())
             .take(20)
-            .map(|w| inline_table(&[("symbol", w.symbol.trim()), ("name", w.name.trim())]))
+            .map(|w| {
+                // Price levels are numbers, written after the strings.
+                let mut t = inline_table(&[("symbol", w.symbol.trim()), ("name", w.name.trim())]);
+                for (k, v) in [("above", w.above), ("below", w.below)] {
+                    if let Some(v) = v.filter(|v| v.is_finite() && *v > 0.0) {
+                        t.truncate(t.len() - 2);
+                        t += &format!(", {k} = {v:?} }}");
+                    }
+                }
+                t
+            })
             .collect();
         // The default order is written as [] so the file stays short.
         let order: Vec<String> =
@@ -219,6 +268,15 @@ impl Form {
             ("prayer", "method", toml_str(self.prayer_method.key())),
             ("prayer", "asr", toml_str(if self.prayer_asr == crate::prayer::Asr::Hanafi { "hanafi" } else { "standard" })),
             ("prayer", "reminder_min", reminder.to_string()),
+            ("prayer", "hijri_adjust", hijri.to_string()),
+            ("timer", "break_min", break_min.to_string()),
+            ("timer", "long_break_min", long_break.to_string()),
+            ("timer", "long_every", long_every.to_string()),
+            ("timer", "focus_assist", b(self.focus_assist)),
+            ("power", "battery_plan", toml_str(&self.battery_plan)),
+            ("power", "plugged_plan", toml_str(&self.plugged_plan)),
+            ("power", "low_battery", low_battery.to_string()),
+            ("power", "network_tags", b(self.network_tags)),
             ("update", "auto_check", b(self.update_check)),
             ("weather", "alerts", b(self.weather_alerts)),
             ("weather", "quake_radius_km", radius.to_string()),
@@ -280,6 +338,11 @@ mod tests {
         form.weather_alerts = false;
         form.quake_radius_km = "500".into();
         form.style = crate::config::Style::Notch;
+        form.hijri_adjust = "-1".into();
+        form.break_min = "10".into();
+        form.focus_assist = false;
+        form.battery_plan = "{a1841308-3541-4fab-bc81-f71556f20b4a}".into();
+        form.low_battery = "15".into();
         form.move_in_fullscreen = false;
         form.price_alerts = false;
         form.move_pct = "2,5".into();
@@ -303,6 +366,11 @@ mod tests {
         assert!(!c.weather.alerts);
         assert_eq!(c.weather.quake_radius_km, 500);
         assert_eq!(c.dock.style, crate::config::Style::Notch);
+        assert_eq!(c.prayer.hijri_adjust, -1);
+        assert_eq!(c.timer.break_min, 10);
+        assert!(!c.timer.focus_assist);
+        assert_eq!(c.power.battery_plan, "{a1841308-3541-4fab-bc81-f71556f20b4a}");
+        assert_eq!(c.power.low_battery, 15);
         assert_eq!(c.dock.edge(), Edge::Top);
         assert!(!c.dock.move_in_fullscreen);
         assert!(!c.finance.price_alerts && !c.finance.news);
@@ -327,8 +395,8 @@ mod tests {
         ];
         form.calendar_days = "10".into();
         form.watchlist = vec![
-            WatchItem { symbol: "BBCA.JK".into(), name: "Bank Central Asia".into() },
-            WatchItem { symbol: "^JKSE".into(), name: "".into() },
+            WatchItem { symbol: "BBCA.JK".into(), name: "Bank Central Asia".into(), below: Some(9000.0), ..Default::default() },
+            WatchItem { symbol: "^JKSE".into(), name: "".into(), ..Default::default() },
         ];
         let text = apply(DEFAULT_TOML, &form.edits().unwrap());
         let (c, w) = Config::parse(&text);
@@ -342,6 +410,8 @@ mod tests {
         assert_eq!(c.calendar.days, 10);
         assert_eq!(c.finance.watchlist[0].symbol, "BBCA.JK");
         assert_eq!(c.finance.watchlist.len(), 2);
+        assert_eq!(c.finance.watchlist[0].below, Some(9000.0), "price levels saved");
+        assert_eq!(c.finance.watchlist[1].below, None);
         // Saving again keeps the file valid (no '#' mistaken for a comment).
         let again = apply(&text, &Form::from_config(&c, false).edits().unwrap());
         assert_eq!(Config::parse(&again).0, c);

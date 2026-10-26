@@ -31,6 +31,10 @@ enum Msg {
     SetApp(u32, f32),
     SetAppMute(u32, bool),
     MuteMic,
+    /// Flip the default microphone's mute and report it.
+    ToggleMic,
+    /// Report whether the default microphone is muted.
+    QueryMic,
     Peaks(bool),
     Mixer(bool),
     Stop,
@@ -98,6 +102,8 @@ impl AudioWorker {
                     Msg::SetApp(pid, v) => st.for_pid(pid, |vol| unsafe { vol.SetMasterVolume(v, &CONTEXT) }),
                     Msg::SetAppMute(pid, m) => st.for_pid(pid, |vol| unsafe { vol.SetMute(m, &CONTEXT) }),
                     Msg::MuteMic => st.mute_mic(),
+                    Msg::ToggleMic => st.mic_muted().and_then(|m| st.set_mic(!m)).map(|m| bus.send(Event::MicMuted(m))),
+                    Msg::QueryMic => st.mic_muted().map(|m| bus.send(Event::MicMuted(m))),
                     Msg::Peaks(on) => {
                         peaks = on;
                         Ok(())
@@ -128,6 +134,14 @@ impl AudioWorker {
     pub fn set_app_mute(&self, pid: u32, m: bool) {
         let _ = self.tx.send(Msg::SetAppMute(pid, m));
     }
+    pub fn toggle_mic(&self) {
+        let _ = self.tx.send(Msg::ToggleMic);
+    }
+
+    pub fn query_mic(&self) {
+        let _ = self.tx.send(Msg::QueryMic);
+    }
+
     pub fn mute_mic(&self) {
         let _ = self.tx.send(Msg::MuteMic);
     }
@@ -404,15 +418,28 @@ impl State {
     }
 
     fn mute_mic(&self) -> Result<()> {
+        self.set_mic(true).map(|_| ())
+    }
+
+    /// Mute or unmute the default microphones (console and communications).
+    fn set_mic(&self, muted: bool) -> Result<bool> {
         unsafe {
             for role in [eConsole, eCommunications] {
                 if let Ok(dev) = self.enumerator.GetDefaultAudioEndpoint(eCapture, role) {
                     let ep: IAudioEndpointVolume = dev.Activate(CLSCTX_ALL, None)?;
-                    ep.SetMute(true, &CONTEXT)?;
+                    ep.SetMute(muted, &CONTEXT)?;
                 }
             }
         }
-        Ok(())
+        Ok(muted)
+    }
+
+    fn mic_muted(&self) -> Result<bool> {
+        unsafe {
+            let dev = self.enumerator.GetDefaultAudioEndpoint(eCapture, eCommunications)?;
+            let ep: IAudioEndpointVolume = dev.Activate(CLSCTX_ALL, None)?;
+            Ok(ep.GetMute()?.as_bool())
+        }
     }
 }
 

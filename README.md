@@ -23,6 +23,11 @@ mic/camera alert.
   the top of the screen that you slide left or right. The notch shows the
   song that is playing, or turns through the weather, your watchlist, your
   next task, event and prayer time.
+- **More in 0.1.9:** Ramadan imsak/buka countdowns, Hijri date and qibla;
+  focus rounds with breaks and Do not disturb; clipboard history; quick
+  notes (`ngambang note "…"`); battery, network/VPN and power plans; download
+  progress; price-level alerts; meeting Join and mic toggle; quick launch by
+  dropping apps on the island.
 - **Compact on the top or bottom edge.** Docked there, slips are low wide
   strips (at most 180 px tall).
 
@@ -128,7 +133,7 @@ listed in the sidebar (`Ctrl+Tab` moves to the next one):
 | Page | Options |
 |------|---------|
 | General | Start with Windows · reduce motion · hide from screenshots and screen sharing · sink to a thin line in fullscreen apps · move to another display during fullscreen apps · hotkey · look (orb or notch) · screen edge · monitor · position along the edge |
-| Modules | Turn each of the fourteen modules on or off and set the order of their tabs |
+| Modules | Turn each of the seventeen modules on or off and set the order of their tabs |
 | Media & clipboard | Pop-up for new tracks · volume step · clipboard tags |
 | Focus & commands | Timer presets · custom round length · long-command threshold |
 | Games | Break reminder · ping host · power plan to use while gaming (picked from your plans) |

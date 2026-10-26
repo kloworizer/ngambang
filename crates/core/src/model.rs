@@ -219,6 +219,76 @@ pub struct ClipState {
     pub unix_at: i64,
 }
 
+/// One copied text in the clipboard history.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipEntry {
+    pub id: u64,
+    pub text: String,
+    /// Unix seconds when it was copied.
+    pub at: i64,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+/// How many unpinned clipboard entries are kept.
+pub const CLIP_HISTORY: usize = 20;
+
+/// A quick note.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Note {
+    pub id: u64,
+    pub text: String,
+    /// Unix seconds when it was written.
+    pub at: i64,
+}
+
+pub const MAX_NOTES: usize = 50;
+
+/// Battery and charger.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PowerState {
+    /// None without a battery (a desktop).
+    pub percent: Option<u8>,
+    pub on_ac: bool,
+    pub saver: bool,
+    /// Estimated seconds left on battery.
+    pub secs_left: Option<u32>,
+}
+
+/// The connection.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NetState {
+    pub online: bool,
+    /// The VPN adapter's name while one is connected.
+    pub vpn: Option<String>,
+    /// The Wi-Fi network's name.
+    pub wifi: Option<String>,
+}
+
+/// A download in progress (a browser's temporary file growing).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Download {
+    /// The final file name (without .crdownload / .part).
+    pub name: String,
+    pub bytes: u64,
+    pub started_ms: u64,
+}
+
+/// What a slip's text field is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputFor {
+    Todo,
+    /// Filter the clipboard history.
+    ClipSearch,
+    Note,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Input {
+    pub to: InputFor,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoItem {
     pub id: u64,
@@ -314,6 +384,8 @@ impl PlayLog {
 pub enum CaptureKind {
     Screenshot,
     Clip,
+    /// A finished download.
+    Download,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -393,6 +465,9 @@ pub enum Icon {
     Drop,
     Wind,
     Thermo,
+    Pencil,
+    Battery,
+    Wifi,
 }
 
 /// Something the user clicked.
@@ -417,6 +492,8 @@ pub enum Action {
     TimerResume,
     TimerAdd(u32),
     TimerStop,
+    /// End the break early.
+    TimerSkipBreak,
     /// Make the custom round shorter (-1) or longer (+1).
     TimerCustom(i32),
     BreakSnooze,
@@ -437,6 +514,21 @@ pub enum Action {
     TodoClearDone,
     /// Open the Settings window at a page (by module).
     OpenSettings(ModuleId),
+    /// Paste (or copy, while typing) a clipboard history entry.
+    ClipPaste(u64),
+    ClipPin(u64),
+    ClipRemove(u64),
+    ClipSearch,
+    ClipClear,
+    NoteAdd,
+    NoteCopy(u64),
+    NoteRemove(u64),
+    SetPowerPlan(usize),
+    /// Open a Quick launch item, or remove it while editing.
+    Launch(usize),
+    LaunchRemove(usize),
+    LaunchEdit,
+    MicToggle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -502,6 +594,25 @@ pub enum Event {
         text: String,
         unix_now: i64,
     },
+    /// Pinned clipboard entries and notes, restored at start.
+    ClipPins(Vec<ClipEntry>),
+    Notes(Vec<Note>),
+    Power(PowerState),
+    Network(NetState),
+    /// Power plans (GUID, name) and the active one.
+    PowerPlans(Vec<(String, String)>, Option<String>),
+    /// Files dropped on the island.
+    Dropped(Vec<String>),
+    /// An icon for a Quick launch item, by path.
+    LaunchIcon(String, Art),
+    /// A download started or grew (`done` = None) or finished (the final path).
+    Download {
+        name: String,
+        bytes: u64,
+        done: Option<String>,
+    },
+    /// The default microphone is muted or not.
+    MicMuted(bool),
     /// `exe` is the full executable path of the fullscreen app.
     Fullscreen {
         active: bool,
@@ -603,6 +714,16 @@ pub enum Effect {
     OpenSettings(ModuleId),
     /// Write one value to config.toml: table, key, TOML literal.
     SaveValue(&'static str, &'static str, String),
+    /// Windows' focus session (Do not disturb) on or off.
+    FocusSession(bool),
+    /// Put text on the clipboard and, when `paste`, paste it into the
+    /// window that has the keyboard.
+    PasteText(String, bool),
+    SaveClipPins,
+    SaveNotes,
+    SetPowerPlan(String),
+    /// Flip the default microphone's mute.
+    MicToggle,
 }
 
 /// The local wall clock, anchored to the monotonic clock.
@@ -663,7 +784,7 @@ pub struct Model {
     pub online: Option<bool>,
     pub todos: Vec<TodoItem>,
     /// The "Add task" field while it is open.
-    pub todo_input: Option<String>,
+    pub input: Option<Input>,
     pub calendar: Vec<crate::calendar::CalEvent>,
     /// Reminders already shown: (start, title, lead in seconds).
     calendar_reminded: BTreeSet<(i64, String, i64)>,
@@ -681,6 +802,29 @@ pub struct Model {
     /// Which glance the notch shows (counts up; taken modulo the glances).
     pub carousel: usize,
     carousel_armed: bool,
+    /// The running timer is a break, not a focus round.
+    pub on_break: bool,
+    /// Focus rounds finished today.
+    pub focus_rounds: u32,
+    /// The last round's length, offered again after a break.
+    focus_last_min: u32,
+    /// Windows' focus session is on (we turned it on).
+    focus_session_on: bool,
+    pub clip_history: Vec<ClipEntry>,
+    pub notes: Vec<Note>,
+    pub power: Option<PowerState>,
+    pub net: Option<NetState>,
+    pub power_plans: Vec<(String, String)>,
+    pub active_plan: Option<String>,
+    /// Battery warnings already given this discharge (the levels).
+    battery_warned: BTreeSet<u8>,
+    pub launch_icons: BTreeMap<String, Art>,
+    pub launch_edit: bool,
+    pub downloads: Vec<Download>,
+    pub mic_muted: Option<bool>,
+    /// Price levels already crossed, per symbol: (above, below).
+    levels_hit: BTreeMap<String, (bool, bool)>,
+    next_id: u64,
 }
 
 /// A media session (SMTC app id) and a mixer row belong to the same app.
@@ -732,7 +876,7 @@ impl Model {
             alerts_seen: BTreeSet::new(),
             online: None,
             todos: Vec::new(),
-            todo_input: None,
+            input: None,
             calendar: Vec::new(),
             calendar_reminded: BTreeSet::new(),
             prayer_announced: BTreeSet::new(),
@@ -744,6 +888,23 @@ impl Model {
             rng: seed | 1,
             carousel: 0,
             carousel_armed: false,
+            on_break: false,
+            focus_rounds: 0,
+            focus_last_min: 25,
+            focus_session_on: false,
+            clip_history: Vec::new(),
+            notes: Vec::new(),
+            power: None,
+            net: None,
+            power_plans: Vec::new(),
+            active_plan: None,
+            battery_warned: BTreeSet::new(),
+            launch_icons: BTreeMap::new(),
+            launch_edit: false,
+            downloads: Vec::new(),
+            mic_muted: None,
+            levels_hit: BTreeMap::new(),
+            next_id: 1,
         };
         m.state = m.rest_state();
         m
@@ -800,8 +961,11 @@ impl Model {
                     ModuleId::Media => return None,
                     ModuleId::Commands if !self.jobs.is_empty() => 7,
                     ModuleId::Commands => return None,
+                    ModuleId::Clipboard if self.typing(InputFor::ClipSearch).is_some() => 0,
                     ModuleId::Clipboard if self.clip.is_some() => 8,
+                    ModuleId::Clipboard if !self.clip_history.is_empty() => 12,
                     ModuleId::Clipboard => return None,
+                    ModuleId::Captures if !self.downloads.is_empty() => 4,
                     ModuleId::Captures if !self.captures.is_empty() => 9,
                     ModuleId::Captures => return None,
                     ModuleId::Prayer if self.prayer_soon(15.0) => 3,
@@ -810,13 +974,22 @@ impl Model {
                     ModuleId::Weather if self.urgent_alert() => 0,
                     ModuleId::Weather if self.weather.is_some() || !self.alerts.is_empty() || self.online == Some(false) => 10,
                     ModuleId::Weather => return None,
-                    ModuleId::Todo if self.todo_input.is_some() => 0,
+                    ModuleId::Todo if self.typing(InputFor::Todo).is_some() => 0,
                     ModuleId::Todo if self.todos.iter().any(|t| !t.done) => 8,
                     ModuleId::Todo => 13,
                     ModuleId::Calendar if self.next_event_within(15 * 60).is_some() => 2,
                     ModuleId::Calendar if !self.calendar.is_empty() => 9,
                     ModuleId::Calendar => 14,
                     ModuleId::Finance => 14,
+                    ModuleId::Notes if self.typing(InputFor::Note).is_some() => 0,
+                    ModuleId::Notes => 13,
+                    ModuleId::Power
+                        if self.power.is_some_and(|p| !p.on_ac && p.percent.is_some_and(|v| v <= self.config.power.low_battery as u8)) =>
+                    {
+                        3
+                    }
+                    ModuleId::Power => 12,
+                    ModuleId::Launch => 14,
                     ModuleId::Game if self.playlog.total() > 0 => 12,
                     ModuleId::Game => return None,
                     // Always available: mixer, ports, timer.
@@ -838,7 +1011,17 @@ impl Model {
     }
 
     fn quiet(&self) -> bool {
-        (self.fullscreen != Fullscreen::None && !self.displaced) || (self.config.timer.quiet_while_running && self.timer.is_running())
+        (self.fullscreen != Fullscreen::None && !self.displaced)
+            || (self.config.timer.quiet_while_running && self.timer.is_running() && !self.on_break)
+    }
+
+    /// Windows' Do not disturb follows focus rounds (when asked to).
+    fn focus_session(&mut self, on: bool, fx: &mut Vec<Effect>) {
+        let on = on && self.config.timer.focus_assist;
+        if on != self.focus_session_on {
+            self.focus_session_on = on;
+            fx.push(Effect::FocusSession(on));
+        }
     }
 
     fn tag_allowed(&self, priority: u8) -> bool {
@@ -877,7 +1060,7 @@ impl Model {
         }
         if self.state == IslandState::Slips {
             fx.push(Effect::KillTimer(TimerId::Collapse));
-            self.todo_input = None;
+            self.input = None;
             if self.keyboard_open {
                 self.keyboard_open = false;
                 fx.push(Effect::ReleaseFocus);
@@ -1001,8 +1184,33 @@ impl Model {
             Event::Timer(TimerId::FocusDone) => {
                 if self.timer.is_running() {
                     self.timer = FocusTimer::Idle;
-                    let t = self.tag("Focus round done".into(), theme::GAME, Icon::Clock, 2, TAG_FAIL_MS);
-                    self.push_tag(t, fx);
+                    self.focus_session(false, fx);
+                    let t = &self.config.timer;
+                    if self.on_break {
+                        // Break over: offer the next round.
+                        self.on_break = false;
+                        let min = self.focus_last_min.max(1);
+                        let mut tag = self.tag("Break over · ready to focus".into(), theme::GAME, Icon::Clock, 2, 15_000);
+                        tag.action = Some((format!("{min} min"), Action::TimerStart(min)));
+                        self.push_tag(tag, fx);
+                    } else {
+                        self.focus_rounds += 1;
+                        let long = self.focus_rounds % t.long_every.max(1) == 0;
+                        let pause = if long { t.long_break_min } else { t.break_min };
+                        let text = if pause > 0 {
+                            format!("Round {} done · {pause} min break", self.focus_rounds)
+                        } else {
+                            format!("Round {} done", self.focus_rounds)
+                        };
+                        let tag = self.tag(text, theme::GAME, Icon::Clock, 2, TAG_FAIL_MS);
+                        self.push_tag(tag, fx);
+                        if pause > 0 {
+                            let total = pause as u64 * 60_000;
+                            self.on_break = true;
+                            self.timer = FocusTimer::Running { ends_ms: self.now_ms + total, total_ms: total };
+                            fx.push(Effect::SetTimer(TimerId::FocusDone, total));
+                        }
+                    }
                 }
             }
             Event::Timer(TimerId::Break) => {
@@ -1098,15 +1306,15 @@ impl Model {
                     }
                 }
             }
-            Event::Key(Key::Escape) if self.todo_input.is_some() => self.end_input(false, fx),
-            Event::Key(Key::Enter) if self.todo_input.is_some() => self.end_input(true, fx),
+            Event::Key(Key::Escape) if self.input.is_some() => self.end_input(false, fx),
+            Event::Key(Key::Enter) if self.input.is_some() => self.end_input(true, fx),
             Event::Key(Key::Backspace) => {
-                if let Some(t) = self.todo_input.as_mut() {
-                    t.pop();
+                if let Some(i) = self.input.as_mut() {
+                    i.text.pop();
                 }
             }
             Event::Key(Key::Enter) => {}
-            Event::Key(_) if self.todo_input.is_some() => {}
+            Event::Key(_) if self.input.is_some() => {}
             Event::Key(Key::Escape) => {
                 if self.state == IslandState::Slips {
                     self.settle(fx);
@@ -1115,7 +1323,7 @@ impl Model {
             Event::Key(Key::Up) => self.flip(-1, fx),
             Event::Key(Key::Down) => self.flip(1, fx),
             Event::Text(text) => {
-                if let Some(t) = self.todo_input.as_mut() {
+                if let Some(t) = self.input.as_mut().map(|i| &mut i.text) {
                     // One line, printable characters, a sensible length.
                     let room = 200usize.saturating_sub(t.chars().count());
                     t.extend(text.chars().map(|c| if c == '\n' || c == '\t' { ' ' } else { c }).filter(|c| !c.is_control()).take(room));
@@ -1130,6 +1338,7 @@ impl Model {
             Event::Quotes(list) => {
                 if self.enabled(ModuleId::Finance) {
                     self.price_moves(&list, fx);
+                    self.price_levels(&list, fx);
                     self.quotes = list;
                 }
             }
@@ -1181,7 +1390,7 @@ impl Model {
             }
             Event::FocusLost => {
                 // Clicking away keeps what was typed.
-                if self.todo_input.is_some() {
+                if self.input.is_some() {
                     self.end_input(true, fx);
                 }
                 if self.state == IslandState::Slips && self.keyboard_open {
@@ -1230,7 +1439,38 @@ impl Model {
                     }
                 }
             }
+            Event::Pipe(Request::Note { text }) => {
+                if self.enabled(ModuleId::Notes) {
+                    self.add_note(&text, fx);
+                    let t = self.tag(format!("Note · {}", crate::format::ellipsize(&text, 40)), theme::OK, Icon::Todo, 5, TAG_MS);
+                    self.push_tag(t, fx);
+                }
+            }
             Event::Pipe(req) => self.pipe(req, fx),
+            Event::ClipPins(list) => {
+                for e in list.into_iter().filter(|e| e.pinned) {
+                    if !self.clip_history.iter().any(|c| c.text == e.text) {
+                        self.next_id = self.next_id.max(e.id + 1);
+                        self.clip_history.push(e);
+                    }
+                }
+            }
+            Event::Notes(list) => {
+                self.next_id = self.next_id.max(list.iter().map(|n| n.id + 1).max().unwrap_or(1));
+                self.notes = list;
+            }
+            Event::Power(p) => self.power_changed(p, fx),
+            Event::Network(n) => self.network_changed(n, fx),
+            Event::PowerPlans(plans, active) => {
+                self.power_plans = plans;
+                self.active_plan = active;
+            }
+            Event::Dropped(paths) => self.pin_paths(paths, fx),
+            Event::LaunchIcon(path, art) => {
+                self.launch_icons.insert(path, art);
+            }
+            Event::Download { name, bytes, done } => self.download(name, bytes, done, fx),
+            Event::MicMuted(m) => self.mic_muted = Some(m),
             Event::Ports(list) => {
                 let hide = &self.config.ports.hide_processes;
                 let min = self.config.ports.min_port;
@@ -1246,6 +1486,7 @@ impl Model {
                 if !self.enabled(ModuleId::Clipboard) {
                     return;
                 }
+                self.remember_clip(&text, unix_now);
                 match clipboard::detect(&text) {
                     Some(kind) => {
                         if self.config.clipboard.tags {
@@ -1278,6 +1519,7 @@ impl Model {
                 let text = match c.kind {
                     CaptureKind::Screenshot => "Screenshot saved",
                     CaptureKind::Clip => "Clip saved",
+                    CaptureKind::Download => "Downloaded",
                 };
                 self.captures.insert(0, c);
                 self.captures.truncate(MAX_CAPTURES);
@@ -1309,6 +1551,7 @@ impl Model {
             }
             Event::Day(day) => {
                 self.playlog.roll(&day);
+                self.focus_rounds = 0;
                 // A new trading day: moves count from the new close.
                 self.moves.clear();
             }
@@ -1395,7 +1638,13 @@ impl Model {
             ModuleId::Mixer => self.mixer = MixerSnapshot::default(),
             ModuleId::Commands => self.jobs.clear(),
             ModuleId::Ports => self.ports.clear(),
-            ModuleId::Clipboard => self.clip = None,
+            ModuleId::Clipboard => {
+                self.clip = None;
+                self.clip_history.retain(|e| e.pinned);
+                if self.typing(InputFor::ClipSearch).is_some() {
+                    self.input = None;
+                }
+            }
             ModuleId::Timer => {
                 self.timer = FocusTimer::Idle;
                 fx.push(Effect::KillTimer(TimerId::FocusDone));
@@ -1406,7 +1655,10 @@ impl Model {
                 }
                 self.stats = GpuStats::default();
             }
-            ModuleId::Captures => self.captures.clear(),
+            ModuleId::Captures => {
+                self.captures.clear();
+                self.downloads.clear();
+            }
             ModuleId::Privacy => self.privacy.clear(),
             ModuleId::Prayer => {
                 self.prayer_day = None;
@@ -1417,7 +1669,11 @@ impl Model {
                 self.alerts.clear();
             }
             // The list itself stays saved for when the module comes back.
-            ModuleId::Todo => self.todo_input = None,
+            ModuleId::Todo => {
+                if self.typing(InputFor::Todo).is_some() {
+                    self.input = None;
+                }
+            }
             ModuleId::Calendar => {
                 self.calendar.clear();
                 fx.push(Effect::KillTimer(TimerId::Calendar));
@@ -1426,6 +1682,14 @@ impl Model {
                 self.quotes.clear();
                 self.news.clear();
             }
+            // Notes and pins stay saved for when the module comes back.
+            ModuleId::Notes => {
+                if self.typing(InputFor::Note).is_some() {
+                    self.input = None;
+                }
+            }
+            ModuleId::Power => {}
+            ModuleId::Launch => self.launch_edit = false,
         }
         if self.front == Some(m) {
             self.front = None;
@@ -1547,7 +1811,17 @@ impl Model {
             Action::TimerStart(min) => {
                 let total = min as u64 * 60_000;
                 self.timer = FocusTimer::Running { ends_ms: now + total, total_ms: total };
+                self.on_break = false;
+                self.focus_last_min = min;
                 fx.push(Effect::SetTimer(TimerId::FocusDone, total));
+                self.focus_session(true, fx);
+            }
+            Action::TimerSkipBreak => {
+                if self.on_break {
+                    self.on_break = false;
+                    self.timer = FocusTimer::Idle;
+                    fx.push(Effect::KillTimer(TimerId::FocusDone));
+                }
             }
             Action::TimerPause => {
                 if let FocusTimer::Running { ends_ms, total_ms } = self.timer {
@@ -1578,7 +1852,9 @@ impl Model {
             }
             Action::TimerStop => {
                 self.timer = FocusTimer::Idle;
+                self.on_break = false;
                 fx.push(Effect::KillTimer(TimerId::FocusDone));
+                self.focus_session(false, fx);
             }
             Action::TimerCustom(dir) => {
                 let cur = self.config.timer.custom_min as i32;
@@ -1604,19 +1880,77 @@ impl Model {
             Action::RefreshWeather => fx.push(Effect::RefreshWeather),
             Action::TodoAdd => {
                 if self.enabled(ModuleId::Todo) {
-                    self.todo_input = Some(String::new());
-                    self.front = Some(ModuleId::Todo);
-                    fx.push(Effect::KillTimer(TimerId::Collapse));
-                    // Typing needs the keyboard.
-                    if !self.keyboard_open {
-                        self.keyboard_open = true;
-                        fx.push(Effect::TakeFocus);
-                    }
+                    self.start_input(InputFor::Todo, ModuleId::Todo, fx);
                 }
             }
             Action::TodoSubmit => self.end_input(true, fx),
             Action::TodoCancel => self.end_input(false, fx),
             Action::OpenSettings(m) => fx.push(Effect::OpenSettings(m)),
+            Action::ClipPaste(id) => {
+                if let Some(e) = self.clip_history.iter().find(|e| e.id == id) {
+                    // While the search field has the keyboard there is nowhere to paste: copy.
+                    let paste = !self.keyboard_open;
+                    fx.push(Effect::PasteText(e.text.clone(), paste));
+                    if paste {
+                        self.settle(fx);
+                    } else {
+                        let t = self.tag("Copied".into(), theme::CODER, Icon::Check, 5, 1500);
+                        self.push_tag(t, fx);
+                    }
+                }
+            }
+            Action::ClipPin(id) => {
+                if let Some(e) = self.clip_history.iter_mut().find(|e| e.id == id) {
+                    e.pinned = !e.pinned;
+                    fx.push(Effect::SaveClipPins);
+                }
+            }
+            Action::ClipRemove(id) => {
+                let pinned = self.clip_history.iter().any(|e| e.id == id && e.pinned);
+                self.clip_history.retain(|e| e.id != id);
+                if pinned {
+                    fx.push(Effect::SaveClipPins);
+                }
+            }
+            Action::ClipClear => self.clip_history.retain(|e| e.pinned),
+            Action::ClipSearch => {
+                if self.enabled(ModuleId::Clipboard) {
+                    self.start_input(InputFor::ClipSearch, ModuleId::Clipboard, fx);
+                }
+            }
+            Action::NoteAdd => {
+                if self.enabled(ModuleId::Notes) {
+                    self.start_input(InputFor::Note, ModuleId::Notes, fx);
+                }
+            }
+            Action::NoteCopy(id) => {
+                if let Some(n) = self.notes.iter().find(|n| n.id == id) {
+                    fx.push(Effect::CopyText(n.text.clone()));
+                    let t = self.tag("Note copied".into(), theme::OK, Icon::Check, 5, 1500);
+                    self.push_tag(t, fx);
+                }
+            }
+            Action::NoteRemove(id) => {
+                self.notes.retain(|n| n.id != id);
+                fx.push(Effect::SaveNotes);
+            }
+            Action::SetPowerPlan(i) => {
+                if let Some((guid, _)) = self.power_plans.get(i) {
+                    self.active_plan = Some(guid.clone());
+                    fx.push(Effect::SetPowerPlan(guid.clone()));
+                }
+            }
+            Action::Launch(i) => {
+                if self.launch_edit {
+                    self.unpin(i, fx);
+                } else if let Some(item) = self.config.launch.items.get(i) {
+                    fx.push(Effect::Open(item.path.clone()));
+                    self.settle(fx);
+                }
+            }
+            Action::LaunchRemove(i) => self.unpin(i, fx),
+            Action::LaunchEdit => self.launch_edit = !self.launch_edit,
+            Action::MicToggle => fx.push(Effect::MicToggle),
             Action::TodoToggle(id) => {
                 if let Some(t) = self.todos.iter_mut().find(|t| t.id == id) {
                     t.done = !t.done;
@@ -1725,7 +2059,7 @@ impl Model {
                 self.push_tag(t, fx);
             }
             Request::Clear { .. } => self.jobs.retain(|j| j.id != id),
-            Request::Ping => {}
+            Request::Ping | Request::Note { .. } => {}
         }
     }
 
@@ -1835,16 +2169,260 @@ impl Model {
     }
 
     /// Close the "Add task" field, adding its text when `keep`.
+    /// Open a text field in a slip; typing needs the keyboard.
+    fn start_input(&mut self, to: InputFor, module: ModuleId, fx: &mut Vec<Effect>) {
+        self.input = Some(Input { to, text: String::new() });
+        self.front = Some(module);
+        fx.push(Effect::KillTimer(TimerId::Collapse));
+        if !self.keyboard_open {
+            self.keyboard_open = true;
+            fx.push(Effect::TakeFocus);
+        }
+    }
+
+    /// What is being typed for `to`, if its field is open.
+    pub fn typing(&self, to: InputFor) -> Option<&str> {
+        self.input.as_ref().filter(|i| i.to == to).map(|i| i.text.as_str())
+    }
+
     fn end_input(&mut self, keep: bool, fx: &mut Vec<Effect>) {
-        let Some(text) = self.todo_input.take() else { return };
+        let Some(input) = self.input.take() else { return };
         if keep {
-            self.add_todo(&text, fx);
+            self.input_done(input, fx);
         }
         if self.keyboard_open {
             self.keyboard_open = false;
             fx.push(Effect::ReleaseFocus);
             if !self.hover && self.state == IslandState::Slips {
                 fx.push(Effect::SetTimer(TimerId::Collapse, UNATTENDED_MS));
+            }
+        }
+    }
+
+    /// A field's Enter (or a click away for notes and tasks).
+    fn input_done(&mut self, input: Input, fx: &mut Vec<Effect>) {
+        match input.to {
+            InputFor::Todo => self.add_todo(&input.text, fx),
+            InputFor::Note => {
+                self.add_note(&input.text, fx);
+            }
+            // Enter copies the first match.
+            InputFor::ClipSearch => {
+                if let Some(e) = self.clip_matches(&input.text).first() {
+                    fx.push(Effect::PasteText(e.text.clone(), false));
+                    let t = self.tag("Copied".into(), crate::theme::CODER, Icon::Check, 5, 1500);
+                    self.push_tag(t, fx);
+                }
+            }
+        }
+    }
+
+    fn fresh_id(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id - 1
+    }
+
+    fn remember_clip(&mut self, text: &str, unix: i64) {
+        let text: String = text.chars().take(4000).collect();
+        if text.trim().is_empty() {
+            return;
+        }
+        let pinned = self.clip_history.iter().any(|e| e.text == text && e.pinned);
+        self.clip_history.retain(|e| e.text != text);
+        let id = self.fresh_id();
+        self.clip_history.insert(0, ClipEntry { id, text, at: unix, pinned });
+        // Keep every pinned entry and the newest unpinned ones.
+        let mut unpinned = 0;
+        self.clip_history.retain(|e| {
+            if !e.pinned {
+                unpinned += 1;
+            }
+            e.pinned || unpinned <= CLIP_HISTORY
+        });
+    }
+
+    /// History entries matching a search (all without one): pinned first,
+    /// then the newest.
+    pub fn clip_matches(&self, query: &str) -> Vec<&ClipEntry> {
+        let q = query.trim().to_lowercase();
+        let mut v: Vec<&ClipEntry> = self.clip_history.iter().filter(|e| q.is_empty() || e.text.to_lowercase().contains(&q)).collect();
+        v.sort_by_key(|e| (!e.pinned, std::cmp::Reverse(e.at), std::cmp::Reverse(e.id)));
+        v
+    }
+
+    fn add_note(&mut self, text: &str, fx: &mut Vec<Effect>) {
+        let text: String = text.trim().chars().take(500).collect();
+        if text.is_empty() || !self.enabled(ModuleId::Notes) {
+            return;
+        }
+        let id = self.fresh_id();
+        let at = self.unix_now().unwrap_or(0);
+        self.notes.insert(0, Note { id, text, at });
+        self.notes.truncate(MAX_NOTES);
+        fx.push(Effect::SaveNotes);
+    }
+
+    fn power_changed(&mut self, p: PowerState, fx: &mut Vec<Effect>) {
+        let before = self.power;
+        self.power = Some(p);
+        if !self.enabled(ModuleId::Power) {
+            return;
+        }
+        // Plugged in or out: the plan for that, and fresh warnings next time.
+        if before.is_some_and(|b| b.on_ac != p.on_ac) || (before.is_none() && p.percent.is_some()) {
+            let c = &self.config.power;
+            let plan = if p.on_ac { &c.plugged_plan } else { &c.battery_plan };
+            if !plan.is_empty() && self.active_plan.as_deref() != Some(plan.as_str()) {
+                self.active_plan = Some(plan.clone());
+                fx.push(Effect::SetPowerPlan(plan.clone()));
+            }
+            if p.on_ac {
+                self.battery_warned.clear();
+            }
+            if before.is_some() && p.percent.is_some() {
+                let text = if p.on_ac { "Charging" } else { "On battery" };
+                let pct = p.percent.map(|v| format!(" · {v}%")).unwrap_or_default();
+                let t = self.tag(format!("{text}{pct}"), crate::theme::OK, Icon::Plug, 6, 2500);
+                self.push_tag(t, fx);
+            }
+        }
+        if let (Some(pct), false) = (p.percent, p.on_ac) {
+            let low = self.config.power.low_battery.clamp(5, 50) as u8;
+            for level in [low, 10] {
+                if pct <= level && self.battery_warned.insert(level) {
+                    let left = p.secs_left.map(|s| format!(" · {} left", crate::format::hours_minutes(s as u64 / 60))).unwrap_or_default();
+                    let prio = if level <= 10 { 1 } else { 3 };
+                    let t = self.tag(format!("Battery {pct}%{left}"), crate::theme::PRIVACY, Icon::Plug, prio, 10_000);
+                    self.push_tag(t, fx);
+                }
+            }
+        }
+    }
+
+    fn network_changed(&mut self, n: NetState, fx: &mut Vec<Effect>) {
+        let before = self.net.replace(n.clone());
+        self.online = Some(n.online);
+        let Some(b) = before.filter(|_| self.enabled(ModuleId::Power) && self.config.power.network_tags) else { return };
+        let mut say = |m: &mut Model, text: String, color, prio| {
+            let t = m.tag(text, color, Icon::Plug, prio, 4000);
+            m.push_tag(t, fx);
+        };
+        if b.online != n.online {
+            if n.online {
+                let via = n.wifi.as_ref().map(|w| format!(" · {w}")).unwrap_or_default();
+                say(self, format!("Back online{via}"), crate::theme::OK, 6);
+            } else {
+                say(self, "Offline · no connection".into(), crate::theme::PRIVACY, 4);
+            }
+        }
+        match (&b.vpn, &n.vpn) {
+            (None, Some(v)) => say(self, format!("VPN connected · {v}"), crate::theme::OK, 5),
+            (Some(v), None) => say(self, format!("VPN disconnected · {v}"), crate::theme::MEDIA, 4),
+            _ => {}
+        }
+    }
+
+    /// Pin dropped files, folders and shortcuts to Quick launch.
+    fn pin_paths(&mut self, paths: Vec<String>, fx: &mut Vec<Effect>) {
+        if !self.enabled(ModuleId::Launch) {
+            return;
+        }
+        let mut items = self.config.launch.items.clone();
+        for p in paths {
+            if items.iter().any(|i| i.path.eq_ignore_ascii_case(&p)) || items.len() >= 24 {
+                continue;
+            }
+            let file = p.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or(&p).to_string();
+            let name = match file.rsplit_once('.') {
+                Some((stem, ext)) if ["exe", "lnk", "url", "appref-ms"].contains(&ext.to_ascii_lowercase().as_str()) => stem.to_string(),
+                _ => file,
+            };
+            items.push(crate::config::LaunchItem { name, path: p });
+        }
+        if items != self.config.launch.items {
+            let added = items.len() - self.config.launch.items.len();
+            self.config.launch.items = items;
+            fx.push(Effect::SaveValue("launch", "items", crate::settings::launch_literal(&self.config.launch.items)));
+            self.front = Some(ModuleId::Launch);
+            let t = self.tag(format!("Pinned {added} to Quick launch"), crate::theme::PORTS, Icon::Pin, 5, TAG_MS);
+            self.push_tag(t, fx);
+        }
+    }
+
+    fn unpin(&mut self, i: usize, fx: &mut Vec<Effect>) {
+        if i < self.config.launch.items.len() {
+            self.config.launch.items.remove(i);
+            fx.push(Effect::SaveValue("launch", "items", crate::settings::launch_literal(&self.config.launch.items)));
+            if self.config.launch.items.is_empty() {
+                self.launch_edit = false;
+            }
+        }
+    }
+
+    fn download(&mut self, name: String, bytes: u64, done: Option<String>, fx: &mut Vec<Effect>) {
+        if !self.enabled(ModuleId::Captures) {
+            return;
+        }
+        match done {
+            None => match self.downloads.iter_mut().find(|d| d.name == name) {
+                Some(d) => d.bytes = bytes,
+                None => self.downloads.push(Download { name, bytes, started_ms: self.now_ms }),
+            },
+            Some(path) => {
+                let was = self.downloads.iter().any(|d| d.name == name);
+                self.downloads.retain(|d| d.name != name);
+                // An empty path: cancelled.
+                if was && !path.is_empty() {
+                    self.captures
+                        .insert(0, Capture { path: path.clone(), name: name.clone(), kind: CaptureKind::Download, at_ms: self.now_ms });
+                    self.captures.truncate(MAX_CAPTURES);
+                    let mut t = self.tag(
+                        format!("Downloaded · {}", crate::format::ellipsize(&name, 36)),
+                        crate::theme::PORTS,
+                        Icon::Download,
+                        5,
+                        8000,
+                    );
+                    t.action = Some(("Open".into(), Action::CaptureOpen(0)));
+                    self.push_tag(t, fx);
+                }
+            }
+        }
+    }
+
+    /// The event going on now that has a meeting link.
+    pub fn meeting(&self) -> Option<&crate::calendar::CalEvent> {
+        let now = self.unix_now()?;
+        self.calendar.iter().find(|e| !e.all_day && !e.link.is_empty() && e.start - 120 <= now && now < e.end)
+    }
+
+    /// Price levels crossed, once per crossing.
+    fn price_levels(&mut self, list: &[crate::finance::Quote], fx: &mut Vec<Effect>) {
+        let watch = self.config.finance.watchlist.clone();
+        for q in list {
+            let Some(w) = watch.iter().find(|w| w.symbol.eq_ignore_ascii_case(&q.symbol)) else { continue };
+            let hit = self.levels_hit.entry(q.symbol.clone()).or_insert((false, false));
+            let mut say = Vec::new();
+            if let Some(a) = w.above {
+                let now_above = q.price >= a;
+                if now_above && !hit.0 {
+                    say.push(format!("above {}", crate::finance::format_level(a)));
+                }
+                hit.0 = now_above;
+            }
+            if let Some(b) = w.below {
+                let now_below = q.price <= b;
+                if now_below && !hit.1 {
+                    say.push(format!("below {}", crate::finance::format_level(b)));
+                }
+                hit.1 = now_below;
+            }
+            for s in say {
+                let name = if w.name.is_empty() { w.symbol.clone() } else { w.name.clone() };
+                let mut t =
+                    self.tag(format!("{name} {s} · {}", crate::finance::format_price(q)), crate::theme::MEDIA, Icon::Chart, 3, 15_000);
+                t.action = Some(("Open".into(), Action::SelectSlip(ModuleId::Finance)));
+                self.push_tag(t, fx);
             }
         }
     }
@@ -1917,8 +2495,8 @@ impl Model {
             // Reminders the user asked for show even over a fullscreen app.
             let mut t =
                 self.tag(format!("{} · {when}", crate::format::ellipsize(&e.title, 40)), crate::theme::CODER, Icon::Calendar, 2, 15_000);
-            if e.location.starts_with("https://") {
-                t.action = Some(("Join".into(), Action::OpenUrl(e.location.clone())));
+            if !e.link.is_empty() {
+                t.action = Some(("Join".into(), Action::OpenUrl(e.link.clone())));
             }
             self.push_tag(t, fx);
         }
@@ -2071,12 +2649,46 @@ impl Model {
         self.prayer_alerts(fx);
     }
 
-    /// Reminder and prayer moments today, in local minutes.
+    /// Today's Hijri date (year, month, day).
+    pub fn hijri(&self) -> Option<(i64, u32, u32)> {
+        let c = self.clock?;
+        Some(crate::prayer::hijri(c.year, c.month, c.day, self.config.prayer.hijri_adjust))
+    }
+
+    /// The day of Ramadan, while it is Ramadan.
+    pub fn ramadan_day(&self) -> Option<u32> {
+        self.hijri().filter(|h| h.1 == 9).map(|h| h.2)
+    }
+
+    /// In Ramadan: what the fast waits for next — "Imsak" before dawn,
+    /// "Buka" (Maghrib) during the day — and when, in local minutes (past
+    /// midnight for tomorrow's imsak).
+    pub fn fasting(&self) -> Option<(&'static str, f64)> {
+        use crate::prayer::Prayer;
+        let day_n = self.ramadan_day()?;
+        let (day, now) = (self.prayer_day?, self.local_minute()?);
+        let (imsak, maghrib) = (day.get(Prayer::Imsak)?, day.get(Prayer::Maghrib)?);
+        if now < imsak {
+            Some(("Imsak", imsak))
+        } else if now < maghrib {
+            Some(("Buka", maghrib))
+        } else if day_n < 29 {
+            Some(("Imsak", imsak + 1440.0))
+        } else {
+            None
+        }
+    }
+
+    /// Reminder and prayer moments today, in local minutes (with imsak in Ramadan).
     fn prayer_moments(&self) -> Vec<(f64, crate::prayer::Prayer, bool)> {
         let Some(day) = self.prayer_day else { return Vec::new() };
         let before = self.config.prayer.reminder_min as f64;
         let mut v = Vec::new();
-        for p in crate::prayer::Prayer::FIVE {
+        let mut prayers = crate::prayer::Prayer::FIVE.to_vec();
+        if self.ramadan_day().is_some() {
+            prayers.insert(0, crate::prayer::Prayer::Imsak);
+        }
+        for p in prayers {
             if let Some(t) = day.get(p) {
                 v.push((t.ceil(), p, true));
                 if before > 0.0 {
@@ -2110,7 +2722,12 @@ impl Model {
             .collect();
         for (t, p, at_time) in due {
             self.prayer_announced.insert((date, t as i64, at_time));
-            let text = if at_time {
+            let ramadan = self.ramadan_day().is_some();
+            let text = if at_time && ramadan && p == crate::prayer::Prayer::Maghrib {
+                format!("Waktu berbuka · {}", crate::prayer::hhmm(t))
+            } else if at_time && p == crate::prayer::Prayer::Imsak {
+                format!("Imsak · {}", crate::prayer::hhmm(t))
+            } else if at_time {
                 format!("Waktu {} · {}", p.name(), crate::prayer::hhmm(t))
             } else {
                 let left = (t + before - now).round().max(1.0);
@@ -2283,7 +2900,7 @@ mod tests {
         m.update(0, Event::Key(Key::Backspace));
         let fx = m.update(0, Event::Key(Key::Enter));
         assert!(fx.contains(&Effect::ReleaseFocus));
-        assert!(m.todo_input.is_none());
+        assert!(m.input.is_none());
         assert_eq!(m.state, IslandState::Slips, "Enter adds, it does not close the island");
         assert!(fx.contains(&Effect::SaveTodos));
         m.update(0, Event::TodoAdded("".into()));
@@ -2561,8 +3178,8 @@ mod tests {
         m.update(130_000, Event::Capture(Capture { path: "a.png".into(), name: "a.png".into(), kind: CaptureKind::Screenshot, at_ms: 0 }));
         assert!(m.current_tag().is_none());
         m.update(25 * 60_000 + 60_000, Event::Timer(TimerId::FocusDone));
-        assert_eq!(m.timer, FocusTimer::Idle);
-        assert_eq!(m.current_tag().unwrap().text, "Focus round done");
+        assert!(m.on_break, "a break follows");
+        assert_eq!(m.current_tag().unwrap().text, "Round 1 done · 5 min break");
     }
 
     #[test]
@@ -2811,6 +3428,7 @@ mod tests {
             all_day: false,
             feed: 0,
             alarms,
+            link: String::new(),
         }
     }
 
@@ -2943,6 +3561,205 @@ mod tests {
         m.update(0, Event::SetModule(ModuleId::Prayer, true));
         let fx = m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 600.0, utc_offset_min: 420, unix: 1_792_911_900 });
         assert!(!has_timer(&fx, TimerId::Carousel));
+    }
+
+    #[test]
+    fn ramadan_counts_down_to_imsak_and_buka() {
+        let mut m = model();
+        m.update(0, Event::SetModule(ModuleId::Prayer, true));
+        // 1 March 2026 is in Ramadan 1447; 10:00 in Jakarta.
+        m.update(0, Event::Clock { year: 2026, month: 3, day: 1, minutes: 600.0, utc_offset_min: 420, unix: 1_772_334_000 });
+        assert!(m.ramadan_day().is_some_and(|d| (10..=13).contains(&d)), "{:?}", m.hijri());
+        let (what, at) = m.fasting().unwrap();
+        assert_eq!(what, "Buka");
+        assert_eq!(Some(at), m.prayer_day.unwrap().get(crate::prayer::Prayer::Maghrib));
+        // Imsak gets a reminder too, in Ramadan only.
+        assert!(m.prayer_moments().iter().any(|(_, p, _)| *p == crate::prayer::Prayer::Imsak));
+        let mut m = model();
+        m.update(0, Event::SetModule(ModuleId::Prayer, true));
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 26, minutes: 600.0, utc_offset_min: 420, unix: 1_792_983_600 });
+        assert!(m.fasting().is_none());
+        assert!(!m.prayer_moments().iter().any(|(_, p, _)| *p == crate::prayer::Prayer::Imsak));
+    }
+
+    #[test]
+    fn focus_rounds_are_followed_by_breaks() {
+        let mut m = model();
+        let fx = m.update(0, Event::Click(Action::TimerStart(25)));
+        assert!(fx.contains(&Effect::FocusSession(true)));
+        let fx = m.update(25 * 60_000, Event::Timer(TimerId::FocusDone));
+        assert!(fx.contains(&Effect::FocusSession(false)));
+        assert!(m.on_break && m.timer.is_running());
+        assert_eq!(m.focus_rounds, 1);
+        assert_eq!(m.timer.remaining(25 * 60_000), Some(5 * 60_000));
+        assert!(m.tags.iter().any(|t| t.text == "Round 1 done · 5 min break"));
+        // The break ends with an offer to start again.
+        m.update(30 * 60_000, Event::Timer(TimerId::FocusDone));
+        assert!(!m.on_break && m.timer == FocusTimer::Idle);
+        let t = m.tags.iter().find(|t| t.text.starts_with("Break over")).unwrap();
+        assert_eq!(t.action.as_ref().unwrap().1, Action::TimerStart(25));
+        // Every fourth round, the long break.
+        m.focus_rounds = 3;
+        m.update(31 * 60_000, Event::Click(Action::TimerStart(25)));
+        m.update(56 * 60_000, Event::Timer(TimerId::FocusDone));
+        assert_eq!(m.timer.remaining(56 * 60_000), Some(15 * 60_000));
+        m.update(57 * 60_000, Event::Click(Action::TimerSkipBreak));
+        assert_eq!(m.timer, FocusTimer::Idle);
+    }
+
+    #[test]
+    fn clipboard_history_keeps_recent_and_pinned() {
+        let mut m = model();
+        for i in 0..25 {
+            m.update(i, Event::Clipboard { text: format!("text {i}"), unix_now: 1000 + i as i64 });
+        }
+        assert_eq!(m.clip_history.len(), CLIP_HISTORY);
+        assert_eq!(m.clip_history[0].text, "text 24");
+        // Copying again moves it to the top instead of repeating it.
+        m.update(30, Event::Clipboard { text: "text 10".into(), unix_now: 2000 });
+        assert_eq!(m.clip_history.iter().filter(|e| e.text == "text 10").count(), 1);
+        let id = m.clip_history[0].id;
+        let fx = m.update(31, Event::Click(Action::ClipPin(id)));
+        assert!(fx.contains(&Effect::SaveClipPins));
+        for i in 0..30 {
+            m.update(40 + i, Event::Clipboard { text: format!("more {i}"), unix_now: 3000 + i as i64 });
+        }
+        assert!(m.clip_history.iter().any(|e| e.text == "text 10" && e.pinned), "pinned entries stay");
+        assert_eq!(m.clip_matches("")[0].text, "text 10", "pinned first");
+        // "more 20" … "more 29" are still kept ("more 2" has dropped off).
+        assert_eq!(m.clip_matches("MORE 2").len(), 10, "search ignores case");
+        // Clicking pastes into the app that has the keyboard.
+        let fx = m.update(80, Event::Click(Action::ClipPaste(id)));
+        assert!(fx.contains(&Effect::PasteText("text 10".into(), true)));
+        // Searching: typing filters, Enter copies the first match.
+        m.update(81, Event::Click(Action::ClipSearch));
+        m.update(82, Event::Text("more 29".into()));
+        let fx = m.update(83, Event::Key(Key::Enter));
+        assert!(fx.contains(&Effect::PasteText("more 29".into(), false)));
+        m.update(84, Event::Click(Action::ClipClear));
+        assert!(m.clip_history.iter().all(|e| e.pinned));
+    }
+
+    #[test]
+    fn notes_from_the_slip_and_the_command_line() {
+        let mut m = model();
+        m.update(0, Event::Click(Action::NoteAdd));
+        assert_eq!(m.typing(InputFor::Note), Some(""));
+        m.update(1, Event::Text("Call Budi".into()));
+        let fx = m.update(2, Event::Key(Key::Enter));
+        assert!(fx.contains(&Effect::SaveNotes));
+        m.update(3, Event::Pipe(Request::Note { text: "deploy key rotated".into() }));
+        assert_eq!(m.notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>(), vec!["deploy key rotated", "Call Budi"]);
+        assert!(m.tags.iter().any(|t| t.text.starts_with("Note · deploy")));
+        let id = m.notes[0].id;
+        assert!(m.update(4, Event::Click(Action::NoteCopy(id))).contains(&Effect::CopyText("deploy key rotated".into())));
+        m.update(5, Event::Click(Action::NoteRemove(id)));
+        assert_eq!(m.notes.len(), 1);
+    }
+
+    #[test]
+    fn battery_network_and_power_plans() {
+        let mut m = model();
+        m.config.power.battery_plan = "{bat}".into();
+        m.config.power.plugged_plan = "{ac}".into();
+        let p = |pct: u8, on_ac: bool| PowerState { percent: Some(pct), on_ac, saver: false, secs_left: Some(3600) };
+        m.update(0, Event::Power(p(80, true)));
+        let fx = m.update(1, Event::Power(p(79, false)));
+        assert!(fx.contains(&Effect::SetPowerPlan("{bat}".into())), "unplugged: the battery plan");
+        m.update(2, Event::Power(p(20, false)));
+        assert!(m.tags.iter().any(|t| t.text.starts_with("Battery 20%")));
+        let n = m.tags.len();
+        m.update(3, Event::Power(p(19, false)));
+        assert_eq!(m.tags.len(), n, "warned once per level");
+        m.update(4, Event::Power(p(9, false)));
+        assert!(m.current_tag().unwrap().text.starts_with("Battery 9%"));
+        let fx = m.update(5, Event::Power(p(9, true)));
+        assert!(fx.contains(&Effect::SetPowerPlan("{ac}".into())));
+        // The connection.
+        let net = |online: bool, vpn: Option<&str>| NetState { online, vpn: vpn.map(String::from), wifi: None };
+        m.tags.clear();
+        m.update(10, Event::Network(net(true, None)));
+        assert!(m.tags.is_empty(), "the first reading is quiet");
+        m.update(11, Event::Network(net(true, Some("WireGuard"))));
+        assert!(m.tags.iter().any(|t| t.text == "VPN connected · WireGuard"));
+        m.update(12, Event::Network(net(false, None)));
+        assert!(m.tags.iter().any(|t| t.text.starts_with("Offline")));
+        assert!(m.tags.iter().any(|t| t.text == "VPN disconnected · WireGuard"));
+        // Picking a plan.
+        m.update(
+            13,
+            Event::PowerPlans(vec![("{a}".into(), "Balanced".into()), ("{b}".into(), "Best performance".into())], Some("{a}".into())),
+        );
+        let fx = m.update(14, Event::Click(Action::SetPowerPlan(1)));
+        assert!(fx.contains(&Effect::SetPowerPlan("{b}".into())));
+    }
+
+    #[test]
+    fn dropped_files_pin_to_quick_launch() {
+        let mut m = model();
+        let fx = m.update(0, Event::Dropped(vec!["C:\\Tools\\Code.exe".into(), "D:\\Projects".into(), "C:\\Tools\\Code.exe".into()]));
+        let names: Vec<&str> = m.config.launch.items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["Code", "Projects"]);
+        assert!(fx.iter().any(|e| matches!(e, Effect::SaveValue("launch", "items", _))));
+        let fx = m.update(1, Event::Click(Action::Launch(0)));
+        assert!(fx.contains(&Effect::Open("C:\\Tools\\Code.exe".into())));
+        m.update(2, Event::Click(Action::LaunchEdit));
+        m.update(3, Event::Click(Action::Launch(0)));
+        assert_eq!(m.config.launch.items.len(), 1, "editing: a tap unpins");
+    }
+
+    #[test]
+    fn downloads_show_while_they_grow_and_tag_when_done() {
+        let mut m = model();
+        m.update(0, Event::Download { name: "big.iso".into(), bytes: 1_000_000, done: None });
+        m.update(1000, Event::Download { name: "big.iso".into(), bytes: 5_000_000, done: None });
+        assert_eq!(m.downloads[0].bytes, 5_000_000);
+        assert!(m.available_slips().contains(&ModuleId::Captures));
+        m.update(2000, Event::Download { name: "big.iso".into(), bytes: 0, done: Some("C:\\Users\\x\\Downloads\\big.iso".into()) });
+        assert!(m.downloads.is_empty());
+        assert_eq!(m.captures[0].kind, CaptureKind::Download);
+        assert!(m.tags.iter().any(|t| t.text == "Downloaded · big.iso"));
+        // Cancelled: gone without a word.
+        m.update(3000, Event::Download { name: "x.zip".into(), bytes: 10, done: None });
+        let n = m.tags.len();
+        m.update(4000, Event::Download { name: "x.zip".into(), bytes: 0, done: Some(String::new()) });
+        assert!(m.downloads.is_empty());
+        assert_eq!(m.tags.len(), n);
+    }
+
+    #[test]
+    fn price_levels_tag_once_per_crossing() {
+        let mut m = model();
+        m.config.finance.watchlist = vec![crate::config::WatchItem {
+            symbol: "BTC-USD".into(),
+            name: "Bitcoin".into(),
+            above: Some(81_000.0),
+            below: Some(79_000.0),
+        }];
+        m.config.finance.price_alerts = false;
+        let at = |p: f64| crate::finance::Quote { price: p, ..quote("BTC-USD", 0.0) };
+        m.update(0, Event::Quotes(vec![at(80_000.0)]));
+        assert!(m.tags.is_empty());
+        m.update(1, Event::Quotes(vec![at(81_200.0)]));
+        assert_eq!(m.current_tag().unwrap().text, "Bitcoin above 81000 · $81,200");
+        m.tags.clear();
+        m.update(2, Event::Quotes(vec![at(81_500.0)]));
+        assert!(m.tags.is_empty(), "still above: quiet");
+        m.update(3, Event::Quotes(vec![at(78_900.0)]));
+        assert!(m.current_tag().unwrap().text.starts_with("Bitcoin below 79000"));
+    }
+
+    #[test]
+    fn meeting_now_offers_join() {
+        let mut m = model();
+        let unix = 1_792_911_900;
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 600.0, utc_offset_min: 420, unix });
+        let mut e = event("Standup", unix - 60, vec![]);
+        e.link = "https://meet.google.com/abc-defg-hij".into();
+        m.update(0, Event::Calendar(vec![e]));
+        assert_eq!(m.meeting().map(|e| e.title.as_str()), Some("Standup"));
+        let fx = m.update(1, Event::Click(Action::MicToggle));
+        assert!(fx.contains(&Effect::MicToggle));
     }
 
     #[test]

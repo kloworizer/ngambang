@@ -144,6 +144,60 @@ impl Day {
     }
 }
 
+// ---- Hijri date and qibla ------------------------------------------------
+
+/// Month names as used in Indonesia.
+pub const HIJRI_MONTHS: [&str; 12] = [
+    "Muharram",
+    "Safar",
+    "Rabiul Awal",
+    "Rabiul Akhir",
+    "Jumadil Awal",
+    "Jumadil Akhir",
+    "Rajab",
+    "Syaban",
+    "Ramadan",
+    "Syawal",
+    "Dzulkaidah",
+    "Dzulhijjah",
+];
+
+/// Julian day number (at noon) of the first of Muharram, year 1.
+const HIJRI_EPOCH: i64 = 1_948_440;
+
+fn hijri_to_jd(y: i64, m: i64, d: i64) -> i64 {
+    d + (29.5 * (m - 1) as f64).ceil() as i64 + (y - 1) * 354 + (3 + 11 * y).div_euclid(30) + HIJRI_EPOCH - 1
+}
+
+/// The Hijri date (year, month 1–12, day) of a civil date, by the tabular
+/// calendar shifted by `adjust` days. Indonesia announces months by sighting
+/// the moon, so it can differ by a day; `prayer.hijri_adjust` corrects it.
+pub fn hijri(y: i32, m: u32, d: u32, adjust: i32) -> (i64, u32, u32) {
+    let jd = crate::calendar::days_from_civil(y as i64, m, d) + 2_440_588 + adjust as i64;
+    let year = (30 * (jd - HIJRI_EPOCH) + 10_646).div_euclid(10_631);
+    let month = (((jd - (29 + hijri_to_jd(year, 1, 1))) as f64 / 29.5).ceil() as i64 + 1).clamp(1, 12);
+    let day = jd - hijri_to_jd(year, month, 1) + 1;
+    (year, month as u32, day as u32)
+}
+
+/// "16 Jumadil Awal 1448".
+pub fn hijri_label((y, m, d): (i64, u32, u32)) -> String {
+    format!("{d} {} {y}", HIJRI_MONTHS[(m as usize).clamp(1, 12) - 1])
+}
+
+/// The direction of the Kaaba from a place, in degrees from north.
+pub fn qibla(lat: f64, lon: f64) -> f64 {
+    let (kl, kn) = (rad(21.422_487), rad(39.826_206));
+    let (p, dl) = (rad(lat), kn - rad(lon));
+    fix(deg(dl.sin().atan2(p.cos() * kl.tan() - p.sin() * dl.cos())), 360.0)
+}
+
+/// "NW", "WNW"… for a bearing.
+pub fn compass(bearing: f64) -> &'static str {
+    const P: [&str; 16] = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+    P[((fix(bearing, 360.0) + 11.25) / 22.5) as usize % 16]
+}
+
 fn rad(d: f64) -> f64 {
     d.to_radians()
 }
@@ -481,6 +535,30 @@ pub fn city(name: &str) -> Option<(f64, f64, f64)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hijri_dates() {
+        // 1 Ramadan 1447 fell on 18/19 February 2026; Islamic new year 1448 on 16/17 June 2026.
+        let (y, m, d) = hijri(2026, 2, 19, 0);
+        assert_eq!((y, m), (1447, 9), "Ramadan 1447");
+        assert!(d <= 2, "day {d}");
+        assert_eq!(hijri(2026, 6, 18, 0).0, 1448);
+        let (y, m, _) = hijri(2026, 10, 26, 0);
+        assert_eq!((y, m), (1448, 5));
+        // The adjustment moves the date by whole days.
+        let a = hijri(2026, 10, 26, 0).2;
+        assert_eq!(hijri(2026, 10, 26, 1).2, a + 1);
+        assert_eq!(hijri_label((1448, 5, 16)), "16 Jumadil Awal 1448");
+    }
+
+    #[test]
+    fn qibla_from_indonesia() {
+        let q = qibla(-6.2088, 106.8456);
+        assert!((q - 295.1).abs() < 0.5, "Jakarta: {q}");
+        assert_eq!(compass(q), "WNW");
+        let q = qibla(51.5074, -0.1278);
+        assert!((q - 119.0).abs() < 1.0, "London: {q}");
+    }
+
     use super::*;
 
     fn jakarta(y: i32, m: u32, d: u32) -> Day {

@@ -58,7 +58,7 @@ pub const SLIP_PAD: f32 = 16.0;
 /// A slip's height above the tab rail follows its content within a narrow
 /// band, so flipping between modules keeps the island under the pointer.
 /// Docked left or right:
-pub const SLIP_MIN_V: f32 = 280.0;
+pub const SLIP_MIN_V: f32 = 200.0;
 pub const SLIP_MAX_V: f32 = 380.0;
 /// Docked top or bottom (taller content goes to two columns instead):
 pub const SLIP_MIN_H: f32 = 250.0;

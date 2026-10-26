@@ -6,6 +6,61 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-10-26
+
+### Added
+- **Ramadan mode.** In Ramadan the Sholat slip, the notch and the glance
+  count down to imsak before dawn and to buka (Maghrib) during the day, and
+  imsak gets a reminder too. The Sholat slip shows the Hijri date and the
+  qibla direction with a small needle. `prayer.hijri_adjust` (Settings ▸
+  Location & prayer) moves the Hijri date by a day or two to match the
+  announced one.
+- **Focus rounds with breaks.** A break follows each round (5 min, 15 after
+  every fourth), then the island offers the next round; skip a break from
+  the slip. During rounds Windows 11's Do not disturb is turned on. Lengths
+  in Settings ▸ Focus & commands.
+- **Clipboard history.** The last 20 copied texts (pinned ones are kept and
+  survive restarts): click one to paste it into the app you are in, search
+  with Find, pin or remove. Text that password managers mark private is
+  never recorded.
+- **Quick notes**, a new module: write a note in the slip or from a terminal
+  with `ngambang note "…"`; copy or delete it later.
+- **Battery, network & power**, a new module: battery level and time left,
+  warnings at 20 % (your level) and 10 %, online/offline and VPN connected /
+  disconnected tags, and the power plans to switch with one click; pick
+  plans for battery and for plugged in (Settings ▸ Games & power) and they
+  switch by themselves.
+- **Download progress.** A browser download in your Downloads folder shows
+  in Captures (and the glance) while it grows, then a "Downloaded" tag with
+  Open.
+- **Price levels.** Set "above" and "below" for any watchlist symbol
+  (Settings ▸ Markets); a tag pops up once each time the price crosses one.
+- **Meeting mode.** Meeting links are found in Google Calendar's conference
+  field and in descriptions (Meet, Zoom, Teams, Webex). During a meeting the
+  glance has Join and a microphone mute/unmute button; reminders and the
+  calendar rows join with one click.
+- **Quick launch**, a new module: drop apps, folders or files on the island
+  to pin them; open them from the slip with their own icons; Edit removes.
+
+### Fixed
+- Docked left or right, the Markets slip shows three headlines (it had room
+  for only one).
+
+### Changed
+- **The glance shows everything worth knowing.** Hovering the orb (or the
+  Seam) no longer shows one thing: it lists what matters now (mic or camera
+  in use, the game, the focus round, a running build, the song with a
+  play/pause button, the next event, the next prayer, a fresh warning, the
+  weather, the next task and the watchlist's biggest move). Docked top or
+  bottom it widens to the left and right; docked left or right it grows up
+  and down. Click an item to open its slip.
+- **Focus, Weather and Sholat without boxes.** The focus clock stands on its
+  own between round − and + buttons; the weather is a large icon and
+  temperature with readings and the next hours as plain columns; prayer
+  times sit along a line that fills up as the day goes, the next one lit.
+- Slips docked left or right can be shorter (from 200 px) so short modules
+  carry less empty space.
+
 ## [0.1.8] - 2026-10-26
 
 ### Added

@@ -7,6 +7,7 @@ pub mod audio;
 pub mod cli;
 pub mod clipboard;
 pub mod comp;
+pub mod extras;
 pub mod gfx;
 pub mod media;
 pub mod net;

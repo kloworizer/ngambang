@@ -234,6 +234,23 @@ pub fn icon_prims(icon: Icon, rect: Rect, color: Color) -> Vec<Prim> {
             line(&[(16.5, 6.0), (21.0, 6.0), (21.0, 10.5)]),
         ],
         Icon::Refresh => vec![arc(12.0, 12.0, 7.5, -60.0, 230.0), fill(&[(17.5, 3.5), (19.6, 9.0), (14.0, 8.0)])],
+        // A pencil, tilted.
+        Icon::Pencil => {
+            let body = [(4.0, 20.0), (5.0, 15.5), (15.5, 5.0), (19.0, 8.5), (8.5, 19.0)];
+            vec![soft(&body), closed(&body), line(&[(13.0, 7.5), (16.5, 11.0)])]
+        }
+        // A battery on its side, two-thirds full.
+        Icon::Battery => vec![duo(2.5, 7.0, 17.0, 10.0, 2.5), rr_fill(5.0, 9.5, 8.5, 5.0, 1.0), line(&[(21.5, 10.5), (21.5, 13.5)])],
+        // Three arcs and a dot.
+        Icon::Wifi => {
+            let arc = |r: f32| Prim::Polyline {
+                points: arc_points(ox + 12.0 * s, oy + 19.0 * s, r * s, 225.0, 315.0, 12),
+                width: w,
+                color,
+                closed: false,
+            };
+            vec![arc(14.0), arc(9.5), arc(5.0), dot(12.0, 19.0, 1.6)]
+        }
         Icon::Grid => {
             vec![duo(3.5, 3.5, 7.0, 7.0, 2.0), duo(13.5, 3.5, 7.0, 7.0, 2.0), duo(3.5, 13.5, 7.0, 7.0, 2.0), duo(13.5, 13.5, 7.0, 7.0, 2.0)]
         }
@@ -278,7 +295,7 @@ pub fn icon_prims(icon: Icon, rect: Rect, color: Color) -> Vec<Prim> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 42] = [
+    const ALL: [Icon; 45] = [
         Icon::Note,
         Icon::Play,
         Icon::Pause,
@@ -321,6 +338,9 @@ mod tests {
         Icon::Drop,
         Icon::Wind,
         Icon::Thermo,
+        Icon::Pencil,
+        Icon::Battery,
+        Icon::Wifi,
     ];
 
     #[test]

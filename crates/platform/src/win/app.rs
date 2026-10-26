@@ -88,6 +88,9 @@ struct SavedState {
     calendar: Vec<ngambang_core::calendar::CalEvent>,
     /// The Indonesian holiday calendar was linked once (removing it sticks).
     holidays_linked: bool,
+    /// Pinned clipboard entries (the rest of the history is not kept).
+    clip_pins: Vec<ngambang_core::model::ClipEntry>,
+    notes: Vec<ngambang_core::model::Note>,
 }
 
 fn load_state() -> SavedState {
@@ -146,6 +149,7 @@ struct Workers {
     audio_mixer: bool,
     stats: Option<StatsSampler>,
     captures: Option<Stopper>,
+    downloads: Option<Stopper>,
     privacy: Option<Stopper>,
     _config: Option<Stopper>,
     clipboard: bool,
@@ -439,6 +443,7 @@ impl App {
                 audio_mixer: false,
                 stats: None,
                 captures: None,
+                downloads: None,
                 privacy: None,
                 _config: None,
                 clipboard: false,
@@ -521,6 +526,20 @@ impl App {
         if !self.state.todos.is_empty() {
             self.dispatch(Event::Todos(self.state.todos.clone()));
         }
+        if !self.state.clip_pins.is_empty() {
+            self.dispatch(Event::ClipPins(self.state.clip_pins.clone()));
+        }
+        if !self.state.notes.is_empty() {
+            self.dispatch(Event::Notes(self.state.notes.clone()));
+        }
+        // Battery, power plans, the connection; files can be dropped on the island.
+        self.dispatch(Event::Power(super::extras::power_state()));
+        self.refresh_plans();
+        self.watch_network();
+        super::extras::accept_drops(self.hwnd);
+        if let Some(a) = &self.workers.audio {
+            a.query_mic();
+        }
         if !self.state.calendar.is_empty() && !self.model.config.calendar.feeds.is_empty() {
             self.dispatch(Event::Calendar(self.state.calendar.clone()));
         }
@@ -549,6 +568,10 @@ impl App {
     }
 
     fn shutdown(&mut self) {
+        // Don't leave Do not disturb on behind us.
+        if self.model.timer.is_running() && !self.model.on_break && self.model.config.timer.focus_assist {
+            system::focus_session(false);
+        }
         if let Some(g) = self.state.power_restore.take().and_then(|s| system::guid_from_str(&s)) {
             system::set_power_plan(&g);
         }
@@ -837,11 +860,14 @@ impl App {
         }
         if on(ModuleId::Captures) != self.workers.captures.is_some() || (captures_changed && on(ModuleId::Captures)) {
             self.workers.captures = None;
+            self.workers.downloads = None;
             if on(ModuleId::Captures) {
                 let dirs = watch::capture_dirs(&self.model.config.captures.extra_dirs);
                 self.workers.captures = watch::captures(self.bus.clone(), dirs).map_err(|e| log_warn!("captures: {e}")).ok();
+                self.workers.downloads = watch::downloads(self.bus.clone()).map_err(|e| log_warn!("downloads: {e}")).ok();
             }
         }
+        self.load_launch_icons();
         if on(ModuleId::Privacy) != self.workers.privacy.is_some() {
             self.workers.privacy =
                 if on(ModuleId::Privacy) { watch::privacy(self.bus.clone()).map_err(|e| log_warn!("privacy: {e}")).ok() } else { None };
@@ -996,6 +1022,28 @@ impl App {
                 save_state(&self.state);
             }
             Effect::SaveValue(table, key, value) => edit_config(&[(table, key, value)]),
+            Effect::FocusSession(on) => system::focus_session(on),
+            Effect::PasteText(text, paste) => {
+                if let Err(e) = clipboard::write_text(self.hwnd, &text) {
+                    log_warn!("clipboard: {e}");
+                } else if paste {
+                    super::extras::send_paste();
+                }
+            }
+            Effect::SaveClipPins => {
+                self.state.clip_pins = self.model.clip_history.iter().filter(|e| e.pinned).cloned().collect();
+                save_state(&self.state);
+            }
+            Effect::SaveNotes => {
+                self.state.notes = self.model.notes.clone();
+                save_state(&self.state);
+            }
+            Effect::SetPowerPlan(guid) => {
+                if let Some(g) = system::guid_from_str(&guid) {
+                    system::set_power_plan(&g);
+                }
+            }
+            Effect::MicToggle => self.workers.audio.iter().for_each(|a| a.toggle_mic()),
             Effect::TakeFocus => unsafe {
                 let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
                 SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex & !(WS_EX_NOACTIVATE.0 as isize));
@@ -1009,6 +1057,54 @@ impl App {
                 self.focus = None;
             },
         }
+    }
+
+    /// Power plans and the active one, for the Battery slip.
+    fn refresh_plans(&mut self) {
+        let active = system::active_power_plan().map(|g| system::guid_to_string(&g));
+        self.dispatch(Event::PowerPlans(system::power_plans(), active));
+    }
+
+    /// Icons for pinned items that have none yet.
+    fn load_launch_icons(&mut self) {
+        let missing: Vec<String> =
+            self.model.config.launch.items.iter().map(|i| i.path.clone()).filter(|p| !self.model.launch_icons.contains_key(p)).collect();
+        for path in missing {
+            if let Some(art) = super::extras::file_icon(&path) {
+                let fx = self.model.update(now_ms(), Event::LaunchIcon(path, art));
+                for e in fx {
+                    if e != Effect::Render {
+                        self.exec(e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Hear about network changes; each is checked on a worker thread.
+    fn watch_network(&mut self) {
+        use windows::Win32::NetworkManagement::IpHelper::{NotifyIpInterfaceChange, MIB_IPINTERFACE_ROW, MIB_NOTIFICATION_TYPE};
+        use windows::Win32::Networking::WinSock::AF_UNSPEC;
+        unsafe extern "system" fn changed(_: *const core::ffi::c_void, _: *const MIB_IPINTERFACE_ROW, _: MIB_NOTIFICATION_TYPE) {
+            let h = HOOK_HWND.load(Ordering::SeqCst);
+            if h != 0 {
+                let _ = PostMessageW(Some(HWND(h as *mut _)), WM_APP_NET, WPARAM(0), LPARAM(0));
+            }
+        }
+        let mut handle = windows::Win32::Foundation::HANDLE::default();
+        unsafe {
+            let _ = NotifyIpInterfaceChange(AF_UNSPEC, Some(changed), None, false, &mut handle);
+        }
+        self.check_network();
+    }
+
+    fn check_network(&self) {
+        let bus = self.bus.clone();
+        let _ = std::thread::Builder::new().name("ngambang-netstate".into()).spawn(move || {
+            // Changes come in bursts while an adapter settles.
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            bus.send(Event::Network(super::extras::net_state()));
+        });
     }
 
     fn refresh_ports(&self) {
@@ -1515,7 +1611,7 @@ impl App {
                 }
                 zero
             }
-            WM_KEYDOWN if self.model.todo_input.is_some() => {
+            WM_KEYDOWN if self.model.input.is_some() => {
                 // Typing a task: editing keys go to the field.
                 let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
                 match VIRTUAL_KEY(wp.0 as u16) {
@@ -1531,7 +1627,7 @@ impl App {
                 }
                 zero
             }
-            WM_CHAR if self.model.todo_input.is_some() => {
+            WM_CHAR if self.model.input.is_some() => {
                 // UTF-16 units; a surrogate pair arrives as two messages.
                 let unit = wp.0 as u16;
                 if (0xD800..0xDC00).contains(&unit) {
@@ -1613,6 +1709,19 @@ impl App {
                 }
                 zero
             }
+            WM_DROPFILES => {
+                let paths = super::extras::dropped_paths(windows::Win32::UI::Shell::HDROP(wp.0 as *mut _));
+                if !paths.is_empty() {
+                    self.dispatch(Event::Dropped(paths));
+                }
+                zero
+            }
+            WM_APP_NET => {
+                if self.model.enabled(ModuleId::Power) || self.model.enabled(ModuleId::Weather) {
+                    self.check_network();
+                }
+                zero
+            }
             WM_DISPLAYCHANGE | WM_DPICHANGED => {
                 if msg == WM_DISPLAYCHANGE && self.displaced.is_some() {
                     // Displays came or went: wait on one that still exists.
@@ -1644,6 +1753,10 @@ impl App {
                 None
             }
             WM_POWERBROADCAST => {
+                // The battery or charger changed.
+                if wp.0 == 0x0A || wp.0 == 0x8013 {
+                    self.dispatch(Event::Power(super::extras::power_state()));
+                }
                 // Back from sleep: the clock jumped and the network may have changed.
                 if wp.0 == 0x12 {
                     self.dispatch(clock_event());

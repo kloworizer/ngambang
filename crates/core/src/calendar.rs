@@ -23,6 +23,25 @@ pub struct CalEvent {
     /// The event's own reminders (VALARM), in seconds before the start.
     #[serde(default)]
     pub alarms: Vec<i64>,
+    /// A video meeting to join (Meet, Zoom, Teams, Webex…), if any.
+    #[serde(default)]
+    pub link: String,
+}
+
+/// The first video-meeting link in some text.
+pub fn meeting_link(text: &str) -> Option<String> {
+    const HOSTS: [&str; 6] =
+        ["meet.google.com/", "zoom.us/j/", "zoom.us/my/", "teams.microsoft.com/l/meetup-join", "teams.live.com/meet", "webex.com/"];
+    let mut rest = text;
+    while let Some(i) = rest.find("https://") {
+        let url: String =
+            rest[i..].chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '<' | '>' | ')' | ',' | '\\')).collect();
+        if HOSTS.iter().any(|h| url.contains(h)) {
+            return Some(url);
+        }
+        rest = &rest[i + 8..];
+    }
+    None
 }
 
 /// `webcal://` links (what "subscribe" buttons hand out) are plain HTTPS.
@@ -297,6 +316,8 @@ struct RawEvent {
     uid: String,
     title: String,
     location: String,
+    description: String,
+    conference: String,
     start: Option<(i64, bool, Tz)>,
     end: Option<(i64, bool, Tz)>,
     duration: Option<i64>,
@@ -409,6 +430,8 @@ pub fn parse(text: &str, feed: usize, from: i64, to: i64, local_offset_min: i32)
                         "UID" => e.uid = p.value.trim().to_string(),
                         "SUMMARY" => e.title = unescape(&p.value),
                         "LOCATION" => e.location = unescape(&p.value),
+                        "DESCRIPTION" => e.description = unescape(&p.value),
+                        "X-GOOGLE-CONFERENCE" | "X-MICROSOFT-SKYPETEAMSMEETINGURL" | "URL" => e.conference = p.value.trim().to_string(),
                         "DTSTART" => e.start = stamp_with_tz(&p),
                         "DTEND" => e.end = stamp_with_tz(&p),
                         "DURATION" => e.duration = parse_duration(&p.value),
@@ -469,6 +492,11 @@ pub fn parse(text: &str, feed: usize, from: i64, to: i64, local_offset_min: i32)
             .collect();
         alarms.sort_unstable();
         alarms.dedup();
+        let link = [e.conference.as_str(), e.location.as_str(), e.description.as_str()]
+            .iter()
+            .find_map(|t| meeting_link(t))
+            .or_else(|| e.location.starts_with("https://").then(|| e.location.clone()))
+            .unwrap_or_default();
         let mut push = |s: i64| {
             if s < to && s + length.max(1) > from && !excluded.contains(&s) {
                 out.push(CalEvent {
@@ -479,6 +507,7 @@ pub fn parse(text: &str, feed: usize, from: i64, to: i64, local_offset_min: i32)
                     all_day,
                     feed,
                     alarms: alarms.clone(),
+                    link: link.clone(),
                 });
             }
         };
@@ -715,6 +744,19 @@ mod tests {
             assert_eq!(at("Lunch (no zone)"), unix(2026, 10, 29, 12, 0, offset as i64), "offset {offset}");
             assert_eq!(at("Libur"), unix(2026, 10, 28, 0, 0, offset as i64), "offset {offset}");
         }
+    }
+
+    #[test]
+    fn meeting_links() {
+        assert_eq!(
+            meeting_link("Join: https://meet.google.com/abc-defg-hij\nor call"),
+            Some("https://meet.google.com/abc-defg-hij".into())
+        );
+        assert_eq!(meeting_link("<https://us02web.zoom.us/j/123?pwd=x>"), Some("https://us02web.zoom.us/j/123?pwd=x".into()));
+        assert_eq!(meeting_link("see https://example.com"), None);
+        let ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART:20261026T030000Z\nDTEND:20261026T040000Z\nSUMMARY:Sync\nDESCRIPTION:Agenda\\nhttps://example.com\nX-GOOGLE-CONFERENCE:https://meet.google.com/xyz-abcd-efg\nEND:VEVENT\nEND:VCALENDAR\n";
+        let ev = parse(ics, 0, FROM, FROM + 7 * 86_400, 420);
+        assert_eq!(ev[0].link, "https://meet.google.com/xyz-abcd-efg");
     }
 
     #[test]

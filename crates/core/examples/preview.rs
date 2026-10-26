@@ -198,6 +198,31 @@ fn sample() -> Model {
         Event::Capture(Capture { path: "C:\\c.mp4".into(), name: "Clip 2026-10-25.mp4".into(), kind: CaptureKind::Clip, at_ms: now }),
     );
     m.update(now, Event::Privacy(vec![(Device::Microphone, "Discord".into())]));
+    for t in ["npm run build -- --watch", "https://github.com/kloworizer/ngambang/pull/3", "Jl. Sudirman Kav. 52"] {
+        m.update(now, Event::Clipboard { text: t.into(), unix_now: 1_792_911_000 });
+    }
+    m.update(now, Event::Pipe(ngambang_core::protocol::Request::Note { text: "Rotate the deploy key on Friday".into() }));
+    m.update(now, Event::Pipe(ngambang_core::protocol::Request::Note { text: "Ask Dimas for the API spec".into() }));
+    m.update(now, Event::Power(PowerState { percent: Some(64), on_ac: false, saver: false, secs_left: Some(3 * 3600 + 720) }));
+    m.update(now, Event::Network(NetState { online: true, vpn: Some("WireGuard".into()), wifi: None }));
+    m.update(
+        now,
+        Event::PowerPlans(
+            vec![("{a}".into(), "Balanced".into()), ("{b}".into(), "Power saver".into()), ("{c}".into(), "High performance".into())],
+            Some("{a}".into()),
+        ),
+    );
+    m.update(
+        now,
+        Event::Dropped(vec![
+            "C:\\Apps\\Code.exe".into(),
+            "D:\\Projects".into(),
+            "C:\\Apps\\Figma.exe".into(),
+            "C:\\Users\\me\\Downloads".into(),
+            "C:\\Apps\\Spotify.exe".into(),
+        ]),
+    );
+    m.update(now, Event::Download { name: "ubuntu-24.04-desktop-amd64.iso".into(), bytes: 1_840_000_000, done: None });
     m.update(now, Event::News(ngambang_core::finance::parse_news(include_str!("../testdata/yahoo_news.json"), "AAPL")));
     m.tags.clear();
     m
@@ -242,7 +267,7 @@ fn main() {
     m.config.dock.style = ngambang_core::config::Style::Orb;
     m.state = IslandState::Slips;
     m.front = Some(ModuleId::Todo);
-    m.todo_input = Some("Call the bank about the card".into());
+    m.input = Some(Input { to: InputFor::Todo, text: "Call the bank about the card".into() });
     add("Todo input Left", &build(&m, Edge::Left, &ApproxMeasure));
     html += "</div>";
     std::fs::write(&out, html).expect("write");

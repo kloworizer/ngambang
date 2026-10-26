@@ -23,10 +23,13 @@ pub enum ModuleId {
     Todo,
     Calendar,
     Finance,
+    Notes,
+    Power,
+    Launch,
 }
 
 impl ModuleId {
-    pub const ALL: [ModuleId; 14] = [
+    pub const ALL: [ModuleId; 17] = [
         ModuleId::Media,
         ModuleId::Mixer,
         ModuleId::Commands,
@@ -41,6 +44,9 @@ impl ModuleId {
         ModuleId::Todo,
         ModuleId::Calendar,
         ModuleId::Finance,
+        ModuleId::Notes,
+        ModuleId::Power,
+        ModuleId::Launch,
     ];
 
     /// Key used in the `[modules]` table.
@@ -60,6 +66,9 @@ impl ModuleId {
             ModuleId::Todo => "todo",
             ModuleId::Calendar => "calendar",
             ModuleId::Finance => "finance",
+            ModuleId::Notes => "notes",
+            ModuleId::Power => "power",
+            ModuleId::Launch => "launch",
         }
     }
 
@@ -80,6 +89,9 @@ impl ModuleId {
             ModuleId::Todo => "To-do list",
             ModuleId::Calendar => "Calendar",
             ModuleId::Finance => "Markets watchlist",
+            ModuleId::Notes => "Quick notes",
+            ModuleId::Power => "Battery, network & power",
+            ModuleId::Launch => "Quick launch",
         }
     }
 
@@ -106,6 +118,8 @@ pub struct Config {
     pub weather: WeatherConfig,
     pub calendar: CalendarConfig,
     pub finance: FinanceConfig,
+    pub power: PowerConfig,
+    pub launch: LaunchConfig,
     pub update: UpdateConfig,
     pub motion: MotionConfig,
 }
@@ -191,6 +205,9 @@ pub struct Modules {
     pub todo: bool,
     pub calendar: bool,
     pub finance: bool,
+    pub notes: bool,
+    pub power: bool,
+    pub launch: bool,
     /// Tab order, by module key; modules not listed follow in the default order.
     pub order: Vec<String>,
 }
@@ -212,6 +229,9 @@ impl Default for Modules {
             todo: true,
             calendar: true,
             finance: true,
+            notes: true,
+            power: true,
+            launch: true,
             order: Vec::new(),
         }
     }
@@ -234,6 +254,9 @@ impl Modules {
             ModuleId::Todo => self.todo,
             ModuleId::Calendar => self.calendar,
             ModuleId::Finance => self.finance,
+            ModuleId::Notes => self.notes,
+            ModuleId::Power => self.power,
+            ModuleId::Launch => self.launch,
         }
     }
 
@@ -253,6 +276,9 @@ impl Modules {
             ModuleId::Todo => &mut self.todo,
             ModuleId::Calendar => &mut self.calendar,
             ModuleId::Finance => &mut self.finance,
+            ModuleId::Notes => &mut self.notes,
+            ModuleId::Power => &mut self.power,
+            ModuleId::Launch => &mut self.launch,
         };
         *slot = on;
     }
@@ -347,11 +373,26 @@ pub struct TimerConfig {
     pub custom_min: u32,
     /// Hold back lower-priority tags while a round runs.
     pub quiet_while_running: bool,
+    /// A break follows each round (0 = no breaks) ...
+    pub break_min: u32,
+    /// ... a longer one after every `long_every` rounds.
+    pub long_break_min: u32,
+    pub long_every: u32,
+    /// Turn on Windows' Do not disturb (focus session) during rounds.
+    pub focus_assist: bool,
 }
 
 impl Default for TimerConfig {
     fn default() -> Self {
-        TimerConfig { presets_min: vec![25, 50], custom_min: 15, quiet_while_running: true }
+        TimerConfig {
+            presets_min: vec![25, 50],
+            custom_min: 15,
+            quiet_while_running: true,
+            break_min: 5,
+            long_break_min: 15,
+            long_every: 4,
+            focus_assist: true,
+        }
     }
 }
 
@@ -411,11 +452,14 @@ pub struct PrayerConfig {
     pub asr: crate::prayer::Asr,
     /// Minutes before each prayer for a reminder tag; 0 = only at the time.
     pub reminder_min: u32,
+    /// Days added to the calculated Hijri date (−2…2), to match the date
+    /// announced after sighting the moon.
+    pub hijri_adjust: i32,
 }
 
 impl Default for PrayerConfig {
     fn default() -> Self {
-        PrayerConfig { method: crate::prayer::Method::Kemenag, asr: crate::prayer::Asr::Standard, reminder_min: 10 }
+        PrayerConfig { method: crate::prayer::Method::Kemenag, asr: crate::prayer::Asr::Standard, reminder_min: 10, hijri_adjust: 0 }
     }
 }
 
@@ -478,6 +522,11 @@ pub struct WatchItem {
     /// Yahoo Finance symbol: BBCA.JK, ^JKSE, BTC-USD, USDIDR=X, AAPL…
     pub symbol: String,
     pub name: String,
+    /// Alert when the price rises above / falls below these levels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub above: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub below: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -494,7 +543,7 @@ pub struct FinanceConfig {
 
 impl Default for FinanceConfig {
     fn default() -> Self {
-        let item = |symbol: &str, name: &str| WatchItem { symbol: symbol.into(), name: name.into() };
+        let item = |symbol: &str, name: &str| WatchItem { symbol: symbol.into(), name: name.into(), ..Default::default() };
         FinanceConfig {
             watchlist: vec![item("^JKSE", "IDX Composite"), item("BTC-USD", "Bitcoin"), item("USDIDR=X", "USD/IDR")],
             price_alerts: true,
@@ -502,6 +551,38 @@ impl Default for FinanceConfig {
             news: true,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PowerConfig {
+    /// Power plan GUIDs to switch to on battery and when plugged in; empty = leave as is.
+    pub battery_plan: String,
+    pub plugged_plan: String,
+    /// Battery percentage that raises a warning (and again at 10 %).
+    pub low_battery: u32,
+    /// Tags when the connection or a VPN drops or comes back.
+    pub network_tags: bool,
+}
+
+impl Default for PowerConfig {
+    fn default() -> Self {
+        PowerConfig { battery_plan: String::new(), plugged_plan: String::new(), low_battery: 20, network_tags: true }
+    }
+}
+
+/// An app, folder, file or link pinned to the Quick launch slip.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LaunchItem {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LaunchConfig {
+    pub items: Vec<LaunchItem>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -552,6 +633,9 @@ weather = true     # weather and early warnings (GDACS, USGS)
 todo = true        # a small to-do list
 calendar = true    # upcoming events from linked calendars
 finance = true     # prices for your watchlist
+notes = true       # quick notes (also `ngambang note "..."`)
+power = true       # battery, network and VPN, power plans
+launch = true      # pinned apps, folders and files (drop them on the island)
 order = []         # tab order by key, e.g. ["media", "todo"]; the rest follow
 
 [media]
@@ -574,6 +658,10 @@ tags = true
 presets_min = [25, 50]
 custom_min = 15            # the "Custom" round; − and + in the slip change it
 quiet_while_running = true
+break_min = 5              # a break after each round; 0 = none
+long_break_min = 15        # a longer break ...
+long_every = 4             # ... after this many rounds
+focus_assist = true        # Windows' Do not disturb during rounds
 
 [game]
 games = []                 # exe names that always count as games
@@ -597,6 +685,7 @@ longitude = 106.8456
 method = "kemenag"         # kemenag | jakim | mwl | isna | egypt | makkah | karachi
 asr = "standard"           # standard | hanafi
 reminder_min = 10          # reminder before each prayer; 0 = only at the time
+hijri_adjust = 0           # days added to the Hijri date (-2…2) to match the announced one
 
 [weather]
 alerts = true              # tags for disasters near the location
@@ -613,6 +702,15 @@ watchlist = [{ symbol = "^JKSE", name = "IDX Composite" }, { symbol = "BTC-USD",
 price_alerts = true        # a tag when a symbol moves move_pct, and at every further step
 move_pct = 3.0             # percent since the previous close
 news = true                # a tag for fresh headlines about your watchlist
+
+[power]
+battery_plan = ""          # power plan GUID to use on battery; empty = leave as is
+plugged_plan = ""          # power plan GUID to use when plugged in
+low_battery = 20           # warn at this battery level (and at 10%)
+network_tags = true        # tags when the connection or a VPN drops or comes back
+
+[launch]                   # drop apps, folders or files on the island to pin them
+items = []
 
 [update]
 auto_check = true          # look for a new release on GitHub once a day
@@ -668,6 +766,8 @@ impl Config {
         section!("weather", weather);
         section!("calendar", calendar);
         section!("finance", finance);
+        section!("power", power);
+        section!("launch", launch);
         section!("update", update);
         section!("motion", motion);
         cfg
@@ -698,6 +798,16 @@ impl Config {
             self.timer.presets_min = TimerConfig::default().presets_min;
         }
         self.timer.presets_min.truncate(3);
+        if self.timer.break_min > 60 || self.timer.long_break_min > 120 || self.timer.long_every == 0 {
+            warnings.push("timer: break_min 0–60, long_break_min 0–120, long_every 1 or more".into());
+            self.timer.break_min = self.timer.break_min.min(60);
+            self.timer.long_break_min = self.timer.long_break_min.min(120);
+            self.timer.long_every = self.timer.long_every.max(1);
+        }
+        if !(-2..=2).contains(&self.prayer.hijri_adjust) {
+            warnings.push("prayer.hijri_adjust must be -2…2".into());
+            self.prayer.hijri_adjust = self.prayer.hijri_adjust.clamp(-2, 2);
+        }
         if !(0.5..=50.0).contains(&self.finance.move_pct) {
             warnings.push("finance.move_pct must be 0.5–50".into());
             self.finance.move_pct = if self.finance.move_pct.is_nan() { 3.0 } else { self.finance.move_pct.clamp(0.5, 50.0) };
