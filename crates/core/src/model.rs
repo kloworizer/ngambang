@@ -25,6 +25,19 @@ pub const BREAK_REPEAT_MS: u64 = 30 * 60_000;
 pub const UNATTENDED_MS: u64 = 4000;
 pub const MAX_JOBS: usize = 8;
 pub const MAX_CAPTURES: usize = 5;
+/// The notch shows each glance this long.
+pub const CAROUSEL_MS: u64 = 6000;
+
+/// What the notch shows at rest when nothing is playing, in turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glance {
+    Weather,
+    /// A watchlist entry, by index.
+    Quote(usize),
+    Todo,
+    Calendar,
+    Prayer,
+}
 /// A calendar reminder may show this early (timer rounding) or this late
 /// (the computer slept through it), in seconds.
 const CALENDAR_EARLY_S: i64 = 5;
@@ -54,10 +67,12 @@ pub enum TimerId {
     VolumeFlash,
     Prayer,
     Calendar,
+    /// The notch turns to its next glance.
+    Carousel,
 }
 
 impl TimerId {
-    pub const ALL: [TimerId; 11] = [
+    pub const ALL: [TimerId; 12] = [
         TimerId::HoverDelay,
         TimerId::SeamPeek,
         TimerId::Collapse,
@@ -69,6 +84,7 @@ impl TimerId {
         TimerId::VolumeFlash,
         TimerId::Prayer,
         TimerId::Calendar,
+        TimerId::Carousel,
     ];
 }
 
@@ -662,6 +678,9 @@ pub struct Model {
 
     samplers: BTreeSet<Sampler>,
     rng: u64,
+    /// Which glance the notch shows (counts up; taken modulo the glances).
+    pub carousel: usize,
+    carousel_armed: bool,
 }
 
 /// A media session (SMTC app id) and a mixer row belong to the same app.
@@ -723,6 +742,8 @@ impl Model {
             moves: BTreeMap::new(),
             samplers: BTreeSet::new(),
             rng: seed | 1,
+            carousel: 0,
+            carousel_armed: false,
         };
         m.state = m.rest_state();
         m
@@ -843,6 +864,7 @@ impl Model {
         let mut fx = Vec::new();
         self.handle(event, &mut fx);
         self.reconcile_samplers(&mut fx);
+        self.reconcile_carousel(&mut fx);
         // One render per update, at the end.
         fx.retain(|e| *e != Effect::Render);
         fx.push(Effect::Render);
@@ -1000,6 +1022,10 @@ impl Model {
                 }
             }
             Event::Timer(TimerId::Prayer) => self.prayer_alerts(fx),
+            Event::Timer(TimerId::Carousel) => {
+                self.carousel_armed = false;
+                self.carousel = self.carousel.wrapping_add(1);
+            }
             Event::Sample(_) => {}
 
             Event::Click(action) => self.click(action, fx),
@@ -2121,6 +2147,62 @@ impl Model {
         s
     }
 
+    /// Something is playing (the notch shows it instead of the glances).
+    pub fn playing(&self) -> bool {
+        self.front_media().is_some_and(|s| s.playing)
+    }
+
+    /// The glances that have something to show, in order: weather, the
+    /// markets, the to-do list, the calendar, prayer times.
+    pub fn glances(&self) -> Vec<Glance> {
+        let mut v = Vec::new();
+        if self.weather.is_some() {
+            v.push(Glance::Weather);
+        }
+        if self.enabled(ModuleId::Finance) {
+            let quoted = self
+                .config
+                .finance
+                .watchlist
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| self.quotes.iter().any(|q| q.symbol.eq_ignore_ascii_case(&w.symbol)))
+                .map(|(i, _)| Glance::Quote(i))
+                .take(3);
+            v.extend(quoted);
+        }
+        if self.enabled(ModuleId::Todo) && self.todos.iter().any(|t| !t.done) {
+            v.push(Glance::Todo);
+        }
+        if self.next_event_within(36 * 3600).is_some() {
+            v.push(Glance::Calendar);
+        }
+        if self.prayer_day.is_some() {
+            v.push(Glance::Prayer);
+        }
+        v
+    }
+
+    /// The glance the notch shows now.
+    pub fn glance(&self) -> Option<Glance> {
+        let g = self.glances();
+        (!g.is_empty()).then(|| g[self.carousel % g.len()])
+    }
+
+    /// The notch turns through its glances while it rests and nothing plays.
+    fn reconcile_carousel(&mut self, fx: &mut Vec<Effect>) {
+        let want = self.config.dock.style == crate::config::Style::Notch
+            && self.state == IslandState::Orb
+            && !self.playing()
+            && self.glances().len() > 1;
+        if want && !self.carousel_armed {
+            fx.push(Effect::SetTimer(TimerId::Carousel, CAROUSEL_MS));
+        } else if !want && self.carousel_armed {
+            fx.push(Effect::KillTimer(TimerId::Carousel));
+        }
+        self.carousel_armed = want;
+    }
+
     fn reconcile_samplers(&mut self, fx: &mut Vec<Effect>) {
         let want = self.desired_samplers();
         for gone in self.samplers.difference(&want) {
@@ -2834,6 +2916,33 @@ mod tests {
         m.tags.clear();
         m.update(20, Event::News(news));
         assert!(m.current_tag().is_none(), "seen already");
+    }
+
+    #[test]
+    fn the_notch_turns_through_glances_while_nothing_plays() {
+        let mut m = model();
+        m.config.dock.style = crate::config::Style::Notch;
+        m.update(0, Event::SetModule(ModuleId::Prayer, true));
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 600.0, utc_offset_min: 420, unix: 1_792_911_900 });
+        m.update(0, Event::TodoAdded("Buy rice".into()));
+        m.update(10, Event::Quotes(vec![quote("BTC-USD", 1.0)]));
+        assert_eq!(m.glances(), vec![Glance::Quote(1), Glance::Todo, Glance::Prayer]);
+        assert!(m.carousel_armed);
+        let first = m.glance();
+        m.update(CAROUSEL_MS, Event::Timer(TimerId::Carousel));
+        assert_ne!(m.glance(), first);
+        // Music playing: the notch shows it and stops turning.
+        let fx = m.update(
+            CAROUSEL_MS + 10,
+            Event::Media(vec![MediaSession { id: "a".into(), title: "Song".into(), playing: true, ..Default::default() }]),
+        );
+        assert!(fx.contains(&Effect::KillTimer(TimerId::Carousel)));
+        // The orb style never turns.
+        let mut m = model();
+        m.update(0, Event::TodoAdded("x".into()));
+        m.update(0, Event::SetModule(ModuleId::Prayer, true));
+        let fx = m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 600.0, utc_offset_min: 420, unix: 1_792_911_900 });
+        assert!(!has_timer(&fx, TimerId::Carousel));
     }
 
     #[test]

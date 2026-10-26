@@ -6,6 +6,33 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-10-26
+
+### Added
+- **The notch turns through glances.** In the notch style, when nothing is
+  playing the notch shows the weather, your watchlist, the next to-do, the
+  next event and the next prayer time in turn, a few seconds each. While
+  music plays it shows the song instead.
+- **Headlines from Google News** as well as Yahoo Finance, so shares Yahoo
+  has no news for (BBCA, BBRI…) get some too.
+
+### Changed
+- **Compact strips docked top or bottom.** Slips docked to the top or bottom
+  edge (and under the notch) are at most 180 px tall, tabs included: the
+  tabs sit as small icons in the header row and each module lays out in
+  columns side by side.
+- **Smaller everywhere.** Labels, details and buttons are smaller and slips
+  docked left or right are narrower (400 px) and shorter; the headline of
+  each module (the time, the temperature, the next prayer, the price) stays
+  large.
+- **Fresher headlines.** Checked every 5 minutes (every 2 while the Markets
+  slip is open, and right away when you open it), newest first.
+
+### Performance
+- Less memory at rest: after 10 s idle the island also clears Direct2D's
+  caches, lets the graphics driver release scratch memory and compacts its
+  heap before trimming; Windows is told it may page the island out first.
+
 ## [0.1.7] - 2026-10-26
 
 ### Added

@@ -179,6 +179,25 @@ fn sample() -> Model {
     btc.change_pct = 1.4;
     btc.points.reverse();
     m.update(now, Event::Quotes(vec![q, btc]));
+    for (i, ok) in [(0, true), (1, false), (2, true)] {
+        m.update(
+            now,
+            Event::Pipe(ngambang_core::protocol::Request::Done {
+                title: Some(["cargo build --release", "npm test", "terraform plan"][i].into()),
+                id: format!("job{i}"),
+                ok,
+                code: Some(if ok { 0 } else { 1 }),
+                duration_s: Some(42.0 + i as f64 * 30.0),
+                hwnd: Some("0x10".into()),
+            }),
+        );
+    }
+    m.update(now, Event::Clipboard { text: "550e8400-e29b-41d4-a716-446655440000".into(), unix_now: 1_792_911_900 });
+    m.update(
+        now,
+        Event::Capture(Capture { path: "C:\\c.mp4".into(), name: "Clip 2026-10-25.mp4".into(), kind: CaptureKind::Clip, at_ms: now }),
+    );
+    m.update(now, Event::Privacy(vec![(Device::Microphone, "Discord".into())]));
     m.update(now, Event::News(ngambang_core::finance::parse_news(include_str!("../testdata/yahoo_news.json"), "AAPL")));
     m.tags.clear();
     m
@@ -208,7 +227,13 @@ fn main() {
     // The notch style: at rest, a tag and a slip hanging from the top.
     m.config.dock.style = ngambang_core::config::Style::Notch;
     m.state = IslandState::Orb;
-    add("notch", &build(&m, Edge::Top, &ApproxMeasure));
+    add("notch playing", &build(&m, Edge::Top, &ApproxMeasure));
+    let playing = std::mem::take(&mut m.media);
+    for i in 0..m.glances().len() {
+        m.carousel = i;
+        add(&format!("notch glance {i}"), &build(&m, Edge::Top, &ApproxMeasure));
+    }
+    m.media = playing;
     m.state = IslandState::Tag;
     add("notch tag", &build(&m, Edge::Top, &ApproxMeasure));
     m.state = IslandState::Slips;

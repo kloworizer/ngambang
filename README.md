@@ -20,7 +20,11 @@ mic/camera alert.
   moves to your other display (if you have one) and comes back afterwards,
   or sinks to a 3 px line on the edge.
 - **Orb or notch.** Rest as an orb on any edge, or as a notch hanging from
-  the top of the screen that you slide left or right.
+  the top of the screen that you slide left or right. The notch shows the
+  song that is playing, or turns through the weather, your watchlist, your
+  next task, event and prayer time.
+- **Compact on the top or bottom edge.** Docked there, slips are low wide
+  strips (at most 180 px tall).
 
 Specification: [docs/SPEC.md](docs/SPEC.md)
 

@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 pub const REFRESH_MS: u64 = 60_000;
 /// ... and this often in the background, to notice big moves.
 pub const WATCH_MS: u64 = 5 * 60_000;
-/// Headlines for the watchlist refresh this often.
-pub const NEWS_MS: u64 = 15 * 60_000;
+/// Headlines for the watchlist refresh this often in the background ...
+pub const NEWS_MS: u64 = 5 * 60_000;
+/// ... and this often while the Markets slip is open.
+pub const NEWS_OPEN_MS: u64 = 2 * 60_000;
 /// A headline pops up only while it is this fresh (seconds).
 pub const NEWS_FRESH_S: i64 = 3 * 3600;
 
@@ -29,6 +31,73 @@ pub fn search_url(query: &str) -> String {
 /// Headlines about a symbol (or a name, for symbols Yahoo has none for).
 pub fn news_url(query: &str) -> String {
     format!("https://query1.finance.yahoo.com/v1/finance/search?q={}&quotesCount=0&newsCount=4&listsCount=0", encode(query.trim()))
+}
+
+/// Google News for a name (fresher than Yahoo, and it knows local shares):
+/// the last day's stories, as RSS.
+pub fn google_news_url(query: &str) -> String {
+    format!("https://news.google.com/rss/search?q={}%20when%3A1d&hl=en-ID&gl=ID&ceid=ID%3Aen", encode(query.trim()))
+}
+
+fn xml_text(s: &str) -> String {
+    let s = s.trim();
+    let s = s.strip_prefix("<![CDATA[").and_then(|x| x.strip_suffix("]]>")).unwrap_or(s);
+    s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'").replace("&amp;", "&")
+}
+
+/// The text inside the first `<tag …>…</tag>` of `xml`.
+fn xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let open = xml.find(&format!("<{tag}"))?;
+    let start = open + xml[open..].find('>')? + 1;
+    let end = start + xml[start..].find(&format!("</{tag}>"))?;
+    Some(&xml[start..end])
+}
+
+/// "Sun, 25 Oct 2026 09:59:19 GMT" → unix seconds.
+fn parse_rfc822(v: &str) -> Option<i64> {
+    let parts: Vec<&str> = v.split_whitespace().collect();
+    let [_, day, mon, year, time, zone] = parts.as_slice() else { return None };
+    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let m = months.iter().position(|x| x.eq_ignore_ascii_case(mon))? as u32 + 1;
+    let t: Vec<i64> = time.split(':').filter_map(|x| x.parse().ok()).collect();
+    let [h, mi, se] = t.as_slice() else { return None };
+    let offset = match *zone {
+        "GMT" | "UTC" | "Z" => 0,
+        z => {
+            let sign = if z.starts_with('-') { -1 } else { 1 };
+            let d = z.trim_start_matches(['+', '-']);
+            sign * (d.get(0..2)?.parse::<i64>().ok()? * 3600 + d.get(2..4)?.parse::<i64>().ok()? * 60)
+        }
+    };
+    let days = crate::calendar::days_from_civil(year.parse().ok()?, m, day.parse().ok()?);
+    Some(days * 86_400 + h * 3600 + mi * 60 + se - offset)
+}
+
+/// Stories from a Google News RSS feed.
+pub fn parse_rss(xml: &str, symbol: &str) -> Vec<NewsItem> {
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(i) = rest.find("<item>") {
+        let after = &rest[i + 6..];
+        let Some(end) = after.find("</item>") else { break };
+        let item = &after[..end];
+        rest = &after[end..];
+        let publisher = xml_tag(item, "source").map(xml_text).unwrap_or_default();
+        let mut title = xml_tag(item, "title").map(xml_text).unwrap_or_default();
+        // Google ends each title with " - Publisher".
+        if !publisher.is_empty() {
+            if let Some(t) = title.strip_suffix(&format!(" - {publisher}")) {
+                title = t.trim().to_string();
+            }
+        }
+        let link = xml_tag(item, "link").map(xml_text).unwrap_or_default();
+        let id = xml_tag(item, "guid").map(xml_text).unwrap_or_else(|| link.clone());
+        let time = xml_tag(item, "pubDate").and_then(|d| parse_rfc822(&xml_text(d))).unwrap_or(0);
+        if !title.is_empty() && link.starts_with("https://") && !id.is_empty() {
+            out.push(NewsItem { id, title, publisher, link, time, symbol: symbol.to_string() });
+        }
+    }
+    out
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -251,6 +320,21 @@ mod tests {
         assert!(news.iter().all(|n| n.symbol == "AAPL" && n.link.starts_with("https://")));
         assert!(parse_news("{}", "X").is_empty());
         assert!(news_url("^JKSE").contains("q=%5EJKSE&quotesCount=0&newsCount=4"));
+    }
+
+    #[test]
+    fn google_news_items() {
+        let news = parse_rss(include_str!("../testdata/google_news.xml"), "BTC-USD");
+        assert_eq!(news.len(), 3);
+        let n = &news[0];
+        assert!(n.title.starts_with("Bitcoin Slips Below $80K"), "{}", n.title);
+        assert!(!n.title.ends_with(&n.publisher), "publisher trimmed off the title");
+        assert!(!n.publisher.is_empty());
+        assert!(n.link.starts_with("https://news.google.com/"));
+        assert_eq!(n.time, crate::calendar::days_from_civil(2026, 10, 25) * 86_400 + 9 * 3600 + 59 * 60 + 19);
+        assert_eq!(parse_rfc822("Mon, 26 Oct 2026 07:00:00 +0700"), Some(crate::calendar::days_from_civil(2026, 10, 26) * 86_400));
+        assert!(google_news_url("Bank Central Asia").contains("q=Bank%20Central%20Asia%20when%3A1d"));
+        assert!(parse_rss("<rss></rss>", "x").is_empty());
     }
 
     #[test]

@@ -51,7 +51,7 @@ const TIMER_CLEANUP: usize = 300;
 const TIMER_MIDNIGHT: usize = 301;
 /// Trims the working set once the island has been at rest for a while.
 const TIMER_TRIM: usize = 302;
-const TRIM_AFTER_MS: u32 = 30_000;
+const TRIM_AFTER_MS: u32 = 10_000;
 /// Looks at the foreground window again: borderless "windowed fullscreen"
 /// games often resize after they take focus, which raises no event.
 const TIMER_FULLSCREEN: usize = 303;
@@ -197,6 +197,8 @@ struct App {
     hotkey: bool,
     /// What the last tag said, to animate a change of content.
     last_tag: Option<String>,
+    /// The notch's glance last drawn, to slide in the next one.
+    last_glance: usize,
     /// First half of a character outside the Basic Multilingual Plane (emoji).
     high_surrogate: Option<u16>,
 }
@@ -453,11 +455,13 @@ impl App {
             hook: HWINEVENTHOOK::default(),
             hotkey: false,
             last_tag: None,
+            last_glance: 0,
             high_surrogate: None,
         })
     }
 
     fn start(&mut self) {
+        low_memory_priority();
         // Restore a power plan left behind by a crash during a game.
         if let Some(g) = self.state.power_restore.take().and_then(|s| system::guid_from_str(&s)) {
             system::set_power_plan(&g);
@@ -644,10 +648,13 @@ impl App {
                 Anim::Flip { dir: if to >= pos(*a) { 1.0 } else { -1.0 } }
             }
             Some(prev) if prev.kind != scene.kind => Anim::Morph,
+            // The notch turned to its next glance.
+            Some(_) if notch && scene.kind == SceneKind::Orb && self.model.carousel != self.last_glance => Anim::Swap,
             Some(_) if scene.kind == SceneKind::Tag && tag_text.is_some() && tag_text != self.last_tag => Anim::Swap,
             Some(_) => Anim::None,
         };
         self.last_tag = tag_text;
+        self.last_glance = self.model.carousel;
         if let Err(e) = self.renderer.show(&self.gfx, &scene, local, anim, reduce) {
             log_warn!("render: {e}; recreating device");
             if self.recreate_device().is_err() || self.renderer.show(&self.gfx, &scene, local, Anim::None, true).is_err() {
@@ -1687,9 +1694,31 @@ fn watch_exit(pid: u32, bus: Bus) {
 /// Hand unused memory back to Windows (what Task Manager shows drops to the
 /// few megabytes the island really needs while idle).
 fn trim_memory() {
+    use windows::Win32::System::Memory::{GetProcessHeap, HeapCompact, HEAP_NONE};
     use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
     unsafe {
+        // Freed blocks go back to Windows, then the pages leave the working set.
+        if let Ok(heap) = GetProcessHeap() {
+            let _ = HeapCompact(heap, HEAP_NONE);
+        }
         let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
+/// Ask Windows to take the island's pages first when memory is short: it
+/// idles most of the time and a page fault later costs little.
+fn low_memory_priority() {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, ProcessMemoryPriority, SetProcessInformation, MEMORY_PRIORITY_INFORMATION, MEMORY_PRIORITY_LOW,
+    };
+    let info = MEMORY_PRIORITY_INFORMATION { MemoryPriority: MEMORY_PRIORITY_LOW };
+    unsafe {
+        let _ = SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessMemoryPriority,
+            &info as *const _ as *const _,
+            std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
+        );
     }
 }
 
