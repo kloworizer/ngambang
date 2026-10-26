@@ -11,6 +11,9 @@ use crate::model::*;
 use crate::soft;
 use crate::theme::*;
 
+mod strip;
+pub use strip::STRIP_MAX_H;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Weight {
     Regular,
@@ -26,13 +29,14 @@ pub struct TextStyle {
 }
 
 impl TextStyle {
-    pub const LABEL: TextStyle = TextStyle { size: 11.0, weight: Weight::Medium, mono: true };
-    pub const BODY: TextStyle = TextStyle { size: 14.0, weight: Weight::Regular, mono: false };
-    pub const BODY_MEDIUM: TextStyle = TextStyle { size: 14.0, weight: Weight::Medium, mono: false };
-    pub const SMALL: TextStyle = TextStyle { size: 13.0, weight: Weight::Regular, mono: false };
-    pub const TITLE: TextStyle = TextStyle { size: 17.0, weight: Weight::Semibold, mono: false };
-    pub const MONO: TextStyle = TextStyle { size: 13.0, weight: Weight::Regular, mono: true };
-    pub const MONO_SMALL: TextStyle = TextStyle { size: 12.0, weight: Weight::Regular, mono: true };
+    // Headlines stay large; what supports them is small.
+    pub const LABEL: TextStyle = TextStyle { size: 10.0, weight: Weight::Medium, mono: true };
+    pub const BODY: TextStyle = TextStyle { size: 13.0, weight: Weight::Regular, mono: false };
+    pub const BODY_MEDIUM: TextStyle = TextStyle { size: 13.0, weight: Weight::Medium, mono: false };
+    pub const SMALL: TextStyle = TextStyle { size: 12.0, weight: Weight::Regular, mono: false };
+    pub const TITLE: TextStyle = TextStyle { size: 16.0, weight: Weight::Semibold, mono: false };
+    pub const MONO: TextStyle = TextStyle { size: 12.0, weight: Weight::Regular, mono: true };
+    pub const MONO_SMALL: TextStyle = TextStyle { size: 11.0, weight: Weight::Regular, mono: true };
     pub const BIG: TextStyle = TextStyle { size: 40.0, weight: Weight::Medium, mono: true };
 }
 
@@ -357,39 +361,141 @@ pub fn build(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
     }
     match scene.kind {
         SceneKind::Hidden | SceneKind::Seam => scene,
-        SceneKind::Orb => notch(m),
+        SceneKind::Orb => notch(m, tm),
         _ => hang_from_top(scene),
     }
 }
 
-/// The notch at rest: a dark tab hanging from the top of the screen, with
-/// the tide ring on the left and the status dot on the right.
-fn notch(m: &Model) -> Scene {
+/// The notch at rest: a dark tab hanging from the top of the screen. It
+/// shows what is playing, or else turns through glances (weather, markets,
+/// to-do, calendar, prayer times); the tide ring sits on its left.
+fn notch(m: &Model, tm: &dyn TextMeasure) -> Scene {
     let (w, h) = (NOTCH_W, NOTCH_H);
-    let c = Point::new(6.0 + RING_R + 2.5, h / 2.0);
+    let c = Point::new(5.0 + RING_R + 2.5, h / 2.0);
     let ring = ring_spec(m, c);
-    let dot = ring.map(|r| r.color).unwrap_or(TRACK);
     let mut prims = surface(Rect::new(0.0, 0.0, w, h), h / 2.0).to_vec();
-    let mut scene = Scene {
+    prims.extend(soft::well_circle(c.x, c.y, RING_R + 2.5));
+    let line = notch_line(m);
+    let (icon, color) = line.as_ref().map(|l| (l.0, l.1)).unwrap_or((Icon::Note, TRACK));
+    match &line {
+        Some(_) => prims.extend(icon_prims(icon, Rect::new(c.x - 6.0, c.y - 6.0, 12.0, 12.0), color)),
+        None => {
+            let dot = ring.map(|r| r.color).unwrap_or(TRACK);
+            let d = Rect::new(c.x - 3.5, c.y - 3.5, 7.0, 7.0);
+            prims.push(Prim::Gradient { rect: d, radius: 3.5, from: accent_light(dot), to: accent_deep(dot), diagonal: true });
+        }
+    }
+    let x = c.x + RING_R + 2.5 + 8.0;
+    let room = w - x - 14.0;
+    match line {
+        Some((_, _, text, detail, wave)) => {
+            let style = TextStyle { size: 12.0, weight: Weight::Medium, mono: false };
+            let dstyle = TextStyle { size: 10.5, weight: Weight::Medium, mono: true };
+            let mut tx = x;
+            if wave {
+                prims.push(Prim::Polyline { points: wave_points(tx, h / 2.0, 22.0, 2.5), width: 1.6, color: MEDIA, closed: false });
+                tx += 30.0;
+            }
+            let dw = detail.as_ref().map(|(d, _)| tm.width(d, dstyle).ceil().min(room * 0.45)).unwrap_or(0.0);
+            prims.push(Prim::Text {
+                rect: Rect::new(tx, 0.0, x + room - tx - if dw > 0.0 { dw + 8.0 } else { 0.0 }, h),
+                text,
+                style,
+                color: TEXT,
+                align: Align::Start,
+                wrap: false,
+            });
+            if let Some((d, dc)) = detail {
+                prims.push(Prim::Text {
+                    rect: Rect::new(x + room - dw, 0.0, dw, h),
+                    text: d,
+                    style: dstyle,
+                    color: dc,
+                    align: Align::End,
+                    wrap: false,
+                });
+            }
+        }
+        None => {
+            // Nothing to say: a grip that says it slides left and right.
+            prims.push(Prim::RoundRect {
+                rect: Rect::new(w / 2.0 - 16.0, h - 8.0, 32.0, 3.0),
+                radius: 1.5,
+                fill: Some(TRACK),
+                stroke: None,
+            });
+        }
+    }
+    let scene = Scene {
         kind: SceneKind::Orb,
         size: Size::new(w, h),
         flush: true,
         clip_radius: 0.0,
-        prims: Vec::new(),
+        prims,
         hits: vec![Hit { rect: Rect::new(0.0, 0.0, w, h), kind: HitKind::Click(Action::ToggleSlips), label: "Ngambang".into() }],
         ring,
     };
-    prims.extend(soft::well_circle(c.x, c.y, RING_R + 2.5));
-    // A grip in the middle says it slides left and right.
-    prims.push(Prim::RoundRect { rect: Rect::new(w / 2.0 - 16.0, h - 8.0, 32.0, 3.0), radius: 1.5, fill: Some(TRACK), stroke: None });
-    let dx = w - 6.0 - RING_R - 2.5;
-    if ring.is_some() {
-        prims.push(Prim::Circle { cx: dx, cy: c.y, r: 6.0, fill: Some(dot.with_alpha(0x40)), stroke: None });
-    }
-    let d = Rect::new(dx - 3.5, c.y - 3.5, 7.0, 7.0);
-    prims.push(Prim::Gradient { rect: d, radius: 3.5, from: accent_light(dot), to: accent_deep(dot), diagonal: true });
-    scene.prims = prims;
     hang_from_top(scene)
+}
+
+/// What the notch says: icon, its colour, the text, a detail and whether a
+/// wave plays before it.
+type NotchLine = (Icon, Color, String, Option<(String, Color)>, bool);
+
+fn notch_line(m: &Model) -> Option<NotchLine> {
+    if let Some(s) = m.front_media().filter(|s| s.playing && !s.title.is_empty()) {
+        let artist = (!s.artist.is_empty()).then(|| (format::ellipsize(&s.artist, 18), TEXT_2));
+        return Some((Icon::Note, MEDIA, s.title.clone(), artist, true));
+    }
+    let g = m.glance()?;
+    match g {
+        Glance::Weather => {
+            let w = m.weather.as_ref()?;
+            let rain = w.rain_chance.filter(|r| *r >= 40).map(|r| (format!("rain {r}%"), PORTS));
+            Some((condition_icon(w.condition), PORTS, format!("{:.0}° · {}", w.temp_c, w.description), rain, false))
+        }
+        Glance::Quote(i) => {
+            let item = m.config.finance.watchlist.get(i)?;
+            let q = m.quotes.iter().find(|q| q.symbol.eq_ignore_ascii_case(&item.symbol))?;
+            let name = if item.name.is_empty() { q.symbol.clone() } else { item.name.clone() };
+            let color = if q.change_pct >= 0.0 { OK } else { PRIVACY_TEXT };
+            Some((
+                Icon::Chart,
+                color,
+                format!("{} {}", format::ellipsize(&name, 16), crate::finance::format_price(q)),
+                Some((crate::finance::format_change(q.change_pct), color)),
+                false,
+            ))
+        }
+        Glance::Todo => {
+            let open: Vec<&TodoItem> = m.todos.iter().filter(|t| !t.done).collect();
+            let first = open.first()?;
+            Some((Icon::Todo, OK, first.text.clone(), Some((format!("{} left", open.len()), TEXT_2)), false))
+        }
+        Glance::Calendar => {
+            let e = m.next_event_within(36 * 3600)?;
+            let now = m.unix_now()?;
+            let mins = ((e.start - now) as f64 / 60.0).ceil() as i64;
+            let when = match mins {
+                ..=0 => "now".to_string(),
+                1..=59 => format!("in {mins}m"),
+                _ => {
+                    let offset = m.clock.map(|c| c.utc_offset_min as i64 * 60).unwrap_or(0);
+                    let s = (e.start + offset).rem_euclid(86_400);
+                    let day = (e.start + offset).div_euclid(86_400) - (now + offset).div_euclid(86_400);
+                    format!("{}{:02}:{:02}", if day > 0 { "tmr " } else { "" }, s / 3600, s % 3600 / 60)
+                }
+            };
+            Some((Icon::Calendar, CODER, e.title.clone(), Some((when, CODER)), false))
+        }
+        Glance::Prayer => {
+            let (day, now) = (m.prayer_day?, m.local_minute()?);
+            let (p, t) = day.next(now)?;
+            let left = (t - now).max(0.0).round() as i64;
+            let detail = if left < 60 { format!("in {left}m") } else { format!("in {}h{:02}", left / 60, left % 60) };
+            Some((Icon::Moon, OK, format!("{} {}", p.name(), crate::prayer::hhmm(t)), Some((detail, TEXT_2)), false))
+        }
+    }
 }
 
 /// Square the top corners so the shape grows out of the screen's top edge.
@@ -428,6 +534,8 @@ fn build_shape(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
         IslandState::Orb => orb(m),
         IslandState::Tag => tag(m, edge, tm),
         IslandState::Slips => match m.front {
+            // Docked top or bottom: a low, wide strip.
+            Some(front) if !edge.is_vertical() => strip::strip(m, front, tm),
             Some(front) => slips(m, front, edge, tm),
             None => orb(m),
         },
@@ -832,9 +940,9 @@ impl B<'_> {
         let gap = 8.0;
         let bw = (self.w - gap * (n - 1.0)) / n;
         for (i, (icon, label, kind, action)) in buttons.into_iter().enumerate() {
-            self.ibutton(Rect::new(self.x + i as f32 * (bw + gap), y, bw, 44.0), Some(icon), label, kind, action);
+            self.ibutton(Rect::new(self.x + i as f32 * (bw + gap), y, bw, 38.0), Some(icon), label, kind, action);
         }
-        y + 44.0
+        y + 38.0
     }
 
     /// A hero card: an accent wash, deeper at the bottom-right.
@@ -1163,12 +1271,12 @@ fn media_slip(m: &Model, b: &mut B, top: f32) -> f32 {
 }
 
 /// Height of the media slip's player buttons.
-const MEDIA_BTN_H: f32 = 52.0;
+const MEDIA_BTN_H: f32 = 46.0;
 
 /// Docked left or right: the cover and titles on top, then the progress
 /// across the full width and large controls below.
 fn media_stacked(m: &Model, s: &MediaSession, b: &mut B, y0: f32) -> f32 {
-    let side = 168.0;
+    let side = 140.0;
     media_art(b, s, Rect::new(b.x, y0, side, side));
     b.x += side + GUTTER;
     b.w -= side + GUTTER;
@@ -1420,7 +1528,7 @@ fn commands_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     }
     if any_done {
         b.col(1);
-        let by = b.pin(bottom + 10.0, 44.0);
+        let by = b.pin(bottom + 10.0, 38.0);
         return b.ibutton_row(by, vec![(Icon::Check, "Clear finished", Btn::Secondary, Action::JobsClear)]);
     }
     bottom
@@ -1996,7 +2104,7 @@ fn todo_slip(m: &Model, b: &mut B, top: f32) -> f32 {
     if m.todos.iter().any(|t| t.done) {
         buttons.push((Icon::Check, "Clear done", Btn::Secondary, Action::TodoClearDone));
     }
-    let by = b.pin(left_end + 8.0, 44.0);
+    let by = b.pin(left_end + 8.0, 38.0);
     b.ibutton_row(by, buttons).max(bottom)
 }
 
@@ -2369,17 +2477,17 @@ fn weather_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                 let gap = 8.0;
                 let sw = (b.w - gap * (n - 1.0)) / n;
                 for (i, (icon, v)) in stats.into_iter().enumerate() {
-                    let r = Rect::new(b.x + i as f32 * (sw + gap), y, sw, 44.0);
+                    let r = Rect::new(b.x + i as f32 * (sw + gap), y, sw, 34.0);
                     b.prims.extend(soft::well(r, 12.0));
-                    b.icon(icon, Rect::new(r.x + 12.0, r.y + 13.0, 18.0, 18.0), PORTS);
+                    b.icon(icon, Rect::new(r.x + 10.0, r.y + 10.0, 14.0, 14.0), PORTS);
                     b.text(
-                        Rect::new(r.x + 38.0, r.y, r.w - 42.0, 44.0),
+                        Rect::new(r.x + 30.0, r.y, r.w - 34.0, 34.0),
                         v,
-                        TextStyle { size: 15.0, weight: Weight::Medium, mono: false },
+                        TextStyle { size: 13.0, weight: Weight::Medium, mono: false },
                         TEXT,
                     );
                 }
-                y += 44.0 + 12.0;
+                y += 34.0 + 10.0;
             }
             left_end = y - 12.0;
             // Then the next hours as raised cards.
@@ -2389,7 +2497,7 @@ fn weather_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                 let gap = 8.0;
                 let tw = (b.w - gap * (n as f32 - 1.0)) / n as f32;
                 for (i, slot) in w.next.iter().take(n).enumerate() {
-                    let r = Rect::new(b.x + i as f32 * (tw + gap), y, tw, 74.0);
+                    let r = Rect::new(b.x + i as f32 * (tw + gap), y, tw, 62.0);
                     b.prims.extend(soft::raised_grad(r, 14.0, SURFACE_TOP, SURFACE, 3.0));
                     let center = |t: String, yy: f32, h: f32, style: TextStyle, c: Color| Prim::Text {
                         rect: Rect::new(r.x, yy, r.w, h),
@@ -2406,16 +2514,16 @@ fn weather_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                         TextStyle { size: 10.5, weight: Weight::Regular, mono: true },
                         LABEL,
                     ));
-                    b.icon(condition_icon(slot.condition), Rect::new(r.x + r.w / 2.0 - 10.0, r.y + 25.0, 20.0, 20.0), PORTS);
+                    b.icon(condition_icon(slot.condition), Rect::new(r.x + r.w / 2.0 - 8.0, r.y + 21.0, 16.0, 16.0), PORTS);
                     b.prims.push(center(
                         format!("{:.0}°", slot.temp_c),
-                        r.y + 48.0,
+                        r.y + 39.0,
                         20.0,
-                        TextStyle { size: 15.0, weight: Weight::Medium, mono: false },
+                        TextStyle { size: 13.0, weight: Weight::Medium, mono: false },
                         TEXT,
                     ));
                 }
-                y += 86.0;
+                y += 72.0;
             }
         }
         None => {
@@ -2668,25 +2776,24 @@ mod tests {
         let mut widths = std::collections::HashSet::new();
         for (name, s) in slips {
             let side = name.ends_with("Left") || name.ends_with("Right");
-            let (lo, hi) = if side { (SLIP_MIN_V, SLIP_MAX_V) } else { (SLIP_MIN_H, SLIP_MAX_H) };
-            // Height above the one row of tabs.
-            let h = s.size.h - TAB_ROW_H - 8.0;
-            assert!(h >= lo && h <= hi, "{name}: {h}");
             if side {
+                // Height above the one row of tabs.
+                let h = s.size.h - TAB_ROW_H - 8.0;
+                assert!((SLIP_MIN_V..=SLIP_MAX_V).contains(&h), "{name}: {h}");
                 assert_eq!(s.size.w, SLIP_W, "{name}");
             } else {
-                assert!(s.size.w == SLIP_W || s.size.w == SLIP_W2, "{name}: {}", s.size.w);
+                // Docked top or bottom: a strip, tabs included, at most 180 tall.
+                assert!(s.size.h <= STRIP_MAX_H, "{name}: {}", s.size.h);
                 widths.insert(s.size.w as u32);
             }
         }
-        // Docked top or bottom, short modules stay narrow and tall ones go wide.
-        assert_eq!(widths.len(), 2, "{widths:?}");
+        assert_eq!(widths.len(), 1, "{widths:?}");
     }
 
     #[test]
     fn slip_content_stays_above_the_tabs() {
         for (name, s) in all_scenes() {
-            if !matches!(s.kind, SceneKind::Slip(_)) {
+            if !matches!(s.kind, SceneKind::Slip(_)) || !(name.ends_with("Left") || name.ends_with("Right")) {
                 continue;
             }
             let slip_h = s.size.h - TAB_ROW_H - 8.0;
@@ -2713,7 +2820,10 @@ mod tests {
                 if let HitKind::Click(Action::SelectSlip(_) | Action::ToggleSlips) = h.kind {
                     continue;
                 }
-                assert!(h.rect.h >= 28.0 && h.rect.w >= 28.0, "{name}: {} is {:?}", h.label, h.rect);
+                // Strips are compact: their controls may be a little smaller.
+                let strip = matches!(s.kind, SceneKind::Slip(_)) && (name.ends_with("Top") || name.ends_with("Bottom"));
+                let min = if strip { 24.0 } else { 28.0 };
+                assert!(h.rect.h >= min && h.rect.w >= min, "{name}: {} is {:?}", h.label, h.rect);
             }
         }
     }
@@ -2783,7 +2893,11 @@ mod tests {
             let tabs: Vec<&Hit> = s.hits.iter().filter(|h| matches!(h.kind, HitKind::Click(Action::SelectSlip(_)))).collect();
             assert!(tabs.len() > 1);
             assert!(tabs.iter().all(|t| t.rect.y == tabs[0].rect.y && t.rect.bottom() <= s.size.h + 0.01), "{edge:?}");
-            assert!(tabs[0].rect.y > s.size.h / 2.0, "{edge:?}: tabs at the bottom");
+            if edge.is_vertical() {
+                assert!(tabs[0].rect.y > s.size.h / 2.0, "{edge:?}: tabs at the bottom");
+            } else {
+                assert!(tabs[0].rect.y < 20.0, "{edge:?}: tabs in the strip's header row");
+            }
         }
     }
 

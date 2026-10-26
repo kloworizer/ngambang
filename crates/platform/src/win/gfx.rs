@@ -18,8 +18,7 @@ use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 
 pub struct Gfx {
-    /// Kept alive for the Direct2D device built on it.
-    #[allow(dead_code)]
+    /// Kept alive for the Direct2D device built on it; trimmed at rest.
     pub d3d: ID3D11Device,
     pub d2d: ID2D1Device,
     pub warp: bool,
@@ -94,8 +93,16 @@ impl Gfx {
         self.paint.draw(dc, prims)
     }
 
+    /// Let go of everything that can be rebuilt: cached text and pictures,
+    /// Direct2D's own caches, and the driver's scratch memory.
     pub fn trim(&self) {
         self.paint.trim();
+        unsafe {
+            self.d2d.ClearResources(0);
+            if let Ok(dxgi) = self.d3d.cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice3>() {
+                dxgi.Trim();
+            }
+        }
     }
 }
 

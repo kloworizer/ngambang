@@ -171,22 +171,31 @@ fn fetch_quotes(symbols: &[String]) -> Vec<finance::Quote> {
     symbols.iter().filter_map(|s| http_get(&finance::chart_url(s)).ok().and_then(|j| finance::parse_chart(&j))).collect()
 }
 
-/// Headlines for each symbol (by name when Yahoo has none for the symbol);
-/// None when nothing could be read.
+/// Headlines for each symbol from Google News (by name, freshest) and
+/// Yahoo Finance (by symbol); None when nothing could be read.
 fn fetch_news(symbols: &[String], names: &[String]) -> Option<Vec<finance::NewsItem>> {
-    let mut out = Vec::new();
+    let mut out: Vec<finance::NewsItem> = Vec::new();
     let mut any = false;
     for (i, sym) in symbols.iter().take(10).enumerate() {
-        let Ok(json) = http_get(&finance::news_url(sym)) else { continue };
-        any = true;
-        let mut items = finance::parse_news(&json, sym);
-        if items.is_empty() {
-            if let Some(name) = names.get(i).filter(|n| !n.trim().is_empty()) {
-                items = http_get(&finance::news_url(name)).map(|j| finance::parse_news(&j, sym)).unwrap_or_default();
-            }
+        let name = names.get(i).map(|n| n.trim()).filter(|n| !n.is_empty()).unwrap_or(sym);
+        if let Ok(xml) = http_get(&finance::google_news_url(name)) {
+            any = true;
+            let mut items = finance::parse_rss(&xml, sym);
+            // The newest few per symbol are plenty.
+            items.sort_by_key(|n| std::cmp::Reverse(n.time));
+            items.truncate(4);
+            out.extend(items);
         }
-        out.extend(items);
+        if let Ok(json) = http_get(&finance::news_url(sym)) {
+            any = true;
+            out.extend(finance::parse_news(&json, sym));
+        }
     }
+    // The same story from both sources once.
+    let key = |t: &str| t.to_lowercase().chars().filter(|c| c.is_alphanumeric()).take(48).collect::<String>();
+    let mut seen = std::collections::HashSet::new();
+    out.sort_by_key(|n| std::cmp::Reverse(n.time));
+    out.retain(|n| seen.insert(key(&n.title)));
     any.then_some(out)
 }
 
@@ -222,6 +231,7 @@ impl NetWorker {
             let (mut next_calendar, mut calendar_fails) = (now, 0usize);
             let (mut quotes_on, mut next_quotes) = (false, now);
             let mut next_news = now + Duration::from_secs(20);
+            let mut last_news: Option<Instant> = None;
             let retry = |fails: usize| RETRY[fails.min(RETRY.len() - 1)];
             loop {
                 let now = Instant::now();
@@ -262,9 +272,14 @@ impl NetWorker {
                         }
                     }
                     Ok(Msg::Finance(on)) => {
-                        // Fresh prices as soon as the watchlist opens, unless they are seconds old.
+                        // Fresh prices as soon as the watchlist opens, unless they are seconds old,
+                        // and headlines unless they are a couple of minutes old.
                         if on && !quotes_on {
                             next_quotes = next_quotes.min(Instant::now() + Duration::from_millis(300));
+                            let stale = last_news.is_none_or(|t| t.elapsed() >= Duration::from_millis(finance::NEWS_OPEN_MS));
+                            if stale {
+                                next_news = next_news.min(Instant::now() + Duration::from_millis(600));
+                            }
                         }
                         quotes_on = on;
                     }
@@ -371,8 +386,10 @@ impl NetWorker {
                 if cfg.news && !cfg.symbols.is_empty() && now >= next_news {
                     if let Some(news) = fetch_news(&cfg.symbols, &cfg.names) {
                         bus.send(Event::News(news));
+                        last_news = Some(Instant::now());
                     }
-                    next_news = Instant::now() + Duration::from_millis(finance::NEWS_MS);
+                    let every = if quotes_on { finance::NEWS_OPEN_MS } else { finance::NEWS_MS };
+                    next_news = Instant::now() + Duration::from_millis(every);
                 }
                 if now >= next_update && (cfg.auto_update || manual_update) {
                     match check_update() {
