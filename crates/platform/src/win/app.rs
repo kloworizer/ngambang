@@ -194,6 +194,8 @@ struct App {
     last_fullscreen: Option<String>,
     /// The fullscreen app's process, to notice when it exits.
     last_fullscreen_pid: Option<u32>,
+    /// The fullscreen app's window: it stays in front while the focus is on another display.
+    last_fullscreen_hwnd: Option<HWND>,
     last_probe_ms: u64,
     taskbar_created: u32,
     reduce_motion: bool,
@@ -454,6 +456,7 @@ impl App {
             state,
             last_fullscreen: None,
             last_fullscreen_pid: None,
+            last_fullscreen_hwnd: None,
             last_probe_ms: 0,
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
             reduce_motion: system::reduce_motion(),
@@ -1136,7 +1139,9 @@ impl App {
     }
 
     fn check_fullscreen(&mut self) {
-        let app = system::fullscreen_app(self.hwnd, self.home);
+        let app = system::fullscreen_app(self.hwnd, self.home, self.last_fullscreen_hwnd);
+        self.last_fullscreen_hwnd = app.as_ref().map(|(_, _, w)| *w);
+        let app = app.map(|(p, pid, _)| (p, pid));
         let path = app.as_ref().map(|(p, _)| p.clone());
         if path == self.last_fullscreen {
             // Same app: a quiet one may still turn out to be a game once it loads.
@@ -1176,9 +1181,11 @@ impl App {
         self.last_probe_ms = now_ms();
         let exclusive = system::exclusive_d3d();
         let (bus, ours, monitor) = (self.bus.clone(), self.hwnd.0 as isize, self.home.0 as isize);
+        let last = self.last_fullscreen_hwnd.map(|w| w.0 as isize);
         let _ = std::thread::Builder::new().name("ngambang-gpu-probe".into()).spawn(move || {
             let gpu = system::process_gpu_3d(pid);
-            let still = system::fullscreen_app(HWND(ours as *mut _), HMONITOR(monitor as *mut _)).is_some_and(|(p, _)| p == path);
+            let last = last.map(|w| HWND(w as *mut _));
+            let still = system::fullscreen_app(HWND(ours as *mut _), HMONITOR(monitor as *mut _), last).is_some_and(|(p, _, _)| p == path);
             if still && gpu.is_some_and(|g| g >= ngambang_core::games::GPU_GAME_PCT) {
                 bus.send(Event::Fullscreen {
                     active: true,
@@ -1254,6 +1261,7 @@ impl App {
         if self.displaced.take().is_some() {
             self.covered = false;
             self.last_fullscreen = None;
+            self.last_fullscreen_hwnd = None;
             self.dispatch(Event::Fullscreen { active: false, exe: String::new(), signals: Default::default() });
             self.dispatch(Event::Displaced(false));
         }
@@ -1513,13 +1521,15 @@ impl App {
                         self.dispatch(Event::Slider(t, self.slider_value(r, x)));
                     }
                     hit => {
-                        // The orb, a tag's body and a slip's background all drag the island.
+                        // The orb, a tag's body, a glance's items and a slip's background
+                        // all drag the island; a press that does not move still clicks.
                         let action = match hit {
                             Some(HitKind::Click(a)) => Some(a),
                             _ => None,
                         };
                         let draggable = match &action {
                             None => matches!(self.model.state, IslandState::Slips | IslandState::Tag),
+                            Some(Action::SelectSlip(_)) => self.model.state == IslandState::Tag,
                             Some(a) => *a == Action::ToggleSlips,
                         };
                         let mut screen = POINT::default();

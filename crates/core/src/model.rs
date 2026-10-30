@@ -2794,7 +2794,9 @@ impl Model {
         if self.next_event_within(36 * 3600).is_some() {
             v.push(Glance::Calendar);
         }
-        if self.prayer_day.is_some() {
+        // After Isya there is no prayer left today: nothing to show until midnight.
+        let next_prayer = self.prayer_day.zip(self.local_minute()).is_some_and(|(d, t)| d.next(t).is_some());
+        if self.fasting().is_some() || next_prayer {
             v.push(Glance::Prayer);
         }
         v
@@ -3561,6 +3563,16 @@ mod tests {
         m.update(0, Event::SetModule(ModuleId::Prayer, true));
         let fx = m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 600.0, utc_offset_min: 420, unix: 1_792_911_900 });
         assert!(!has_timer(&fx, TimerId::Carousel));
+    }
+
+    #[test]
+    fn the_notch_skips_prayer_after_isya() {
+        let mut m = model();
+        m.update(0, Event::SetModule(ModuleId::Prayer, true));
+        m.update(0, Event::TodoAdded("Buy rice".into()));
+        // 23:30 local: every prayer today is over.
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 1410.0, utc_offset_min: 420, unix: 1_792_911_900 });
+        assert_eq!(m.glances(), vec![Glance::Todo]);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The glance: hovering the orb (or peeking at the Seam) shows everything
 //! worth knowing right now, side by side along a top or bottom edge, or
-//! stacked along a left or right one. Each item opens its slip.
+//! stacked along a left or right one. Each item opens its slip. While
+//! something plays the glance is the player alone (see `view::tag`).
 
 use super::*;
 
@@ -46,30 +47,17 @@ pub(super) fn items(m: &Model) -> Vec<Item> {
             buttons: vec![(Icon::Open, CODER, Action::OpenUrl(e.link.clone()), "Join meeting"), mic],
         });
     }
-    let mut push = |icon, color, text: String, detail: Option<String>, module, media: bool| {
-        let mut buttons = Vec::new();
-        if let Some(s) = m.front_media().filter(|s| media && s.can_play_pause) {
-            let icon = if s.playing { Icon::Pause } else { Icon::Play };
-            buttons.push((icon, MEDIA, Action::MediaPlayPause, if s.playing { "Pause" } else { "Play" }));
-        }
-        v.push(Item { icon, color, text, detail, module, buttons })
-    };
+    let mut push =
+        |icon, color, text: String, detail: Option<String>, module| v.push(Item { icon, color, text, detail, module, buttons: Vec::new() });
     if let Some(p) = m.privacy.first() {
         let (icon, what) = match p.device {
             Device::Microphone => (Icon::Mic, "Mic"),
             Device::Camera => (Icon::Camera, "Camera"),
         };
-        push(
-            icon,
-            PRIVACY,
-            format!("{what} · {}", p.app),
-            Some(format::clock(now.saturating_sub(p.since_ms) / 1000)),
-            ModuleId::Privacy,
-            false,
-        );
+        push(icon, PRIVACY, format!("{what} · {}", p.app), Some(format::clock(now.saturating_sub(p.since_ms) / 1000)), ModuleId::Privacy);
     }
     if let Some(g) = &m.game {
-        push(Icon::Game, GAME, g.exe.clone(), Some(format::clock(now.saturating_sub(g.started_ms) / 1000)), ModuleId::Game, false);
+        push(Icon::Game, GAME, g.exe.clone(), Some(format::clock(now.saturating_sub(g.started_ms) / 1000)), ModuleId::Game);
     }
     if let Some(rem) = m.timer.remaining(now) {
         let text = if m.on_break {
@@ -79,26 +67,22 @@ pub(super) fn items(m: &Model) -> Vec<Item> {
         } else {
             "Focus paused"
         };
-        push(Icon::Clock, GAME, text.into(), Some(format::clock(rem / 1000)), ModuleId::Timer, false);
+        push(Icon::Clock, GAME, text.into(), Some(format::clock(rem / 1000)), ModuleId::Timer);
     }
     if let Some(d) = m.downloads.first() {
         let more = if m.downloads.len() > 1 { format!(" +{}", m.downloads.len() - 1) } else { String::new() };
-        push(Icon::Download, PORTS, d.name.clone(), Some(format!("{}{more}", format::bytes(d.bytes))), ModuleId::Captures, false);
+        push(Icon::Download, PORTS, d.name.clone(), Some(format!("{}{more}", format::bytes(d.bytes))), ModuleId::Captures);
     }
     if let Some((p, pct)) = m.power.and_then(|p| p.percent.map(|v| (p, v))).filter(|(p, v)| !p.on_ac && *v <= 30) {
         let left = p.secs_left.map(|s| format!("{} left", format::hours_minutes(s as u64 / 60)));
-        push(Icon::Battery, PRIVACY_TEXT, format!("Battery {pct}%"), left, ModuleId::Power, false);
+        push(Icon::Battery, PRIVACY_TEXT, format!("Battery {pct}%"), left, ModuleId::Power);
     }
     if let Some(j) = m.jobs.iter().find(|j| matches!(j.status, JobStatus::Running { .. })) {
         let detail = match j.status {
             JobStatus::Running { progress: Some(p) } => format!("{:.0}%", p * 100.0),
             _ => format::duration_short(now.saturating_sub(j.started_ms) / 1000),
         };
-        push(Icon::Terminal, CODER, j.title.clone(), Some(detail), ModuleId::Commands, false);
-    }
-    if let Some(s) = m.front_media().filter(|s| !s.title.is_empty()) {
-        let detail = if s.artist.is_empty() { None } else { Some(s.artist.clone()) };
-        push(Icon::Note, MEDIA, s.title.clone(), detail, ModuleId::Media, true);
+        push(Icon::Terminal, CODER, j.title.clone(), Some(detail), ModuleId::Commands);
     }
     if let (Some(e), Some(unix)) = (m.next_event_within(12 * 3600), m.unix_now()) {
         let mins = ((e.start - unix) as f64 / 60.0).ceil() as i64;
@@ -111,32 +95,32 @@ pub(super) fn items(m: &Model) -> Vec<Item> {
                 format!("{:02}:{:02}", s / 3600, s % 3600 / 60)
             }
         };
-        push(Icon::Calendar, CODER, e.title.clone(), Some(when), ModuleId::Calendar, false);
+        push(Icon::Calendar, CODER, e.title.clone(), Some(when), ModuleId::Calendar);
     }
     if let (Some((what, at)), Some(t)) = (m.fasting(), m.local_minute()) {
         let left = (at - t).max(0.0).round() as i64;
         let detail = if left < 60 { format!("in {left}m") } else { format!("in {}h{:02}", left / 60, left % 60) };
-        push(Icon::Moon, OK, format!("{what} {}", crate::prayer::hhmm(at.rem_euclid(1440.0))), Some(detail), ModuleId::Prayer, false);
+        push(Icon::Moon, OK, format!("{what} {}", crate::prayer::hhmm(at.rem_euclid(1440.0))), Some(detail), ModuleId::Prayer);
     } else if let (Some(day), Some(t)) = (m.prayer_day, m.local_minute()) {
         if let Some((p, at)) = day.next(t) {
             let left = (at - t).max(0.0).round() as i64;
             let detail = if left < 60 { format!("in {left}m") } else { format!("in {}h{:02}", left / 60, left % 60) };
-            push(Icon::Moon, OK, format!("{} {}", p.name(), crate::prayer::hhmm(at)), Some(detail), ModuleId::Prayer, false);
+            push(Icon::Moon, OK, format!("{} {}", p.name(), crate::prayer::hhmm(at)), Some(detail), ModuleId::Prayer);
         }
     }
     if m.enabled(ModuleId::Weather) {
         if let Some(a) = m.relevant_alerts(1).into_iter().next().filter(|a| m.unix_now().is_some_and(|u| u - a.time < 6 * 3600)) {
-            push(Icon::Warning, MEDIA, a.title.clone(), Some(a.hazard.label().to_string()), ModuleId::Weather, false);
+            push(Icon::Warning, MEDIA, a.title.clone(), Some(a.hazard.label().to_string()), ModuleId::Weather);
         }
     }
     if let Some(w) = &m.weather {
         let detail = w.rain_chance.filter(|r| *r >= 40).map(|r| format!("rain {r}%"));
-        push(condition_icon(w.condition), PORTS, format!("{:.0}° {}", w.temp_c, w.description), detail, ModuleId::Weather, false);
+        push(condition_icon(w.condition), PORTS, format!("{:.0}° {}", w.temp_c, w.description), detail, ModuleId::Weather);
     }
     if m.enabled(ModuleId::Todo) {
         let open: Vec<&TodoItem> = m.todos.iter().filter(|t| !t.done).collect();
         if let Some(first) = open.first() {
-            push(Icon::Todo, OK, first.text.clone(), Some(format!("{} left", open.len())), ModuleId::Todo, false);
+            push(Icon::Todo, OK, first.text.clone(), Some(format!("{} left", open.len())), ModuleId::Todo);
         }
     }
     // The watchlist's biggest move today.
@@ -158,7 +142,6 @@ pub(super) fn items(m: &Model) -> Vec<Item> {
                 format!("{name} {}", crate::finance::format_price(q)),
                 Some(crate::finance::format_change(q.change_pct)),
                 ModuleId::Finance,
-                false,
             );
         }
     }

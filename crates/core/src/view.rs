@@ -456,7 +456,13 @@ fn notch_line(m: &Model) -> Option<NotchLine> {
         let artist = (!s.artist.is_empty()).then(|| (format::ellipsize(&s.artist, 18), TEXT_2));
         return Some((Icon::Note, MEDIA, s.title.clone(), artist, true));
     }
-    let g = m.glance()?;
+    // The glance due now, or the next one with something to say, so the
+    // notch never turns to an empty face.
+    let all = m.glances();
+    (0..all.len()).find_map(|i| glance_line(m, all[(m.carousel + i) % all.len()]))
+}
+
+fn glance_line(m: &Model, g: Glance) -> Option<NotchLine> {
     match g {
         Glance::Weather => {
             let w = m.weather.as_ref()?;
@@ -758,6 +764,10 @@ fn media_tag(m: &Model, s: &MediaSession, edge: Edge, tm: &dyn TextMeasure) -> S
 }
 
 fn tag(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
+    // Hovered while something plays: the player alone, with its controls.
+    if let Some(s) = m.front_media().filter(|s| m.hover_tag && s.playing) {
+        return media_tag(m, s, edge, tm);
+    }
     // Hovered: everything worth knowing now, when there is more than one thing.
     if m.hover_tag {
         let items = glance::items(m);
@@ -3062,6 +3072,41 @@ mod tests {
         }
         assert!(row.size.w > 2.0 * row.size.h, "docked top: it widens");
         assert!(col.size.h > 2.0 * 40.0 - 1.0 && col.size.w < 320.0, "docked left: it grows downwards");
+    }
+
+    #[test]
+    fn the_glance_is_the_player_alone_while_music_plays() {
+        let mut m = Model::new(Config::default(), 3, 0);
+        m.update(0, Event::SetModule(ModuleId::Prayer, true));
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 600.0, utc_offset_min: 420, unix: 1_792_911_900 });
+        m.update(0, Event::TodoAdded("Buy rice".into()));
+        let song = |playing| MediaSession {
+            id: "a".into(),
+            app: "Spotify".into(),
+            title: "Song".into(),
+            playing,
+            can_play_pause: true,
+            can_next: true,
+            can_prev: true,
+            ..Default::default()
+        };
+        m.update(0, Event::Media(vec![song(true)]));
+        m.state = IslandState::Tag;
+        m.hover_tag = true;
+        for edge in [Edge::Top, Edge::Left] {
+            let s = build(&m, edge, &ApproxMeasure);
+            for want in [Action::MediaPrev, Action::MediaPlayPause, Action::MediaNext] {
+                assert!(s.hits.iter().any(|h| h.kind == HitKind::Click(want.clone())), "{edge:?}: {want:?}");
+            }
+            assert!(!s.hits.iter().any(|h| matches!(h.kind, HitKind::Click(Action::SelectSlip(_)))), "{edge:?}: nothing else");
+        }
+        // Paused: the weather, markets, to-do … and no player.
+        m.update(10, Event::Media(vec![song(false)]));
+        m.state = IslandState::Tag;
+        m.hover_tag = true;
+        let s = build(&m, Edge::Top, &ApproxMeasure);
+        assert!(s.hits.iter().any(|h| h.kind == HitKind::Click(Action::SelectSlip(ModuleId::Todo))));
+        assert!(!s.hits.iter().any(|h| h.kind == HitKind::Click(Action::MediaPlayPause)));
     }
 
     #[test]

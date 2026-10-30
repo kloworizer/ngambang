@@ -44,13 +44,13 @@ Specification: [docs/SPEC.md](docs/SPEC.md)
 
 | Input | Action |
 |-------|--------|
-| Hover the orb | Show what is running; while music plays, the tag has the cover, artist and ⏮ ⏯ ⏭ |
+| Hover the orb | While music plays: the player alone (cover, artist and ⏮ ⏯ ⏭). Otherwise: the weather, markets, to-do, next event, prayer time … |
 | Click | Open the slips; click again or move away to close |
 | Mouse wheel on the orb or a tag | Volume of the player that is playing (the system volume when nothing plays); the level shows as you scroll |
 | Shift + wheel on the orb | Next / previous track |
 | Middle-click the orb | Play / pause |
 | Wheel on the slips, or ↑ / ↓ | Flip between slips |
-| Drag the orb, a tag or a slip's background | Move it to another edge or monitor; it follows the pointer as you drag (a notch slides along the top) |
+| Drag the orb, a tag, the glance or a slip's background | Move it to another edge or monitor; it follows the pointer as you drag (a notch slides along the top) |
 | `Win+Alt+Space` | Open with the keyboard (`Tab`, `Enter`, `←`/`→` on sliders, `Esc`) |
 | Right-click the orb or tray icon | Settings, modules, dock edge, pause, start with Windows |
 

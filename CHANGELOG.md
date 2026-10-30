@@ -6,6 +6,23 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The glance follows the music.** While something plays, hovering the
+  island shows only the player (cover, title, artist, ⏮ ⏯ ⏭). When nothing
+  plays, it lists the weather, markets, to-do, calendar, prayer time and the
+  rest as before.
+- **The glance can be dragged.** Pressing an item and moving the pointer
+  drags the island; a press that does not move still opens that item's slip.
+
+### Fixed
+- With a fullscreen app on the home display, clicking an app (or the island)
+  on the other display no longer brings the island back over the fullscreen
+  app; it returns only when the fullscreen app closes, is minimised or
+  another app comes to the front on that display.
+- The notch no longer goes blank after Isya: the prayer glance is skipped
+  once today's prayers are over, and a glance with nothing to say gives way
+  to the next one.
+
 ## [0.1.9] - 2026-10-26
 
 ### Added
