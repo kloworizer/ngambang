@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-30
+
 ### Added
 - **A full player in the glance.** While music plays, hovering shows the
   player alone: cover, title, artist and ⏮ ⏯ ⏭, the position bar to drag
