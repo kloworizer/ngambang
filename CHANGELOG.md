@@ -6,6 +6,17 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-30
+
+### Fixed
+- **FxSound and Ngambang no longer turn the sound down twice.** FxSound sets
+  your speakers from its own device's volume, so a player turned down by
+  Ngambang's wheel multiplied with it and the sound ended up far too quiet.
+  While FxSound is the output, the wheel and the player glance's slider now
+  change the system volume (the one FxSound follows), and the first turn puts
+  the player's own volume back to full. `media.wheel = "player"` keeps the
+  old behaviour; `"system"` always turns the system volume.
+
 ## [0.2.0] - 2026-10-30
 
 ### Added

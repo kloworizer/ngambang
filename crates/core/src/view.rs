@@ -3257,6 +3257,52 @@ mod tests {
     }
 
     #[test]
+    fn behind_fxsound_the_wheel_turns_the_system_volume() {
+        let mut m = Model::new(Config::default(), 3, 0);
+        let song =
+            MediaSession { id: "Spotify.exe".into(), app: "Spotify".into(), title: "Song".into(), playing: true, ..Default::default() };
+        m.update(0, Event::Media(vec![song]));
+        let spotify = AudioApp {
+            pid: 77,
+            name: "Spotify".into(),
+            exe: "spotify.exe".into(),
+            volume: Volume { level: 0.3, muted: false },
+            ..Default::default()
+        };
+        let snapshot = MixerSnapshot {
+            device: "Speakers (FxSound Audio Enhancer)".into(),
+            master: Volume { level: 0.5, muted: false },
+            apps: vec![spotify],
+        };
+        m.update(0, Event::Mixer(snapshot.clone()));
+        assert!(m.enhancer_output());
+        let fx = m.update(10, Event::Wheel { notches: 1, shift: false });
+        // The system volume FxSound follows, and Spotify back to full so the two don't multiply.
+        assert!(fx.iter().any(|e| matches!(e, Effect::SetMasterVolume(v) if (*v - 0.52).abs() < 1e-6)), "{fx:?}");
+        assert!(fx.contains(&Effect::SetAppVolume(77, 1.0)), "{fx:?}");
+        assert_eq!(m.flashed_volume().0, "System");
+        // The player glance's slider is the system one too.
+        m.update(5000, Event::Timer(TimerId::VolumeFlash));
+        m.state = IslandState::Tag;
+        m.hover_tag = true;
+        let s = build(&m, Edge::Top, &ApproxMeasure);
+        assert!(s.hits.iter().any(|h| h.kind == HitKind::Slider(SliderTarget::Master)));
+        assert!(!s.hits.iter().any(|h| h.kind == HitKind::Slider(SliderTarget::App(77))));
+        // Asked for the player's volume: it stays the player's, even behind FxSound.
+        let mut m = Model::new(Config::default(), 3, 0);
+        m.config.media.wheel = crate::config::WheelTarget::Player;
+        m.update(
+            0,
+            Event::Media(vec![MediaSession { id: "Spotify.exe".into(), app: "Spotify".into(), playing: true, ..Default::default() }]),
+        );
+        m.update(0, Event::Mixer(snapshot));
+        let fx = m.update(10, Event::Wheel { notches: 1, shift: false });
+        assert!(fx.iter().any(|e| matches!(e, Effect::SetAppVolume(77, v) if (*v - 0.32).abs() < 1e-6)), "{fx:?}");
+        assert!(!fx.iter().any(|e| matches!(e, Effect::SetMasterVolume(_))));
+        assert!(!crate::model::is_enhancer("Speakers (Realtek(R) Audio)"));
+    }
+
+    #[test]
     fn seam_orientation() {
         let mut m = Model::new(Config::default(), 3, 0);
         m.state = IslandState::Seam;

@@ -335,12 +335,29 @@ pub struct MediaConfig {
     pub show_system_sounds: bool,
     /// Volume change per wheel notch, in percent.
     pub volume_step: u32,
+    /// Which volume the wheel and the player glance change.
+    pub wheel: WheelTarget,
 }
 
 impl Default for MediaConfig {
     fn default() -> Self {
-        MediaConfig { track_tags: true, show_system_sounds: false, volume_step: 2 }
+        MediaConfig { track_tags: true, show_system_sounds: false, volume_step: 2, wheel: WheelTarget::Auto }
     }
+}
+
+/// Which volume the wheel on the island changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WheelTarget {
+    /// The playing app's own volume, except when an audio enhancer such as
+    /// FxSound is the output: then the system volume, which the enhancer
+    /// follows (an app volume on top of it would make the sound too quiet).
+    #[default]
+    Auto,
+    /// Always the playing app's own volume.
+    Player,
+    /// Always the system volume.
+    System,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -674,6 +691,7 @@ order = []         # tab order by key, e.g. ["media", "todo"]; the rest follow
 track_tags = true
 show_system_sounds = false
 volume_step = 2
+wheel = "auto"             # auto | player | system: what the wheel turns (auto = system while FxSound is the output)
 
 [commands]
 long_command_s = 30

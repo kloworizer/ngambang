@@ -46,7 +46,7 @@ Specification: [docs/SPEC.md](docs/SPEC.md)
 |-------|--------|
 | Hover the orb | While music plays: the player alone (cover, artist, ⏮ ⏯ ⏭, a position bar to drag, its volume, a dot per app that plays). Otherwise: the weather, markets, to-do, next event, prayer time … |
 | Click | Open the slips; click again or move away to close |
-| Mouse wheel on the orb or a tag | Volume of the player that is playing (the system volume when nothing plays); the level shows as you scroll |
+| Mouse wheel on the orb or a tag | Volume of the player that is playing (the system volume when nothing plays, or while FxSound is the output; `media.wheel` changes this); the level shows as you scroll |
 | Shift + wheel on the orb | Next / previous track |
 | Middle-click the orb | Play / pause |
 | Wheel on the slips, or ↑ / ↓ | Flip between slips |

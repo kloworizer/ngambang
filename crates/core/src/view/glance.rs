@@ -423,9 +423,9 @@ pub(super) fn player(m: &Model, s: &MediaSession, edge: Edge, tm: &dyn TextMeasu
     }
     y += LINE;
 
-    // Volume of this player (the system's when it can't be told apart), and
-    // a dot for each app that plays.
-    let (level, muted, target) = match m.player_app() {
+    // Volume of this player (the system's when it can't be told apart, or
+    // behind FxSound), and a dot for each app that plays.
+    let (level, muted, target) = match m.volume_app() {
         Some(a) => (a.volume.level, a.volume.muted, SliderTarget::App(a.pid)),
         None => (m.mixer.master.level, m.mixer.master.muted, SliderTarget::Master),
     };
