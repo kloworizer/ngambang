@@ -6,6 +6,10 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **About page in Settings**: the version, the author (Esha Indra) and the
+  GitHub repository, with buttons to open it or report an issue.
+
 ### Changed
 - **The glance follows the music.** While something plays, hovering the
   island shows only the player (cover, title, artist, ⏮ ⏯ ⏭). When nothing

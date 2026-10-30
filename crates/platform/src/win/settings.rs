@@ -59,6 +59,8 @@ const ID_WATCH_UP: usize = 44;
 const ID_WATCH_DOWN: usize = 45;
 const ID_WATCH_REMOVE: usize = 46;
 const ID_WATCH_LEVELS: usize = 47;
+const ID_REPO: usize = 50;
+const ID_ISSUES: usize = 51;
 /// Posted to the Settings window when "Use my location" finishes.
 const WM_LOCATED: u32 = WM_APP + 20;
 /// Posted when a symbol search finishes.
@@ -106,7 +108,11 @@ struct Page {
     accent: Color,
 }
 
-const PAGES: [Page; 9] = [
+/// Who made Ngambang, and where it lives (shown on the About page).
+const AUTHOR: &str = "Esha Indra";
+const REPO: &str = env!("CARGO_PKG_REPOSITORY");
+
+const PAGES: [Page; 10] = [
     Page { icon: Icon::Gear, title: "General", subtitle: "Startup, position and how the island behaves", accent: theme::MEDIA },
     Page { icon: Icon::Grid, title: "Modules", subtitle: "Turn modules on or off and set the order of their tabs", accent: theme::CODER },
     Page { icon: Icon::Note, title: "Media & clipboard", subtitle: "Now playing, volume and developer clipboard", accent: theme::MEDIA },
@@ -126,6 +132,7 @@ const PAGES: [Page; 9] = [
         subtitle: "Search shares, indices, crypto and currencies for your watchlist",
         accent: theme::GAME,
     },
+    Page { icon: Icon::Open, title: "About", subtitle: "Who made Ngambang and where to find it", accent: theme::MEDIA },
 ];
 
 /// The Settings page that configures a module.
@@ -718,6 +725,19 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
     let below = b.make(w!("EDIT"), "", (ES_AUTOHSCROLL as u32) | WS_TABSTOP.0, WS_EX_CLIENTEDGE, (CTRL_X + 118, ly, 110, 28), 0);
     b.button_at("Set for selected", CTRL_X + 236, ly - 2, 150, ID_WATCH_LEVELS, false);
     b.y += 34;
+
+    // About
+    b.start_page(9);
+    b.section("NGAMBANG");
+    for (label, value) in [("Version", ngambang_core::VERSION), ("Made by", AUTHOR), ("Source code", REPO)] {
+        let y = b.y;
+        b.label_at(label, y);
+        b.make(w!("STATIC"), value, 0, WINDOW_EX_STYLE(0), (CTRL_X, y + 5, CTRL_W, 20), 0);
+        b.grow(y + 28);
+        b.y += 32;
+    }
+    b.buttons(&[("Open on GitHub", ID_REPO), ("Report an issue", ID_ISSUES)]);
+    b.hint("An edge-docked floating island for Windows. MIT + Commons Clause licence; see LICENSE and THIRD_PARTY_NOTICES.md.");
 
     // Footer, on every page.
     b.page = PAGES.len();
@@ -1423,6 +1443,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 ID_CANCEL => unsafe {
                     let _ = DestroyWindow(hwnd);
                 },
+                ID_REPO => system::shell_open(REPO),
+                ID_ISSUES => system::shell_open(&format!("{REPO}/issues")),
                 // A notch starts in the middle of the top edge.
                 ID_STYLE if code == CBN_SELCHANGE => {
                     with(|s| {
