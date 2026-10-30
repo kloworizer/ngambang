@@ -139,7 +139,25 @@ pub struct DockConfig {
     /// app (a video, a game) covers this one, and come back afterwards.
     pub move_in_fullscreen: bool,
     pub style: Style,
+    /// What the notch turns through when nothing plays, in order, by key
+    /// (see `NOTCH_GLANCES`).
+    pub notch_glances: Vec<String>,
+    /// Seconds each notch glance stays.
+    pub notch_glance_s: u32,
+    /// Executables (file names) that never move or sink the island when
+    /// they go fullscreen, such as a streaming tool.
+    pub fullscreen_ignore: Vec<String>,
+    /// Executables that always sink the island to the Seam on their own
+    /// display instead of moving it to another one.
+    pub fullscreen_sink: Vec<String>,
+    /// Hide the island while you share your screen in a meeting app.
+    pub hide_when_sharing: bool,
+    /// While dragging, snap to the middle and the ends of an edge.
+    pub snap: bool,
 }
+
+/// Keys for `dock.notch_glances`, in the default order.
+pub const NOTCH_GLANCES: [&str; 5] = ["weather", "markets", "todo", "calendar", "prayer"];
 
 impl Default for DockConfig {
     fn default() -> Self {
@@ -151,6 +169,12 @@ impl Default for DockConfig {
             hide_in_fullscreen: true,
             move_in_fullscreen: true,
             style: Style::Orb,
+            notch_glances: NOTCH_GLANCES.iter().map(|k| k.to_string()).collect(),
+            notch_glance_s: 6,
+            fullscreen_ignore: Vec::new(),
+            fullscreen_sink: Vec::new(),
+            hide_when_sharing: true,
+            snap: true,
         }
     }
 }
@@ -472,11 +496,13 @@ pub struct WeatherConfig {
     pub quake_radius_km: u32,
     /// Smallest earthquake magnitude that raises a tag.
     pub quake_min_magnitude: f32,
+    /// A tag shortly before the forecast says rain starts.
+    pub rain_tags: bool,
 }
 
 impl Default for WeatherConfig {
     fn default() -> Self {
-        WeatherConfig { alerts: true, quake_radius_km: 300, quake_min_magnitude: 4.5 }
+        WeatherConfig { alerts: true, quake_radius_km: 300, quake_min_magnitude: 4.5, rain_tags: true }
     }
 }
 
@@ -617,6 +643,12 @@ hotkey = "Win+Alt+Space"
 hide_in_fullscreen = true  # sink to a 3 px line while a fullscreen app has focus
 move_in_fullscreen = true  # with two or more displays, move to another one meanwhile
 style = "orb"              # orb (any edge) | notch (top of the screen, drag left or right)
+notch_glances = ["weather", "markets", "todo", "calendar", "prayer"]  # what the notch turns through, in order
+notch_glance_s = 6         # seconds each one stays (3–60)
+fullscreen_ignore = []     # exe names that never move or sink the island, e.g. ["obs64.exe"]
+fullscreen_sink = []       # exe names that sink the island to a line instead of moving it
+hide_when_sharing = true   # hide while you share your screen in Zoom, Teams, Meet …
+snap = true                # snap to the middle and the ends of an edge while dragging
 
 [modules]
 media = true       # now playing from every app with media controls
@@ -691,6 +723,7 @@ hijri_adjust = 0           # days added to the Hijri date (-2…2) to match the 
 alerts = true              # tags for disasters near the location
 quake_radius_km = 300
 quake_min_magnitude = 4.5
+rain_tags = true           # a tag shortly before rain starts
 
 [calendar]                 # link calendars in Settings ▸ Calendar
 feeds = [{ name = "Libur Indonesia", url = "https://calendar.google.com/calendar/ical/en-gb.indonesian%23holiday%40group.v.calendar.google.com/public/basic.ics", color = "#FF8A70" }]
@@ -774,6 +807,15 @@ impl Config {
     }
 
     fn validate(&mut self, warnings: &mut Vec<String>) {
+        let before = self.dock.notch_glances.len();
+        self.dock.notch_glances.retain(|k| NOTCH_GLANCES.contains(&k.as_str()));
+        if self.dock.notch_glances.len() != before {
+            warnings.push(format!("dock.notch_glances: use any of {}", NOTCH_GLANCES.join(", ")));
+        }
+        if !(3..=60).contains(&self.dock.notch_glance_s) {
+            warnings.push("dock.notch_glance_s must be 3–60".into());
+            self.dock.notch_glance_s = self.dock.notch_glance_s.clamp(3, 60);
+        }
         if !(0.0..=1.0).contains(&self.dock.offset) || self.dock.offset.is_nan() {
             warnings.push("dock.offset must be between 0.0 and 1.0".into());
             self.dock.offset = self.dock.offset.clamp(0.0, 1.0);

@@ -1124,7 +1124,10 @@ impl App {
     /// Move to another display while a fullscreen app covers the home one
     /// (when that is on and there is another display), or back home.
     fn update_displaced(&mut self) {
-        let want = if self.covered && self.model.config.dock.move_in_fullscreen { other_monitor(self.home) } else { None };
+        // An app listed to sink the island keeps it on its own display.
+        let sink = self.last_fullscreen.as_deref().map(|p| ngambang_core::games::placement(p, &self.model.config.dock))
+            == Some(ngambang_core::games::Placement::Sink);
+        let want = if self.covered && !sink && self.model.config.dock.move_in_fullscreen { other_monitor(self.home) } else { None };
         if want == self.displaced {
             return;
         }
@@ -1169,12 +1172,25 @@ impl App {
         let signals = ngambang_core::games::Signals { exclusive_d3d: system::exclusive_d3d(), gpu_3d_pct: None };
         // Overlays (Snipping Tool, Start) don't move the island; anything else
         // moves it away first, so it never sinks or drops its tags meanwhile.
+        // Apps listed to leave the island alone don't cover it either.
         let kind = ngambang_core::games::classify(&path, signals, &self.model.config.game);
-        self.covered = kind != ngambang_core::games::FullscreenKind::Ignore;
+        let stay = ngambang_core::games::placement(&path, &self.model.config.dock) == ngambang_core::games::Placement::Stay;
+        self.covered = kind != ngambang_core::games::FullscreenKind::Ignore && !stay;
         self.update_displaced();
         self.dispatch(Event::Fullscreen { active: true, exe: path.clone(), signals });
         // ... then measure the app's own 3D load; a busy GPU makes it a game.
         self.probe_gpu(path, pid);
+    }
+
+    /// Hide while the screen is shared in a meeting. Only looked for while
+    /// a microphone or camera is in use (a meeting is on), so it costs
+    /// nothing the rest of the time.
+    fn check_sharing(&mut self) {
+        let look = self.model.config.dock.hide_when_sharing && !self.model.privacy.is_empty();
+        let sharing = look && system::screen_shared();
+        if sharing != self.model.sharing {
+            self.dispatch(Event::Sharing(sharing));
+        }
     }
 
     fn probe_gpu(&mut self, path: String, pid: u32) {
@@ -1237,7 +1253,8 @@ impl App {
 
     /// Where the cursor would dock the island: edge, offset and monitor name.
     /// A notch only slides along the top edge.
-    fn dock_at_cursor(notch: Option<Edge>) -> (Edge, f32, String) {
+    /// With `snap`, it lands on the start, middle or end of the edge when near one.
+    fn dock_at_cursor(notch: Option<Edge>, snap: bool) -> (Edge, f32, String) {
         let mut pt = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut pt);
@@ -1249,6 +1266,9 @@ impl App {
             edge = keep;
             offset = (((pt.x as f32 / scale - work.x) / work.w.max(1.0)).clamp(0.0, 1.0) * 1000.0).round() / 1000.0;
         }
+        if snap {
+            offset = layout::snap_offset(offset, if edge.is_vertical() { work.h } else { work.w });
+        }
         let monitor = if is_primary(mon) { "primary".to_string() } else { monitor_name(mon).unwrap_or_else(|| "primary".into()) };
         (edge, offset, monitor)
     }
@@ -1256,7 +1276,7 @@ impl App {
     /// Follow the cursor while dragging: the island moves along the nearest edge as you go.
     fn drag_to_cursor(&mut self) {
         let notch = (self.model.config.dock.style == Style::Notch).then_some(self.model.config.dock.edge);
-        let (edge, offset, monitor) = Self::dock_at_cursor(notch);
+        let (edge, offset, monitor) = Self::dock_at_cursor(notch, self.model.config.dock.snap);
         // Dropped somewhere new: that is home now, fullscreen app or not.
         if self.displaced.take().is_some() {
             self.covered = false;
@@ -1438,6 +1458,7 @@ impl App {
                     let _ = self.renderer.drop_outgoing();
                 } else if id == TIMER_FULLSCREEN {
                     self.check_fullscreen();
+                    self.check_sharing();
                 } else if id == TIMER_CLOCK {
                     self.check_clock();
                 } else if id == TIMER_TRIM {

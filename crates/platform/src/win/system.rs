@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use ngambang_core::model::{Event, GpuStats};
 use windows::core::{s, w, GUID, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{LocalFree, HLOCAL, HWND, POINT, RECT};
+use windows::Win32::Foundation::{LocalFree, HLOCAL, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
 };
@@ -23,8 +23,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, ShellExecuteW, QUNS_RUNNING_D3D_FULL_SCREEN};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
-    IsWindowVisible, IsZoomed, GWL_STYLE, SW_SHOWNORMAL, WS_CAPTION,
+    EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+    IsIconic, IsWindow, IsWindowVisible, IsZoomed, GWL_STYLE, SW_SHOWNORMAL, WS_CAPTION,
 };
 
 use super::util::{process_path, Bus};
@@ -52,6 +52,30 @@ pub fn fullscreen_app(ours: HWND, island_monitor: HMONITOR, last: Option<HWND>) 
         };
         (fg == ours || focus != island_monitor).then(|| app_of(last))
     }
+}
+
+/// A meeting app is sharing the screen: one of its sharing toolbars or
+/// "… is sharing your screen" bars is up.
+pub fn screen_shared() -> bool {
+    unsafe extern "system" fn visit(w: HWND, data: LPARAM) -> windows::core::BOOL {
+        let found = &mut *(data.0 as *mut bool);
+        if IsWindowVisible(w).as_bool() {
+            let mut class = [0u16; 64];
+            let n = GetClassNameW(w, &mut class) as usize;
+            let mut title = [0u16; 128];
+            let t = GetWindowTextW(w, &mut title) as usize;
+            if ngambang_core::games::is_sharing_window(&String::from_utf16_lossy(&class[..n]), &String::from_utf16_lossy(&title[..t])) {
+                *found = true;
+                return false.into();
+            }
+        }
+        true.into()
+    }
+    let mut found = false;
+    unsafe {
+        let _ = EnumWindows(Some(visit), LPARAM(&mut found as *mut bool as isize));
+    }
+    found
 }
 
 /// The desktop and the taskbars.

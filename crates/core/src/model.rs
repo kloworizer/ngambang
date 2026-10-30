@@ -25,7 +25,7 @@ pub const BREAK_REPEAT_MS: u64 = 30 * 60_000;
 pub const UNATTENDED_MS: u64 = 4000;
 pub const MAX_JOBS: usize = 8;
 pub const MAX_CAPTURES: usize = 5;
-/// The notch shows each glance this long.
+/// The notch shows each glance this long by default (`dock.notch_glance_s`).
 pub const CAROUSEL_MS: u64 = 6000;
 
 /// What the notch shows at rest when nothing is playing, in turn.
@@ -619,6 +619,8 @@ pub enum Event {
         exe: String,
         signals: Signals,
     },
+    /// The screen is being shared in a meeting app (or no longer).
+    Sharing(bool),
     /// The island moved to another display while a fullscreen app covers
     /// its own (true), or came back (false).
     Displaced(bool),
@@ -775,6 +777,14 @@ pub struct Model {
     pub break_due_ms: Option<u64>,
     pub clock: Option<Clock>,
     pub prayer_day: Option<crate::prayer::Day>,
+    /// Tomorrow's times, for Subuh after Isya.
+    pub prayer_tomorrow: Option<crate::prayer::Day>,
+    /// The start of the last shower a "rain soon" tag announced (unix seconds).
+    rain_announced: Option<i64>,
+    /// Where the island goes for the fullscreen app now (the user's lists).
+    pub fullscreen_placement: crate::games::Placement,
+    /// The screen is being shared in a meeting: the island hides.
+    pub sharing: bool,
     /// A newer version on GitHub, if one was found.
     pub update: Option<String>,
     pub weather: Option<crate::weather::Weather>,
@@ -870,6 +880,10 @@ impl Model {
             break_due_ms: None,
             clock: None,
             prayer_day: None,
+            prayer_tomorrow: None,
+            rain_announced: None,
+            fullscreen_placement: Default::default(),
+            sharing: false,
             update: None,
             weather: None,
             alerts: Vec::new(),
@@ -1001,9 +1015,15 @@ impl Model {
     }
 
     fn rest_state(&self) -> IslandState {
-        if self.paused {
+        use crate::games::Placement;
+        let sink = match self.fullscreen_placement {
+            Placement::Stay => false,
+            Placement::Sink => true,
+            Placement::Auto => self.config.dock.hide_in_fullscreen && !self.displaced,
+        };
+        if self.paused || self.sharing {
             IslandState::Hidden
-        } else if self.fullscreen != Fullscreen::None && self.config.dock.hide_in_fullscreen && !self.displaced {
+        } else if self.fullscreen != Fullscreen::None && sink {
             IslandState::Seam
         } else {
             IslandState::Orb
@@ -1011,7 +1031,7 @@ impl Model {
     }
 
     fn quiet(&self) -> bool {
-        (self.fullscreen != Fullscreen::None && !self.displaced)
+        (self.fullscreen != Fullscreen::None && !self.displaced && self.fullscreen_placement != crate::games::Placement::Stay)
             || (self.config.timer.quiet_while_running && self.timer.is_running() && !self.on_break)
     }
 
@@ -1025,7 +1045,7 @@ impl Model {
     }
 
     fn tag_allowed(&self, priority: u8) -> bool {
-        !self.paused && (priority <= 2 || !self.quiet())
+        !self.paused && !self.sharing && (priority <= 2 || !self.quiet())
     }
 
     fn next_random(&mut self) -> [u8; 16] {
@@ -1371,6 +1391,7 @@ impl Model {
                         let t = self.tag(text, theme::PORTS, crate::view::condition_icon(w.condition), 6, TAG_MS + 1000);
                         self.push_tag(t, fx);
                     }
+                    self.rain_soon(&w, fx);
                     self.weather = Some(w);
                 }
             }
@@ -1590,6 +1611,18 @@ impl Model {
                 self.paused = p;
                 self.tags.clear();
                 self.settle(fx);
+            }
+            Event::Sharing(on) => {
+                let on = on && self.config.dock.hide_when_sharing;
+                if on != self.sharing {
+                    self.sharing = on;
+                    if on {
+                        self.tags.clear();
+                    }
+                    if self.state != IslandState::Slips || on {
+                        self.settle(fx);
+                    }
+                }
             }
         }
     }
@@ -2077,6 +2110,7 @@ impl Model {
     }
 
     fn fullscreen_changed(&mut self, active: bool, exe: String, signals: Signals, fx: &mut Vec<Effect>) {
+        self.fullscreen_placement = if active { crate::games::placement(&exe, &self.config.dock) } else { Default::default() };
         if active {
             let kind = match classify(&exe, signals, &self.config.game) {
                 FullscreenKind::Game if !self.enabled(ModuleId::Game) => FullscreenKind::Media,
@@ -2627,6 +2661,31 @@ impl Model {
         self.clock.map(|c| c.minutes + self.now_ms.saturating_sub(c.at_ms) as f64 / 60_000.0)
     }
 
+    /// "Rain in about 20 min", once per shower, when the forecast says rain
+    /// starts within the hour.
+    fn rain_soon(&mut self, w: &crate::weather::Weather, fx: &mut Vec<Effect>) {
+        let (Some(at), Some(now)) = (w.rain_at, self.unix_now()) else { return };
+        let mins = (at - now) / 60;
+        let fresh = self.rain_announced.is_none_or(|was| (at - was).abs() > 3 * 3600);
+        if !self.config.weather.rain_tags || !(0..=60).contains(&mins) || !fresh {
+            return;
+        }
+        self.rain_announced = Some(at);
+        let text = if mins < 5 { "Rain any minute now".to_string() } else { format!("Rain in about {} min", (mins + 2) / 5 * 5) };
+        let t = self.tag(text, crate::theme::PORTS, Icon::Rain, 5, TAG_MS + 2000);
+        self.push_tag(t, fx);
+    }
+
+    /// The next of the five prayers and when, in local minutes; after Isya,
+    /// tomorrow's Subuh (past 1440).
+    pub fn next_prayer(&self) -> Option<(crate::prayer::Prayer, f64)> {
+        let now = self.local_minute()?;
+        self.prayer_day?.next(now).or_else(|| {
+            let p = crate::prayer::Prayer::Subuh;
+            self.prayer_tomorrow?.get(p).map(|t| (p, t + 1440.0))
+        })
+    }
+
     /// The next prayer is within `minutes`.
     fn prayer_soon(&self, minutes: f64) -> bool {
         match (self.prayer_day, self.local_minute()) {
@@ -2639,10 +2698,14 @@ impl Model {
         fx.push(Effect::KillTimer(TimerId::Prayer));
         let Some(c) = self.clock.filter(|_| self.enabled(ModuleId::Prayer)) else {
             self.prayer_day = None;
+            self.prayer_tomorrow = None;
             return;
         };
         let (p, l) = (&self.config.prayer, &self.config.location);
-        let day = crate::prayer::compute(c.year, c.month, c.day, l.latitude, l.longitude, c.utc_offset_min as f64 / 60.0, p.method, p.asr);
+        let tz = c.utc_offset_min as f64 / 60.0;
+        let day = crate::prayer::compute(c.year, c.month, c.day, l.latitude, l.longitude, tz, p.method, p.asr);
+        let (ty, tm, td) = crate::calendar::civil_from_days(crate::calendar::days_from_civil(c.year as i64, c.month, c.day) + 1);
+        self.prayer_tomorrow = Some(crate::prayer::compute(ty as i32, tm, td, l.latitude, l.longitude, tz, p.method, p.asr));
         self.prayer_announced.retain(|(date, _, _)| *date == (c.year, c.month, c.day));
         self.prayer_day = Some(day);
         // Catch up on a moment a late timer skipped, then wait for the next.
@@ -2769,35 +2832,30 @@ impl Model {
         self.front_media().is_some_and(|s| s.playing)
     }
 
-    /// The glances that have something to show, in order: weather, the
-    /// markets, the to-do list, the calendar, prayer times.
+    /// The glances that have something to show, in the order set by
+    /// `dock.notch_glances` (weather, markets, to-do, calendar, prayer times).
     pub fn glances(&self) -> Vec<Glance> {
         let mut v = Vec::new();
-        if self.weather.is_some() {
-            v.push(Glance::Weather);
-        }
-        if self.enabled(ModuleId::Finance) {
-            let quoted = self
-                .config
-                .finance
-                .watchlist
-                .iter()
-                .enumerate()
-                .filter(|(_, w)| self.quotes.iter().any(|q| q.symbol.eq_ignore_ascii_case(&w.symbol)))
-                .map(|(i, _)| Glance::Quote(i))
-                .take(3);
-            v.extend(quoted);
-        }
-        if self.enabled(ModuleId::Todo) && self.todos.iter().any(|t| !t.done) {
-            v.push(Glance::Todo);
-        }
-        if self.next_event_within(36 * 3600).is_some() {
-            v.push(Glance::Calendar);
-        }
-        // After Isya there is no prayer left today: nothing to show until midnight.
-        let next_prayer = self.prayer_day.zip(self.local_minute()).is_some_and(|(d, t)| d.next(t).is_some());
-        if self.fasting().is_some() || next_prayer {
-            v.push(Glance::Prayer);
+        for key in &self.config.dock.notch_glances {
+            match key.as_str() {
+                "weather" if self.weather.is_some() => v.push(Glance::Weather),
+                "markets" if self.enabled(ModuleId::Finance) => {
+                    let quoted = self
+                        .config
+                        .finance
+                        .watchlist
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, w)| self.quotes.iter().any(|q| q.symbol.eq_ignore_ascii_case(&w.symbol)))
+                        .map(|(i, _)| Glance::Quote(i))
+                        .take(3);
+                    v.extend(quoted);
+                }
+                "todo" if self.enabled(ModuleId::Todo) && self.todos.iter().any(|t| !t.done) => v.push(Glance::Todo),
+                "calendar" if self.next_event_within(36 * 3600).is_some() => v.push(Glance::Calendar),
+                "prayer" if self.fasting().is_some() || self.next_prayer().is_some() => v.push(Glance::Prayer),
+                _ => {}
+            }
         }
         v
     }
@@ -2815,7 +2873,7 @@ impl Model {
             && !self.playing()
             && self.glances().len() > 1;
         if want && !self.carousel_armed {
-            fx.push(Effect::SetTimer(TimerId::Carousel, CAROUSEL_MS));
+            fx.push(Effect::SetTimer(TimerId::Carousel, self.config.dock.notch_glance_s as u64 * 1000));
         } else if !want && self.carousel_armed {
             fx.push(Effect::KillTimer(TimerId::Carousel));
         }
@@ -2945,6 +3003,57 @@ mod tests {
         m.update(100, Event::Media(vec![session("a", "Two", true)]));
         assert_eq!(m.tags.iter().filter(|t| t.media).count(), 1);
         assert!(m.current_tag().unwrap().text.starts_with("Two"));
+    }
+
+    #[test]
+    fn sharing_the_screen_hides_the_island() {
+        let mut m = model();
+        m.update(0, Event::Sharing(true));
+        assert_eq!(m.state, IslandState::Hidden);
+        m.update(10, Event::Privacy(vec![(Device::Microphone, "Zoom".into())]));
+        assert_eq!(m.state, IslandState::Hidden, "no tags while sharing");
+        m.update(20, Event::Sharing(false));
+        assert_eq!(m.state, IslandState::Orb);
+        // Off in the config: stays.
+        m.config.dock.hide_when_sharing = false;
+        m.update(30, Event::Sharing(true));
+        assert_ne!(m.state, IslandState::Hidden);
+    }
+
+    #[test]
+    fn fullscreen_lists_decide_where_the_island_goes() {
+        let mut m = model();
+        m.config.dock.fullscreen_ignore = vec!["obs64.exe".into()];
+        m.config.dock.fullscreen_sink = vec!["vlc.exe".into()];
+        m.update(0, Event::Displaced(true));
+        m.update(0, Event::Fullscreen { active: true, exe: "C:\\obs\\obs64.exe".into(), signals: Signals::default() });
+        assert_eq!(m.state, IslandState::Orb, "stays as it is");
+        m.update(10, Event::Fullscreen { active: true, exe: "C:\\vlc\\vlc.exe".into(), signals: Signals::default() });
+        assert_eq!(m.state, IslandState::Seam, "sinks even though another display is free");
+        m.update(20, Event::Fullscreen { active: false, exe: String::new(), signals: Signals::default() });
+        assert_eq!(m.state, IslandState::Orb);
+    }
+
+    #[test]
+    fn rain_soon_is_announced_once_per_shower() {
+        let mut m = model();
+        let now = 1_800_000_000;
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 600.0, utc_offset_min: 420, unix: now });
+        let mut w = crate::weather::parse_open_meteo(include_str!("../testdata/openmeteo.json"), "Jakarta", now).unwrap();
+        w.rain_at = Some(now + 22 * 60);
+        m.update(0, Event::Weather(w.clone()));
+        assert_eq!(m.current_tag().unwrap().text, "Rain in about 20 min");
+        m.tags.clear();
+        // The next reading of the same shower stays quiet.
+        w.rain_at = Some(now + 20 * 60);
+        m.update(1000, Event::Weather(w.clone()));
+        assert!(m.tags.is_empty());
+        // Off in the config: never.
+        let mut m = model();
+        m.config.weather.rain_tags = false;
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 600.0, utc_offset_min: 420, unix: now });
+        m.update(0, Event::Weather(w));
+        assert!(m.tags.is_empty());
     }
 
     #[test]
@@ -3566,13 +3675,19 @@ mod tests {
     }
 
     #[test]
-    fn the_notch_skips_prayer_after_isya() {
+    fn after_isya_the_notch_shows_tomorrows_subuh() {
         let mut m = model();
         m.update(0, Event::SetModule(ModuleId::Prayer, true));
         m.update(0, Event::TodoAdded("Buy rice".into()));
         // 23:30 local: every prayer today is over.
         m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 1410.0, utc_offset_min: 420, unix: 1_792_911_900 });
-        assert_eq!(m.glances(), vec![Glance::Todo]);
+        assert_eq!(m.glances(), vec![Glance::Todo, Glance::Prayer]);
+        let (p, at) = m.next_prayer().unwrap();
+        assert_eq!(p, crate::prayer::Prayer::Subuh);
+        assert!((1440.0 + 200.0..1440.0 + 330.0).contains(&at), "tomorrow before dawn: {at}");
+        // The order and the length come from the config.
+        m.config.dock.notch_glances = vec!["prayer".into(), "todo".into()];
+        assert_eq!(m.glances(), vec![Glance::Prayer, Glance::Todo]);
     }
 
     #[test]

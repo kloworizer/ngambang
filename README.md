@@ -23,11 +23,11 @@ mic/camera alert.
   the top of the screen that you slide left or right. The notch shows the
   song that is playing, or turns through the weather, your watchlist, your
   next task, event and prayer time.
-- **More in 0.1.9:** Ramadan imsak/buka countdowns, Hijri date and qibla;
-  focus rounds with breaks and Do not disturb; clipboard history; quick
-  notes (`ngambang note "…"`); battery, network/VPN and power plans; download
-  progress; price-level alerts; meeting Join and mic toggle; quick launch by
-  dropping apps on the island.
+- **New in 0.2.0:** a full player in the glance (seek, volume, switch
+  between players, mic/camera warning on top); tomorrow's Subuh after Isya;
+  "rain soon" pop-ups; sparklines in the market glance; choose what the notch
+  turns through; per-app fullscreen rules; hides while you share your screen;
+  snap points while dragging.
 - **Compact on the top or bottom edge.** Docked there, slips are low wide
   strips (at most 180 px tall).
 
@@ -44,13 +44,13 @@ Specification: [docs/SPEC.md](docs/SPEC.md)
 
 | Input | Action |
 |-------|--------|
-| Hover the orb | While music plays: the player alone (cover, artist and ⏮ ⏯ ⏭). Otherwise: the weather, markets, to-do, next event, prayer time … |
+| Hover the orb | While music plays: the player alone (cover, artist, ⏮ ⏯ ⏭, a position bar to drag, its volume, a dot per app that plays). Otherwise: the weather, markets, to-do, next event, prayer time … |
 | Click | Open the slips; click again or move away to close |
 | Mouse wheel on the orb or a tag | Volume of the player that is playing (the system volume when nothing plays); the level shows as you scroll |
 | Shift + wheel on the orb | Next / previous track |
 | Middle-click the orb | Play / pause |
 | Wheel on the slips, or ↑ / ↓ | Flip between slips |
-| Drag the orb, a tag, the glance or a slip's background | Move it to another edge or monitor; it follows the pointer as you drag (a notch slides along the top) |
+| Drag the orb, a tag, the glance or a slip's background | Move it to another edge or monitor; it follows the pointer as you drag and snaps to the middle and ends of an edge (a notch slides along the top) |
 | `Win+Alt+Space` | Open with the keyboard (`Tab`, `Enter`, `←`/`→` on sliders, `Esc`) |
 | Right-click the orb or tray icon | Settings, modules, dock edge, pause, start with Windows |
 
@@ -138,9 +138,11 @@ listed in the sidebar (`Ctrl+Tab` moves to the next one):
 | Focus & commands | Timer presets · custom round length · long-command threshold |
 | Games | Break reminder · ping host · power plan to use while gaming (picked from your plans) |
 | Location & prayer | A city from the list (about 240 places: Indonesia in depth, Malaysia, Singapore, Brunei, the Middle East and large cities worldwide; Jakarta by default), your own coordinates, or **Use my location** · calculation method · Asr (standard or Hanafi) · reminder minutes |
-| Weather & updates | Disaster pop-ups on/off · earthquake radius · automatic update checks (check now from the right-click menu) |
+| Weather & updates | Disaster pop-ups on/off · rain-soon pop-ups · earthquake radius · automatic update checks (check now from the right-click menu) |
 | Calendar | Link calendars by their secret iCal address (Google Calendar ▸ Settings ▸ your calendar ▸ Integrate calendar), name and colour; pick one to edit or remove it. Indonesian public holidays are linked by default · reminder minutes · days ahead |
 | Markets | Search box with live matches (shares, indices, crypto, currency pairs) · your watchlist with Move up / Move down / Remove · price-move tags and their step (%) · headline tags |
+| Notch & screen | What the notch turns through and for how long · hide while sharing the screen · snap while dragging · apps that never move the island · apps that sink it instead of moving it |
+| About | Version, author and the GitHub repository |
 
 Everything applies as soon as you press **Save**; nothing needs a restart.
 The tray menu also has quick toggles for modules, dock edge (and the notch), pause and
@@ -161,6 +163,12 @@ offset = 0.45            # position along the edge
 hotkey = "Win+Alt+Space"
 style = "orb"            # orb | notch (hangs from the top, drag left or right)
 move_in_fullscreen = true  # with two or more displays, move away from fullscreen apps
+notch_glances = ["weather", "markets", "todo", "calendar", "prayer"]
+notch_glance_s = 6
+fullscreen_ignore = []   # e.g. ["obs64.exe"]: never move or sink for these
+fullscreen_sink = []     # sink to a line for these instead of moving
+hide_when_sharing = true
+snap = true
 
 [finance]
 price_alerts = true      # a tag when a watchlist symbol moves move_pct

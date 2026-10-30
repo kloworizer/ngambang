@@ -76,9 +76,27 @@ pub fn nearest_edge(work: Rect, x: f32, y: f32) -> (Edge, f32) {
     (edge, (offset.clamp(0.0, 1.0) * 1000.0).round() / 1000.0)
 }
 
+/// Within this many DIPs of a snap point, a drag lands on it.
+pub const SNAP_DIP: f32 = 24.0;
+
+/// Snap an offset along an edge `len` DIPs long to its start, middle or end
+/// when the pointer is near one.
+pub fn snap_offset(offset: f32, len: f32) -> f32 {
+    let reach = SNAP_DIP / len.max(1.0);
+    [0.0, 0.5, 1.0].into_iter().find(|p| (offset - p).abs() <= reach).unwrap_or(offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drags_snap_to_the_middle_and_the_ends() {
+        assert_eq!(snap_offset(0.51, 1920.0), 0.5);
+        assert_eq!(snap_offset(0.008, 1920.0), 0.0);
+        assert_eq!(snap_offset(0.995, 1032.0), 1.0);
+        assert_eq!(snap_offset(0.3, 1920.0), 0.3);
+    }
 
     const WORK: Rect = Rect::new(0.0, 0.0, 1920.0, 1032.0);
 

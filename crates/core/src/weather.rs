@@ -23,7 +23,7 @@ pub fn open_meteo_url(lat: f64, lon: f64) -> String {
         "https://api.open-meteo.com/v1/forecast?latitude={lat:.4}&longitude={lon:.4}\
          &current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m\
          &daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max\
-         &hourly=temperature_2m,weather_code&forecast_days=2&timezone=auto"
+         &hourly=temperature_2m,weather_code&minutely_15=weather_code&forecast_days=2&timezone=auto"
     )
 }
 
@@ -102,7 +102,14 @@ pub struct Weather {
     pub next: Vec<Slot>,
     /// Unix seconds when it was fetched.
     pub fetched: i64,
+    /// When rain should start (unix seconds), if it is dry now and the
+    /// forecast has rain within `RAIN_LOOKAHEAD_S`.
+    #[serde(default)]
+    pub rain_at: Option<i64>,
 }
+
+/// How far ahead `Weather::rain_at` looks.
+pub const RAIN_LOOKAHEAD_S: i64 = 2 * 3600;
 
 /// Seconds since 1970 for "YYYY-MM-DDTHH:MM[:SS][Z]" or "YYYY-MM-DD HH:MM:SS" (taken as UTC).
 pub fn parse_utc(s: &str) -> Option<i64> {
@@ -160,7 +167,22 @@ pub fn parse_open_meteo(json: &str, place: &str, now: i64) -> Option<Weather> {
             }
         }
     }
+    // Rain soon: the 15-minute forecast where there is one, else the hourly one.
+    let offset = v.get("utc_offset_seconds").and_then(Value::as_i64).unwrap_or(0);
+    let cur_unix = parse_utc(cur_time).map(|t| t - offset);
+    let soon = |block: Option<&Value>| -> Option<i64> {
+        let times = block?.get("time")?.as_array()?;
+        let codes = block?.get("weather_code")?.as_array()?;
+        let now = cur_unix?;
+        times.iter().zip(codes).find_map(|(t, c)| {
+            let at = parse_utc(t.as_str()?)? - offset;
+            let rain = Condition::from_wmo(c.as_i64()?).is_rain();
+            (at > now && at - now <= RAIN_LOOKAHEAD_S && rain).then_some(at)
+        })
+    };
+    let rain_at = if condition.is_rain() { None } else { soon(v.get("minutely_15")).or_else(|| soon(hourly)) };
     Some(Weather {
+        rain_at,
         source: "Open-Meteo".into(),
         place: place.to_string(),
         temp_c: cur.get("temperature_2m").and_then(f)?,
@@ -417,9 +439,21 @@ mod tests {
         assert_eq!(w.source, "Open-Meteo");
         assert!(w.rain_chance.is_some());
         assert!(w.next.iter().all(|s| s.time.len() == 5));
+        assert_eq!(w.rain_at, None, "dry for the next two hours");
         assert!(parse_open_meteo(OPEN_METEO_ERROR, "Jakarta", 0).is_none());
         assert!(parse_open_meteo("<html>offline</html>", "Jakarta", 0).is_none());
         assert!(parse_open_meteo("", "x", 0).is_none());
+    }
+
+    #[test]
+    fn rain_soon_from_the_15_minute_forecast() {
+        let json = r#"{"utc_offset_seconds":25200,"current":{"time":"2026-10-24T13:00","temperature_2m":31.0,"weather_code":3},
+            "minutely_15":{"time":["2026-10-24T13:00","2026-10-24T13:15","2026-10-24T13:30"],"weather_code":[3,3,61]}}"#;
+        let w = parse_open_meteo(json, "Jakarta", 0).unwrap();
+        assert_eq!(w.rain_at, Some(parse_utc("2026-10-24T06:30").unwrap()), "13:30 local is 06:30 UTC");
+        // Already raining: nothing to announce.
+        let wet = json.replace(r#""weather_code":3}"#, r#""weather_code":63}"#);
+        assert_eq!(parse_open_meteo(&wet, "Jakarta", 0).unwrap().rain_at, None);
     }
 
     #[test]
