@@ -397,7 +397,7 @@ fn notch(m: &Model, tm: &dyn TextMeasure) -> Scene {
     let x = c.x + RING_R + 2.5 + 8.0;
     let room = w - x - 14.0;
     match line {
-        Some((_, _, text, detail, wave)) => {
+        Some((_, color, text, detail, wave, spark)) => {
             let style = TextStyle { size: 12.0, weight: Weight::Medium, mono: false };
             let dstyle = TextStyle { size: 10.5, weight: Weight::Medium, mono: true };
             let mut tx = x;
@@ -405,7 +405,12 @@ fn notch(m: &Model, tm: &dyn TextMeasure) -> Scene {
                 prims.push(Prim::Polyline { points: wave_points(tx, h / 2.0, 22.0, 2.5), width: 1.6, color: MEDIA, closed: false });
                 tx += 30.0;
             }
-            let dw = detail.as_ref().map(|(d, _)| tm.width(d, dstyle).ceil().min(room * 0.45)).unwrap_or(0.0);
+            let mut dw = detail.as_ref().map(|(d, _)| tm.width(d, dstyle).ceil().min(room * 0.45)).unwrap_or(0.0);
+            if let Some(points) = spark {
+                let r = Rect::new(x + room - dw - 8.0 - 34.0, h / 2.0 - 6.0, 34.0, 12.0);
+                prims.push(Prim::Polyline { points: spark_points(r, &points), width: 1.4, color, closed: false });
+                dw += 42.0;
+            }
             prims.push(Prim::Text {
                 rect: Rect::new(tx, 0.0, x + room - tx - if dw > 0.0 { dw + 8.0 } else { 0.0 }, h),
                 text,
@@ -415,8 +420,9 @@ fn notch(m: &Model, tm: &dyn TextMeasure) -> Scene {
                 wrap: false,
             });
             if let Some((d, dc)) = detail {
+                let w = tm.width(&d, dstyle).ceil().min(room * 0.45);
                 prims.push(Prim::Text {
-                    rect: Rect::new(x + room - dw, 0.0, dw, h),
+                    rect: Rect::new(x + room - w, 0.0, w, h),
                     text: d,
                     style: dstyle,
                     color: dc,
@@ -447,21 +453,27 @@ fn notch(m: &Model, tm: &dyn TextMeasure) -> Scene {
     hang_from_top(scene)
 }
 
-/// What the notch says: icon, its colour, the text, a detail and whether a
-/// wave plays before it.
-type NotchLine = (Icon, Color, String, Option<(String, Color)>, bool);
+/// What the notch says: icon, its colour, the text, a detail, whether a
+/// wave plays before it and a sparkline before the detail.
+type NotchLine = (Icon, Color, String, Option<(String, Color)>, bool, Option<Vec<f32>>);
 
 fn notch_line(m: &Model) -> Option<NotchLine> {
     if let Some(s) = m.front_media().filter(|s| s.playing && !s.title.is_empty()) {
         let artist = (!s.artist.is_empty()).then(|| (format::ellipsize(&s.artist, 18), TEXT_2));
-        return Some((Icon::Note, MEDIA, s.title.clone(), artist, true));
+        return Some((Icon::Note, MEDIA, s.title.clone(), artist, true, None));
     }
-    let g = m.glance()?;
+    // The glance due now, or the next one with something to say, so the
+    // notch never turns to an empty face.
+    let all = m.glances();
+    (0..all.len()).find_map(|i| glance_line(m, all[(m.carousel + i) % all.len()]))
+}
+
+fn glance_line(m: &Model, g: Glance) -> Option<NotchLine> {
     match g {
         Glance::Weather => {
             let w = m.weather.as_ref()?;
             let rain = w.rain_chance.filter(|r| *r >= 40).map(|r| (format!("rain {r}%"), PORTS));
-            Some((condition_icon(w.condition), PORTS, format!("{:.0}° · {}", w.temp_c, w.description), rain, false))
+            Some((condition_icon(w.condition), PORTS, format!("{:.0}° · {}", w.temp_c, w.description), rain, false, None))
         }
         Glance::Quote(i) => {
             let item = m.config.finance.watchlist.get(i)?;
@@ -474,12 +486,13 @@ fn notch_line(m: &Model) -> Option<NotchLine> {
                 format!("{} {}", format::ellipsize(&name, 16), crate::finance::format_price(q)),
                 Some((crate::finance::format_change(q.change_pct), color)),
                 false,
+                (q.points.len() >= 2).then(|| q.points.clone()),
             ))
         }
         Glance::Todo => {
             let open: Vec<&TodoItem> = m.todos.iter().filter(|t| !t.done).collect();
             let first = open.first()?;
-            Some((Icon::Todo, OK, first.text.clone(), Some((format!("{} left", open.len()), TEXT_2)), false))
+            Some((Icon::Todo, OK, first.text.clone(), Some((format!("{} left", open.len()), TEXT_2)), false, None))
         }
         Glance::Calendar => {
             let e = m.next_event_within(36 * 3600)?;
@@ -495,21 +508,44 @@ fn notch_line(m: &Model) -> Option<NotchLine> {
                     format!("{}{:02}:{:02}", if day > 0 { "tmr " } else { "" }, s / 3600, s % 3600 / 60)
                 }
             };
-            Some((Icon::Calendar, CODER, e.title.clone(), Some((when, CODER)), false))
+            Some((Icon::Calendar, CODER, e.title.clone(), Some((when, CODER)), false, None))
         }
         Glance::Prayer => {
-            let (day, now) = (m.prayer_day?, m.local_minute()?);
+            let now = m.local_minute()?;
             if let Some((what, t)) = m.fasting() {
                 let left = (t - now).max(0.0).round() as i64;
                 let detail = if left < 60 { format!("in {left}m") } else { format!("in {}h{:02}", left / 60, left % 60) };
-                return Some((Icon::Moon, OK, format!("{what} {}", crate::prayer::hhmm(t.rem_euclid(1440.0))), Some((detail, OK)), false));
+                return Some((
+                    Icon::Moon,
+                    OK,
+                    format!("{what} {}", crate::prayer::hhmm(t.rem_euclid(1440.0))),
+                    Some((detail, OK)),
+                    false,
+                    None,
+                ));
             }
-            let (p, t) = day.next(now)?;
+            // After Isya: tomorrow's Subuh.
+            let (p, t) = m.next_prayer()?;
             let left = (t - now).max(0.0).round() as i64;
             let detail = if left < 60 { format!("in {left}m") } else { format!("in {}h{:02}", left / 60, left % 60) };
-            Some((Icon::Moon, OK, format!("{} {}", p.name(), crate::prayer::hhmm(t)), Some((detail, TEXT_2)), false))
+            Some((
+                Icon::Moon,
+                OK,
+                format!("{} {}", p.name(), crate::prayer::hhmm(t.rem_euclid(1440.0))),
+                Some((detail, TEXT_2)),
+                false,
+                None,
+            ))
         }
     }
+}
+
+/// A sparkline's points, scaled to fill `r` (at least two values).
+fn spark_points(r: Rect, values: &[f32]) -> Vec<Point> {
+    let (lo, hi) = values.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    let span = (hi - lo).max(f32::EPSILON);
+    let n = (values.len() as f32 - 1.0).max(1.0);
+    values.iter().enumerate().map(|(i, v)| Point::new(r.x + r.w * i as f32 / n, r.bottom() - r.h * (v - lo) / span)).collect()
 }
 
 /// Square the top corners so the shape grows out of the screen's top edge.
@@ -758,6 +794,10 @@ fn media_tag(m: &Model, s: &MediaSession, edge: Edge, tm: &dyn TextMeasure) -> S
 }
 
 fn tag(m: &Model, edge: Edge, tm: &dyn TextMeasure) -> Scene {
+    // Hovered while something plays: the player alone, with its controls.
+    if let Some(s) = m.front_media().filter(|s| m.hover_tag && s.playing) {
+        return glance::player(m, s, edge, tm);
+    }
     // Hovered: everything worth knowing now, when there is more than one thing.
     if m.hover_tag {
         let items = glance::items(m);
@@ -2455,17 +2495,7 @@ fn finance_slip(m: &Model, b: &mut B, top: f32) -> f32 {
                 let spark = Rect::new(r.x + 130.0, r.y + 7.0, 60.0, 28.0);
                 b.prims.extend(soft::well(spark, 8.0));
                 if q.points.len() >= 2 {
-                    let (lo, hi) = q.points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
-                    let span = (hi - lo).max(f32::EPSILON);
-                    let n = q.points.len() as f32 - 1.0;
-                    let inner = spark.inset(6.0);
-                    let points = q
-                        .points
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| Point::new(inner.x + inner.w * i as f32 / n, inner.bottom() - inner.h * (v - lo) / span))
-                        .collect();
-                    b.prims.push(Prim::Polyline { points, width: 1.5, color, closed: false });
+                    b.prims.push(Prim::Polyline { points: spark_points(spark.inset(6.0), &q.points), width: 1.5, color, closed: false });
                 }
                 b.text_end(
                     Rect::new(r.x + 196.0, r.y + 4.0, r.w - 210.0, 18.0),
@@ -2867,6 +2897,30 @@ mod tests {
     }
 
     #[test]
+    fn market_glances_draw_a_sparkline() {
+        let mut m = Model::new(Config::default(), 3, 0);
+        m.config.dock.style = crate::config::Style::Notch;
+        let q = crate::finance::Quote {
+            symbol: "BTC-USD".into(),
+            name: String::new(),
+            price: 80_785.0,
+            change_pct: 1.5,
+            currency: "USD".into(),
+            kind: "CRYPTOCURRENCY".into(),
+            points: vec![1.0, 3.0, 2.0, 4.0, 3.5, 5.0, 4.0],
+        };
+        m.update(0, Event::Quotes(vec![q]));
+        m.update(0, Event::TodoAdded("Buy rice".into()));
+        m.state = IslandState::Orb;
+        let lines = |s: &Scene| s.prims.iter().filter(|p| matches!(p, Prim::Polyline { points, .. } if points.len() == 7)).count();
+        assert_eq!(lines(&build(&m, Edge::Top, &ApproxMeasure)), 1, "in the notch");
+        m.config.dock.style = crate::config::Style::Orb;
+        m.state = IslandState::Tag;
+        m.hover_tag = true;
+        assert_eq!(lines(&build(&m, Edge::Left, &ApproxMeasure)), 1, "in the glance");
+    }
+
+    #[test]
     fn notch_scenes_hang_from_the_top_edge() {
         for (name, s) in all_scenes().into_iter().filter(|(n, _)| n.starts_with("notch")) {
             assert!(s.flush, "{name}: flush with the edge");
@@ -3062,6 +3116,56 @@ mod tests {
         }
         assert!(row.size.w > 2.0 * row.size.h, "docked top: it widens");
         assert!(col.size.h > 2.0 * 40.0 - 1.0 && col.size.w < 320.0, "docked left: it grows downwards");
+    }
+
+    #[test]
+    fn the_glance_is_the_player_alone_while_music_plays() {
+        let mut m = Model::new(Config::default(), 3, 0);
+        m.update(0, Event::SetModule(ModuleId::Prayer, true));
+        m.update(0, Event::Clock { year: 2026, month: 10, day: 25, minutes: 600.0, utc_offset_min: 420, unix: 1_792_911_900 });
+        m.update(0, Event::TodoAdded("Buy rice".into()));
+        let song = |playing| MediaSession {
+            id: "a".into(),
+            app: "Spotify".into(),
+            title: "Song".into(),
+            playing,
+            can_play_pause: true,
+            can_next: true,
+            can_prev: true,
+            ..Default::default()
+        };
+        m.update(0, Event::Media(vec![song(true)]));
+        m.state = IslandState::Tag;
+        m.hover_tag = true;
+        for edge in [Edge::Top, Edge::Left] {
+            let s = build(&m, edge, &ApproxMeasure);
+            for want in [Action::MediaPrev, Action::MediaPlayPause, Action::MediaNext] {
+                assert!(s.hits.iter().any(|h| h.kind == HitKind::Click(want.clone())), "{edge:?}: {want:?}");
+            }
+            assert!(!s.hits.iter().any(|h| matches!(h.kind, HitKind::Click(Action::SelectSlip(_)))), "{edge:?}: nothing else");
+            assert!(s.hits.iter().any(|h| h.kind == HitKind::Slider(SliderTarget::Master)), "{edge:?}: volume");
+        }
+        // Seekable, a second player and the microphone in use.
+        let mut seekable = song(true);
+        seekable.can_seek = true;
+        seekable.duration_ms = 200_000;
+        let other = MediaSession { id: "b".into(), app: "Chrome".into(), title: "Video".into(), ..Default::default() };
+        m.update(20, Event::Media(vec![seekable, other]));
+        m.update(20, Event::Privacy(vec![(Device::Microphone, "Zoom".into())]));
+        m.state = IslandState::Tag;
+        m.hover_tag = true;
+        let s = build(&m, Edge::Top, &ApproxMeasure);
+        assert!(s.hits.iter().any(|h| h.kind == HitKind::Slider(SliderTarget::MediaSeek)));
+        assert!(s.hits.iter().any(|h| h.kind == HitKind::Click(Action::MediaSource(1))), "switch to the other player");
+        assert!(s.hits.iter().any(|h| h.kind == HitKind::Click(Action::SelectSlip(ModuleId::Privacy))), "mic warning on top");
+        assert!(s.prims.iter().any(|p| matches!(p, Prim::Text { text, .. } if text.contains("Zoom"))));
+        // Paused: the weather, markets, to-do … and no player.
+        m.update(10, Event::Media(vec![song(false)]));
+        m.state = IslandState::Tag;
+        m.hover_tag = true;
+        let s = build(&m, Edge::Top, &ApproxMeasure);
+        assert!(s.hits.iter().any(|h| h.kind == HitKind::Click(Action::SelectSlip(ModuleId::Todo))));
+        assert!(!s.hits.iter().any(|h| h.kind == HitKind::Click(Action::MediaPlayPause)));
     }
 
     #[test]

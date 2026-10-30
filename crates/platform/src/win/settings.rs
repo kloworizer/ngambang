@@ -59,6 +59,8 @@ const ID_WATCH_UP: usize = 44;
 const ID_WATCH_DOWN: usize = 45;
 const ID_WATCH_REMOVE: usize = 46;
 const ID_WATCH_LEVELS: usize = 47;
+const ID_REPO: usize = 50;
+const ID_ISSUES: usize = 51;
 /// Posted to the Settings window when "Use my location" finishes.
 const WM_LOCATED: u32 = WM_APP + 20;
 /// Posted when a symbol search finishes.
@@ -106,7 +108,11 @@ struct Page {
     accent: Color,
 }
 
-const PAGES: [Page; 9] = [
+/// Who made Ngambang, and where it lives (shown on the About page).
+const AUTHOR: &str = "Esha Indra";
+const REPO: &str = env!("CARGO_PKG_REPOSITORY");
+
+const PAGES: [Page; 11] = [
     Page { icon: Icon::Gear, title: "General", subtitle: "Startup, position and how the island behaves", accent: theme::MEDIA },
     Page { icon: Icon::Grid, title: "Modules", subtitle: "Turn modules on or off and set the order of their tabs", accent: theme::CODER },
     Page { icon: Icon::Note, title: "Media & clipboard", subtitle: "Now playing, volume and developer clipboard", accent: theme::MEDIA },
@@ -126,6 +132,13 @@ const PAGES: [Page; 9] = [
         subtitle: "Search shares, indices, crypto and currencies for your watchlist",
         accent: theme::GAME,
     },
+    Page {
+        icon: Icon::Grid,
+        title: "Notch & screen",
+        subtitle: "What the notch turns through, fullscreen apps and screen sharing",
+        accent: theme::PORTS,
+    },
+    Page { icon: Icon::Open, title: "About", subtitle: "Who made Ngambang and where to find it", accent: theme::MEDIA },
 ];
 
 /// The Settings page that configures a module.
@@ -171,6 +184,13 @@ struct Controls {
     asr: HWND,
     reminder: HWND,
     weather_alerts: HWND,
+    rain_tags: HWND,
+    notch_glances: HWND,
+    notch_glance_s: HWND,
+    hide_when_sharing: HWND,
+    snap: HWND,
+    fullscreen_ignore: HWND,
+    fullscreen_sink: HWND,
     quake_radius: HWND,
     update_check: HWND,
     feeds: HWND,
@@ -666,6 +686,7 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
     b.start_page(6);
     b.section("WEATHER & EARLY WARNINGS");
     let weather_alerts = b.check("Pop up disasters near my location", form.weather_alerts);
+    let rain_tags = b.check("Pop up shortly before rain starts", form.rain_tags);
     let quake_radius = b.edit("Earthquake radius (km)", &form.quake_radius_km);
     b.hint("Weather by Open-Meteo; warnings from GDACS and USGS. Nothing is fetched while offline.");
     b.section("UPDATES");
@@ -719,6 +740,32 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
     b.button_at("Set for selected", CTRL_X + 236, ly - 2, 150, ID_WATCH_LEVELS, false);
     b.y += 34;
 
+    // Notch & screen
+    b.start_page(9);
+    b.section("NOTCH");
+    let notch_glances = b.edit("Turns through", &form.notch_glances);
+    let notch_glance_s = b.edit("Seconds each", &form.notch_glance_s);
+    b.hint("Any of weather, markets, todo, calendar, prayer, in the order you want. Music always comes first while it plays.");
+    b.section("FULLSCREEN APPS & SHARING");
+    let hide_when_sharing = b.check("Hide while I share my screen in Zoom, Teams, Meet …", form.hide_when_sharing);
+    let snap = b.check("Snap to the middle and the ends of an edge while dragging", form.snap);
+    let fullscreen_ignore = b.edit("Never move for", &form.fullscreen_ignore);
+    let fullscreen_sink = b.edit("Sink instead of moving for", &form.fullscreen_sink);
+    b.hint("Program names separated by commas, like obs64.exe, vlc.exe.");
+
+    // About
+    b.start_page(10);
+    b.section("NGAMBANG");
+    for (label, value) in [("Version", ngambang_core::VERSION), ("Made by", AUTHOR), ("Source code", REPO)] {
+        let y = b.y;
+        b.label_at(label, y);
+        b.make(w!("STATIC"), value, 0, WINDOW_EX_STYLE(0), (CTRL_X, y + 5, CTRL_W, 20), 0);
+        b.grow(y + 28);
+        b.y += 32;
+    }
+    b.buttons(&[("Open on GitHub", ID_REPO), ("Report an issue", ID_ISSUES)]);
+    b.hint("An edge-docked floating island for Windows. MIT + Commons Clause licence; see LICENSE and THIRD_PARTY_NOTICES.md.");
+
     // Footer, on every page.
     b.page = PAGES.len();
     let footer: Vec<HWND> = vec![
@@ -767,6 +814,13 @@ fn create(owner: HWND, cfg: &Config, start_page: usize) -> windows::core::Result
         asr,
         reminder,
         weather_alerts,
+        rain_tags,
+        notch_glances,
+        notch_glance_s,
+        hide_when_sharing,
+        snap,
+        fullscreen_ignore,
+        fullscreen_sink,
         quake_radius,
         update_check,
         feeds,
@@ -925,6 +979,13 @@ impl Settings {
             },
             low_battery: text(c.low_battery),
             network_tags: checked(c.network_tags),
+            notch_glances: text(c.notch_glances),
+            notch_glance_s: text(c.notch_glance_s),
+            fullscreen_ignore: text(c.fullscreen_ignore),
+            fullscreen_sink: text(c.fullscreen_sink),
+            hide_when_sharing: checked(c.hide_when_sharing),
+            snap: checked(c.snap),
+            rain_tags: checked(c.rain_tags),
         }
     }
 
@@ -947,6 +1008,7 @@ impl Settings {
                     "Earthquake radius" => 6,
                     "Calendar address" | "Event reminder" | "Days ahead" => 7,
                     "Price move" => 8,
+                    "Notch glances" | "Notch glance" | "Never move for" | "Sink instead of moving for" => 9,
                     _ => self.page,
                 };
                 self.show_page(page);
@@ -1423,6 +1485,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 ID_CANCEL => unsafe {
                     let _ = DestroyWindow(hwnd);
                 },
+                ID_REPO => system::shell_open(REPO),
+                ID_ISSUES => system::shell_open(&format!("{REPO}/issues")),
                 // A notch starts in the middle of the top edge.
                 ID_STYLE if code == CBN_SELCHANGE => {
                     with(|s| {

@@ -105,6 +105,60 @@ const GAME_DIRS: &[&str] = &[
     "\\hoyoplay\\games\\",
 ];
 
+/// Where the island goes while an app is fullscreen, by the user's lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Placement {
+    /// Move to another display (or sink), as `dock` says.
+    #[default]
+    Auto,
+    /// Listed in `dock.fullscreen_ignore`: stay where it is, as it is.
+    Stay,
+    /// Listed in `dock.fullscreen_sink`: sink to the Seam, never move.
+    Sink,
+}
+
+pub fn placement(path: &str, dock: &crate::config::DockConfig) -> Placement {
+    let exe = crate::format::exe_name(path);
+    let listed = |list: &[String]| list.iter().any(|g| crate::format::exe_name(g) == exe);
+    if listed(&dock.fullscreen_ignore) {
+        Placement::Stay
+    } else if listed(&dock.fullscreen_sink) {
+        Placement::Sink
+    } else {
+        Placement::Auto
+    }
+}
+
+/// Window classes that only exist while a meeting app shares the screen.
+const SHARING_CLASSES: &[&str] = &[
+    // Zoom's floating toolbar and the green border around what is shared.
+    "ZPFloatToolbarClass",
+    "ZPShareBorderWndClass",
+];
+
+/// Window titles (lowercase parts) that only exist while sharing: the
+/// browser's "meet.google.com is sharing your screen" bar, Teams' sharing
+/// control bar, Zoom's share toolbar, Webex's sharing bar.
+const SHARING_TITLES: &[&str] = &[
+    "is sharing your screen",
+    "is sharing a window",
+    "is sharing this tab",
+    "is sharing your tab",
+    "sedang membagikan layar",
+    "sharing control bar",
+    "zoom share toolbar",
+    "you're sharing",
+];
+
+/// A top-level window that says the screen is being shared.
+pub fn is_sharing_window(class: &str, title: &str) -> bool {
+    if SHARING_CLASSES.iter().any(|c| c.eq_ignore_ascii_case(class)) {
+        return true;
+    }
+    let title = title.to_lowercase();
+    !title.is_empty() && SHARING_TITLES.iter().any(|t| title.contains(t))
+}
+
 /// `path` is the full executable path (a bare name also works).
 pub fn classify(path: &str, signals: Signals, cfg: &GameConfig) -> FullscreenKind {
     let exe = crate::format::exe_name(path);
@@ -133,6 +187,27 @@ mod tests {
     use super::*;
 
     const NONE: Signals = Signals { exclusive_d3d: false, gpu_3d_pct: None };
+
+    #[test]
+    fn sharing_windows() {
+        assert!(is_sharing_window("Chrome_WidgetWin_1", "meet.google.com is sharing your screen."));
+        assert!(is_sharing_window("TeamsWebView", "Sharing control bar | Microsoft Teams"));
+        assert!(is_sharing_window("ZPFloatToolbarClass", ""));
+        assert!(!is_sharing_window("Chrome_WidgetWin_1", "Google Meet - Daily standup"));
+        assert!(!is_sharing_window("Notepad", ""));
+    }
+
+    #[test]
+    fn placement_follows_the_lists() {
+        let dock = crate::config::DockConfig {
+            fullscreen_ignore: vec!["OBS64.exe".into()],
+            fullscreen_sink: vec!["C:\\Games\\vlc.exe".into()],
+            ..Default::default()
+        };
+        assert_eq!(placement("C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe", &dock), Placement::Stay);
+        assert_eq!(placement("D:\\vlc.exe", &dock), Placement::Sink);
+        assert_eq!(placement("chrome.exe", &dock), Placement::Auto);
+    }
 
     #[test]
     fn overlays_are_ignored() {

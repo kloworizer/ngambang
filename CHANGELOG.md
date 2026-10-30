@@ -6,6 +6,52 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-30
+
+### Added
+- **A full player in the glance.** While music plays, hovering shows the
+  player alone: cover, title, artist and ⏮ ⏯ ⏭, the position bar to drag
+  (seek), the player's own volume slider and, when several apps play, a dot
+  for each to switch between them.
+- **Microphone and camera on top.** If a microphone or camera is in use while
+  music plays, a red line above the player says which app has it; click it
+  for the Privacy slip.
+- **Tomorrow's Subuh after Isya.** The notch and the glance count down to
+  the next dawn prayer instead of going quiet for the night.
+- **Rain soon.** A short pop-up ("Rain in about 20 min") when the 15-minute
+  forecast says rain starts within the hour; once per shower.
+  `weather.rain_tags`, Settings ▸ Weather & updates.
+- **Sparklines in the market glance**, in the notch and in the hover list.
+- **Choose what the notch turns through**, in which order and for how long
+  (`dock.notch_glances`, `dock.notch_glance_s`; Settings ▸ Notch & screen).
+- **Fullscreen lists.** `dock.fullscreen_ignore` names apps that never move
+  or sink the island (a streaming tool, say); `dock.fullscreen_sink` names
+  apps that sink it to a line instead of moving it to another display.
+- **Hide while sharing the screen.** While a meeting app shares your screen
+  (Zoom, Teams, Google Meet in the browser …) the island hides and comes
+  back when sharing stops. It only looks while a microphone or camera is in
+  use. `dock.hide_when_sharing`.
+- **Snap while dragging** to the start, middle and end of an edge
+  (`dock.snap`).
+- **Notch & screen** page in Settings for the options above.
+- **About page in Settings**: the version, the author (Esha Indra) and the
+  GitHub repository, with buttons to open it or report an issue.
+
+### Changed
+- **The glance follows the music.** While something plays, hovering the
+  island shows only the player. When nothing plays, it lists the weather,
+  markets, to-do, calendar, prayer time and the rest as before.
+- **The glance can be dragged.** Pressing an item and moving the pointer
+  drags the island; a press that does not move still opens that item's slip.
+
+### Fixed
+- With a fullscreen app on the home display, clicking an app (or the island)
+  on the other display no longer brings the island back over the fullscreen
+  app; it returns only when the fullscreen app closes, is minimised or
+  another app comes to the front on that display.
+- The notch no longer goes blank: a glance with nothing to say gives way to
+  the next one.
+
 ## [0.1.9] - 2026-10-26
 
 ### Added

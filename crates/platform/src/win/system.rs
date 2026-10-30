@@ -7,8 +7,10 @@ use std::time::{Duration, Instant};
 
 use ngambang_core::model::{Event, GpuStats};
 use windows::core::{s, w, GUID, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{LocalFree, HLOCAL, HWND, RECT};
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONULL};
+use windows::Win32::Foundation::{LocalFree, HLOCAL, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
+};
 use windows::Win32::NetworkManagement::IpHelper::{
     GetBestRoute, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho, ICMP_ECHO_REPLY, MIB_IPFORWARDROW,
 };
@@ -19,60 +21,104 @@ use windows::Win32::System::Registry::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_MEDIA_PLAY_PAUSE,
 };
-use windows::Win32::UI::Shell::{
-    SHQueryUserNotificationState, ShellExecuteW, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
-};
+use windows::Win32::UI::Shell::{SHQueryUserNotificationState, ShellExecuteW, QUNS_RUNNING_D3D_FULL_SCREEN};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsZoomed, GWL_STYLE, SW_SHOWNORMAL,
-    WS_CAPTION,
+    EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+    IsIconic, IsWindow, IsWindowVisible, IsZoomed, GWL_STYLE, SW_SHOWNORMAL, WS_CAPTION,
 };
 
 use super::util::{process_path, Bus};
 
-/// The foreground window covers its whole monitor (and is not the desktop).
-/// Returns the executable path and process id of the fullscreen app.
-pub fn fullscreen_app(ours: HWND, island_monitor: windows::Win32::Graphics::Gdi::HMONITOR) -> Option<(String, u32)> {
+/// A fullscreen app on the island's monitor: the foreground window when it
+/// covers that monitor (and is not the desktop), or else `last` (the one
+/// found before) while it still covers it and the focus is on another
+/// display or the island itself. Clicking an app on the second monitor
+/// leaves the game or video on the first one where it was.
+/// Returns the executable path, process id and window of the fullscreen app.
+pub fn fullscreen_app(ours: HWND, island_monitor: HMONITOR, last: Option<HWND>) -> Option<(String, u32, HWND)> {
     unsafe {
         let fg = GetForegroundWindow();
-        if fg.0.is_null() || fg == ours {
-            return None;
+        if !fg.0.is_null() && fg != ours && !is_shell(fg) && covers(fg, island_monitor) {
+            return Some(app_of(fg));
         }
-        let mut class = [0u16; 64];
-        let n = GetClassNameW(fg, &mut class) as usize;
-        let class = String::from_utf16_lossy(&class[..n]);
-        if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
-            return None;
-        }
-        // A maximized window with a title bar covers the screen only when the
-        // taskbar hides itself; that is ordinary work, not a fullscreen app.
-        let style = GetWindowLongW(fg, GWL_STYLE) as u32;
-        if IsZoomed(fg).as_bool() && style & WS_CAPTION.0 == WS_CAPTION.0 {
-            return None;
-        }
-        let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONULL);
-        if mon.is_invalid() || mon != island_monitor {
-            return None;
-        }
-        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-        if !GetMonitorInfoW(mon, &mut mi).as_bool() {
-            return None;
-        }
-        let mut r = RECT::default();
-        GetWindowRect(fg, &mut r).ok()?;
-        let covers =
-            r.left <= mi.rcMonitor.left && r.top <= mi.rcMonitor.top && r.right >= mi.rcMonitor.right && r.bottom >= mi.rcMonitor.bottom;
-        let busy = matches!(SHQueryUserNotificationState(), Ok(s) if s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_BUSY || s == QUNS_PRESENTATION_MODE);
-        if !covers && !busy {
-            return None;
-        }
-        if !covers {
-            // "Busy" alone can mean another monitor; only trust it with a cover.
-            return None;
-        }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(fg, Some(&mut pid));
-        Some((process_path(pid).unwrap_or_else(|| format!("pid{pid}.exe")), pid))
+        let last = last.filter(|w| *w != fg && still_up(*w) && covers(*w, island_monitor))?;
+        // The focus moved: only to another display (or to us) keeps the app in front.
+        let focus = if fg.0.is_null() || fg == ours || is_shell(fg) {
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+        } else {
+            MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST)
+        };
+        (fg == ours || focus != island_monitor).then(|| app_of(last))
     }
+}
+
+/// A meeting app is sharing the screen: one of its sharing toolbars or
+/// "… is sharing your screen" bars is up.
+pub fn screen_shared() -> bool {
+    unsafe extern "system" fn visit(w: HWND, data: LPARAM) -> windows::core::BOOL {
+        let found = &mut *(data.0 as *mut bool);
+        if IsWindowVisible(w).as_bool() {
+            let mut class = [0u16; 64];
+            let n = GetClassNameW(w, &mut class) as usize;
+            let mut title = [0u16; 128];
+            let t = GetWindowTextW(w, &mut title) as usize;
+            if ngambang_core::games::is_sharing_window(&String::from_utf16_lossy(&class[..n]), &String::from_utf16_lossy(&title[..t])) {
+                *found = true;
+                return false.into();
+            }
+        }
+        true.into()
+    }
+    let mut found = false;
+    unsafe {
+        let _ = EnumWindows(Some(visit), LPARAM(&mut found as *mut bool as isize));
+    }
+    found
+}
+
+/// The desktop and the taskbars.
+unsafe fn is_shell(w: HWND) -> bool {
+    let mut class = [0u16; 64];
+    let n = GetClassNameW(w, &mut class) as usize;
+    let class = String::from_utf16_lossy(&class[..n]);
+    matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd")
+}
+
+/// Still there, shown and not minimized.
+unsafe fn still_up(w: HWND) -> bool {
+    IsWindow(Some(w)).as_bool() && IsWindowVisible(w).as_bool() && !IsIconic(w).as_bool()
+}
+
+/// The window covers the whole of `monitor`.
+unsafe fn covers(w: HWND, monitor: HMONITOR) -> bool {
+    // A maximized window with a title bar covers the screen only when the
+    // taskbar hides itself; that is ordinary work, not a fullscreen app.
+    let style = GetWindowLongW(w, GWL_STYLE) as u32;
+    if IsZoomed(w).as_bool() && style & WS_CAPTION.0 == WS_CAPTION.0 {
+        return false;
+    }
+    let mon = MonitorFromWindow(w, MONITOR_DEFAULTTONULL);
+    if mon.is_invalid() || mon != monitor {
+        return false;
+    }
+    let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if !GetMonitorInfoW(mon, &mut mi).as_bool() {
+        return false;
+    }
+    let mut r = RECT::default();
+    if GetWindowRect(w, &mut r).is_err() {
+        return false;
+    }
+    // "Busy" from the shell alone can mean another monitor; only a cover counts.
+    r.left <= mi.rcMonitor.left && r.top <= mi.rcMonitor.top && r.right >= mi.rcMonitor.right && r.bottom >= mi.rcMonitor.bottom
+}
+
+unsafe fn app_of(w: HWND) -> (String, u32, HWND) {
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(w, Some(&mut pid));
+    (process_path(pid).unwrap_or_else(|| format!("pid{pid}.exe")), pid, w)
 }
 
 /// Windows reports an exclusive Direct3D fullscreen app (a classic game).

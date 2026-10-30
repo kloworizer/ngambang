@@ -59,6 +59,15 @@ pub struct Form {
     /// Percent, 0.5–50.
     pub move_pct: String,
     pub news: bool,
+    /// What the notch turns through, comma separated keys.
+    pub notch_glances: String,
+    pub notch_glance_s: String,
+    /// Executable names, comma separated.
+    pub fullscreen_ignore: String,
+    pub fullscreen_sink: String,
+    pub hide_when_sharing: bool,
+    pub snap: bool,
+    pub rain_tags: bool,
 }
 
 /// Colours offered for calendars, with names for the list.
@@ -154,6 +163,13 @@ impl Form {
             price_alerts: c.finance.price_alerts,
             move_pct: format!("{}", c.finance.move_pct),
             news: c.finance.news,
+            notch_glances: c.dock.notch_glances.join(", "),
+            notch_glance_s: c.dock.notch_glance_s.to_string(),
+            fullscreen_ignore: c.dock.fullscreen_ignore.join(", "),
+            fullscreen_sink: c.dock.fullscreen_sink.join(", "),
+            hide_when_sharing: c.dock.hide_when_sharing,
+            snap: c.dock.snap,
+            rain_tags: c.weather.rain_tags,
         }
     }
 
@@ -239,6 +255,28 @@ impl Form {
                 t
             })
             .collect();
+        let mut glances = Vec::new();
+        for k in self.notch_glances.split([',', ' ']).map(|k| k.trim().to_ascii_lowercase()).filter(|k| !k.is_empty()) {
+            if !crate::config::NOTCH_GLANCES.contains(&k.as_str()) {
+                return Err(format!("Notch glances: \"{k}\" is not one of {}", crate::config::NOTCH_GLANCES.join(", ")));
+            }
+            if !glances.contains(&k) {
+                glances.push(k);
+            }
+        }
+        let glance_s = number("Notch glance", &self.notch_glance_s, 3, 60)?;
+        let exes = |field: &str, text: &str| -> Result<String, String> {
+            let mut out = Vec::new();
+            for e in text.split([',', ';']).map(str::trim).filter(|e| !e.is_empty()) {
+                if e.contains(['"', '\\', '/']) || !e.to_ascii_lowercase().ends_with(".exe") {
+                    return Err(format!("{field}: list program names like obs64.exe, separated by commas"));
+                }
+                out.push(toml_str(e));
+            }
+            Ok(format!("[{}]", out.join(", ")))
+        };
+        let fullscreen_ignore = exes("Never move for", &self.fullscreen_ignore)?;
+        let fullscreen_sink = exes("Sink instead of moving for", &self.fullscreen_sink)?;
         // The default order is written as [] so the file stays short.
         let order: Vec<String> =
             if self.module_order == ModuleId::ALL { Vec::new() } else { self.module_order.iter().map(|m| toml_str(m.key())).collect() };
@@ -251,6 +289,13 @@ impl Form {
             ("dock", "hide_in_fullscreen", b(self.hide_in_fullscreen)),
             ("dock", "move_in_fullscreen", b(self.move_in_fullscreen)),
             ("dock", "style", toml_str(self.style.name())),
+            ("dock", "notch_glances", format!("[{}]", glances.iter().map(|k| toml_str(k)).collect::<Vec<_>>().join(", "))),
+            ("dock", "notch_glance_s", glance_s.to_string()),
+            ("dock", "fullscreen_ignore", fullscreen_ignore),
+            ("dock", "fullscreen_sink", fullscreen_sink),
+            ("dock", "hide_when_sharing", b(self.hide_when_sharing)),
+            ("dock", "snap", b(self.snap)),
+            ("weather", "rain_tags", b(self.rain_tags)),
             ("motion", "reduce", b(self.reduce_motion)),
             ("privacy", "hide_from_capture", b(self.hide_from_capture)),
             ("media", "track_tags", b(self.track_tags)),
@@ -347,6 +392,13 @@ mod tests {
         form.price_alerts = false;
         form.move_pct = "2,5".into();
         form.news = false;
+        form.notch_glances = "prayer, Weather".into();
+        form.notch_glance_s = "10".into();
+        form.fullscreen_ignore = "obs64.exe, Discord.exe".into();
+        form.fullscreen_sink = "vlc.exe".into();
+        form.hide_when_sharing = false;
+        form.snap = false;
+        form.rain_tags = false;
         let (c, w) = Config::parse(&apply(DEFAULT_TOML, &form.edits().unwrap()));
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(c.dock.edge, Edge::Top);
@@ -375,6 +427,11 @@ mod tests {
         assert!(!c.dock.move_in_fullscreen);
         assert!(!c.finance.price_alerts && !c.finance.news);
         assert_eq!(c.finance.move_pct, 2.5);
+        assert_eq!(c.dock.notch_glances, vec!["prayer", "weather"]);
+        assert_eq!(c.dock.notch_glance_s, 10);
+        assert_eq!(c.dock.fullscreen_ignore, vec!["obs64.exe", "Discord.exe"]);
+        assert_eq!(c.dock.fullscreen_sink, vec!["vlc.exe"]);
+        assert!(!c.dock.hide_when_sharing && !c.dock.snap && !c.weather.rain_tags);
         let mut bad = Form::from_config(&Config::default(), true);
         bad.move_pct = "90".into();
         assert!(bad.edits().unwrap_err().starts_with("Price move"));
@@ -437,6 +494,9 @@ mod tests {
         check(Form { power_plan: "nope".into(), ..base.clone() }, "Power plan");
         check(Form { prayer_lat: "95".into(), ..base.clone() }, "Latitude");
         check(Form { prayer_lon: "east".into(), ..base.clone() }, "Longitude");
+        check(Form { notch_glances: "news".into(), ..base.clone() }, "Notch glances");
+        check(Form { notch_glance_s: "1".into(), ..base.clone() }, "Notch glance");
+        check(Form { fullscreen_ignore: "C:\\obs.exe".into(), ..base.clone() }, "Never move");
         check(Form { prayer_reminder: "90".into(), ..base }, "Prayer reminder");
     }
 }

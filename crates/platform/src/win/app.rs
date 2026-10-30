@@ -194,6 +194,8 @@ struct App {
     last_fullscreen: Option<String>,
     /// The fullscreen app's process, to notice when it exits.
     last_fullscreen_pid: Option<u32>,
+    /// The fullscreen app's window: it stays in front while the focus is on another display.
+    last_fullscreen_hwnd: Option<HWND>,
     last_probe_ms: u64,
     taskbar_created: u32,
     reduce_motion: bool,
@@ -454,6 +456,7 @@ impl App {
             state,
             last_fullscreen: None,
             last_fullscreen_pid: None,
+            last_fullscreen_hwnd: None,
             last_probe_ms: 0,
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
             reduce_motion: system::reduce_motion(),
@@ -1121,7 +1124,10 @@ impl App {
     /// Move to another display while a fullscreen app covers the home one
     /// (when that is on and there is another display), or back home.
     fn update_displaced(&mut self) {
-        let want = if self.covered && self.model.config.dock.move_in_fullscreen { other_monitor(self.home) } else { None };
+        // An app listed to sink the island keeps it on its own display.
+        let sink = self.last_fullscreen.as_deref().map(|p| ngambang_core::games::placement(p, &self.model.config.dock))
+            == Some(ngambang_core::games::Placement::Sink);
+        let want = if self.covered && !sink && self.model.config.dock.move_in_fullscreen { other_monitor(self.home) } else { None };
         if want == self.displaced {
             return;
         }
@@ -1136,7 +1142,9 @@ impl App {
     }
 
     fn check_fullscreen(&mut self) {
-        let app = system::fullscreen_app(self.hwnd, self.home);
+        let app = system::fullscreen_app(self.hwnd, self.home, self.last_fullscreen_hwnd);
+        self.last_fullscreen_hwnd = app.as_ref().map(|(_, _, w)| *w);
+        let app = app.map(|(p, pid, _)| (p, pid));
         let path = app.as_ref().map(|(p, _)| p.clone());
         if path == self.last_fullscreen {
             // Same app: a quiet one may still turn out to be a game once it loads.
@@ -1164,21 +1172,36 @@ impl App {
         let signals = ngambang_core::games::Signals { exclusive_d3d: system::exclusive_d3d(), gpu_3d_pct: None };
         // Overlays (Snipping Tool, Start) don't move the island; anything else
         // moves it away first, so it never sinks or drops its tags meanwhile.
+        // Apps listed to leave the island alone don't cover it either.
         let kind = ngambang_core::games::classify(&path, signals, &self.model.config.game);
-        self.covered = kind != ngambang_core::games::FullscreenKind::Ignore;
+        let stay = ngambang_core::games::placement(&path, &self.model.config.dock) == ngambang_core::games::Placement::Stay;
+        self.covered = kind != ngambang_core::games::FullscreenKind::Ignore && !stay;
         self.update_displaced();
         self.dispatch(Event::Fullscreen { active: true, exe: path.clone(), signals });
         // ... then measure the app's own 3D load; a busy GPU makes it a game.
         self.probe_gpu(path, pid);
     }
 
+    /// Hide while the screen is shared in a meeting. Only looked for while
+    /// a microphone or camera is in use (a meeting is on), so it costs
+    /// nothing the rest of the time.
+    fn check_sharing(&mut self) {
+        let look = self.model.config.dock.hide_when_sharing && !self.model.privacy.is_empty();
+        let sharing = look && system::screen_shared();
+        if sharing != self.model.sharing {
+            self.dispatch(Event::Sharing(sharing));
+        }
+    }
+
     fn probe_gpu(&mut self, path: String, pid: u32) {
         self.last_probe_ms = now_ms();
         let exclusive = system::exclusive_d3d();
         let (bus, ours, monitor) = (self.bus.clone(), self.hwnd.0 as isize, self.home.0 as isize);
+        let last = self.last_fullscreen_hwnd.map(|w| w.0 as isize);
         let _ = std::thread::Builder::new().name("ngambang-gpu-probe".into()).spawn(move || {
             let gpu = system::process_gpu_3d(pid);
-            let still = system::fullscreen_app(HWND(ours as *mut _), HMONITOR(monitor as *mut _)).is_some_and(|(p, _)| p == path);
+            let last = last.map(|w| HWND(w as *mut _));
+            let still = system::fullscreen_app(HWND(ours as *mut _), HMONITOR(monitor as *mut _), last).is_some_and(|(p, _, _)| p == path);
             if still && gpu.is_some_and(|g| g >= ngambang_core::games::GPU_GAME_PCT) {
                 bus.send(Event::Fullscreen {
                     active: true,
@@ -1230,7 +1253,8 @@ impl App {
 
     /// Where the cursor would dock the island: edge, offset and monitor name.
     /// A notch only slides along the top edge.
-    fn dock_at_cursor(notch: Option<Edge>) -> (Edge, f32, String) {
+    /// With `snap`, it lands on the start, middle or end of the edge when near one.
+    fn dock_at_cursor(notch: Option<Edge>, snap: bool) -> (Edge, f32, String) {
         let mut pt = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut pt);
@@ -1242,6 +1266,9 @@ impl App {
             edge = keep;
             offset = (((pt.x as f32 / scale - work.x) / work.w.max(1.0)).clamp(0.0, 1.0) * 1000.0).round() / 1000.0;
         }
+        if snap {
+            offset = layout::snap_offset(offset, if edge.is_vertical() { work.h } else { work.w });
+        }
         let monitor = if is_primary(mon) { "primary".to_string() } else { monitor_name(mon).unwrap_or_else(|| "primary".into()) };
         (edge, offset, monitor)
     }
@@ -1249,11 +1276,12 @@ impl App {
     /// Follow the cursor while dragging: the island moves along the nearest edge as you go.
     fn drag_to_cursor(&mut self) {
         let notch = (self.model.config.dock.style == Style::Notch).then_some(self.model.config.dock.edge);
-        let (edge, offset, monitor) = Self::dock_at_cursor(notch);
+        let (edge, offset, monitor) = Self::dock_at_cursor(notch, self.model.config.dock.snap);
         // Dropped somewhere new: that is home now, fullscreen app or not.
         if self.displaced.take().is_some() {
             self.covered = false;
             self.last_fullscreen = None;
+            self.last_fullscreen_hwnd = None;
             self.dispatch(Event::Fullscreen { active: false, exe: String::new(), signals: Default::default() });
             self.dispatch(Event::Displaced(false));
         }
@@ -1430,6 +1458,7 @@ impl App {
                     let _ = self.renderer.drop_outgoing();
                 } else if id == TIMER_FULLSCREEN {
                     self.check_fullscreen();
+                    self.check_sharing();
                 } else if id == TIMER_CLOCK {
                     self.check_clock();
                 } else if id == TIMER_TRIM {
@@ -1513,13 +1542,15 @@ impl App {
                         self.dispatch(Event::Slider(t, self.slider_value(r, x)));
                     }
                     hit => {
-                        // The orb, a tag's body and a slip's background all drag the island.
+                        // The orb, a tag's body, a glance's items and a slip's background
+                        // all drag the island; a press that does not move still clicks.
                         let action = match hit {
                             Some(HitKind::Click(a)) => Some(a),
                             _ => None,
                         };
                         let draggable = match &action {
                             None => matches!(self.model.state, IslandState::Slips | IslandState::Tag),
+                            Some(Action::SelectSlip(_)) => self.model.state == IslandState::Tag,
                             Some(a) => *a == Action::ToggleSlips,
                         };
                         let mut screen = POINT::default();
