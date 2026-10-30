@@ -837,6 +837,16 @@ pub struct Model {
     next_id: u64,
 }
 
+/// Output devices of audio enhancers that set the speakers' volume from
+/// their own device's volume (FxSound, and DFX before it).
+const ENHANCERS: &[&str] = &["fxsound", "dfx audio enhancer"];
+
+/// The output device belongs to an audio enhancer.
+pub fn is_enhancer(device: &str) -> bool {
+    let d = device.to_lowercase();
+    ENHANCERS.iter().any(|e| d.contains(e))
+}
+
 /// A media session (SMTC app id) and a mixer row belong to the same app.
 fn session_matches(session_id: &str, app: &AudioApp) -> bool {
     let id = session_id.to_ascii_lowercase();
@@ -1261,6 +1271,9 @@ impl Model {
                 let v = value.clamp(0.0, 1.0);
                 match target {
                     SliderTarget::Master => {
+                        if self.enhancer_output() {
+                            self.unstack_player_volume(fx);
+                        }
                         self.mixer.master.level = v;
                         fx.push(Effect::SetMasterVolume(v));
                         self.volume_target = None;
@@ -1290,8 +1303,12 @@ impl Model {
                 }
                 IslandState::Orb | IslandState::Tag if self.enabled(ModuleId::Mixer) || self.enabled(ModuleId::Media) => {
                     let step = self.config.media.volume_step as f32 / 100.0;
-                    // The player's own volume; the system volume when no player can be matched.
-                    match self.player_app().map(|a| (a.pid, a.volume.level)) {
+                    // The player's own volume; the system volume when no player can be
+                    // matched, or when an enhancer like FxSound follows the system volume.
+                    if self.enhancer_output() {
+                        self.unstack_player_volume(fx);
+                    }
+                    match self.volume_app().map(|a| (a.pid, a.volume.level)) {
                         Some((pid, level)) => {
                             let v = (level + notches as f32 * step).clamp(0.0, 1.0);
                             if let Some(a) = self.mixer.apps.iter_mut().find(|a| a.pid == pid) {
@@ -1747,6 +1764,37 @@ impl Model {
     pub fn player_app(&self) -> Option<&AudioApp> {
         let s = self.front_media()?;
         self.mixer.apps.iter().find(|a| session_matches(&s.id, a))
+    }
+
+    /// The output is an audio enhancer (FxSound) that applies the system
+    /// volume itself.
+    pub fn enhancer_output(&self) -> bool {
+        is_enhancer(&self.mixer.device)
+    }
+
+    /// The app whose volume the wheel and the player glance change; None
+    /// means the system volume.
+    pub fn volume_app(&self) -> Option<&AudioApp> {
+        use crate::config::WheelTarget;
+        match self.config.media.wheel {
+            WheelTarget::System => None,
+            WheelTarget::Auto if self.enhancer_output() => None,
+            _ => self.player_app(),
+        }
+    }
+
+    /// Behind an enhancer, a player turned down on its own multiplies with
+    /// the system volume the enhancer follows: put it back to full, so the
+    /// one volume the user sees is the one that counts.
+    fn unstack_player_volume(&mut self, fx: &mut Vec<Effect>) {
+        if self.volume_app().is_some() {
+            return;
+        }
+        let Some(pid) = self.player_app().filter(|a| a.volume.level < 0.999).map(|a| a.pid) else { return };
+        if let Some(a) = self.mixer.apps.iter_mut().find(|a| a.pid == pid) {
+            a.volume.level = 1.0;
+        }
+        fx.push(Effect::SetAppVolume(pid, 1.0));
     }
 
     fn click(&mut self, action: Action, fx: &mut Vec<Effect>) {
